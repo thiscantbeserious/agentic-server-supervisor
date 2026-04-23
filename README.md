@@ -1,59 +1,50 @@
-# Agentic Server Supervisor
+# Agentic Server Supervisor (Sentinel)
 
-A state-of-the-art, autonomous server monitoring system built on the **ZeroClaw** Rust framework. This supervisor (Server Sentinel) autonomously monitors resources, detects anomalies using AI, and manages alerts across any LLM provider (Gemini, Anthropic, OpenAI, etc.).
+An opinionated, autonomous supervisor node implementation built on the **ZeroClaw** framework. This project transforms a standard server into an intelligent, self-monitoring node capable of real-time resource analysis, log investigation, and autonomous alerting.
+
+Currently in **MVP state**, focusing on robust local execution and secure system access.
+
+## 🎯 Intent & Vision
+
+This is not just an agent; it is a dedicated **Supervisor Node**. 
+- **Current Foundation:** Based on the ZeroClaw engine for high-performance Rust execution.
+- **Opinionated Setup:** Pre-configured security boundaries, whitelisted monitoring tools, and read-only system-wide analysis.
+- **Management:** Controlled via a dedicated Rust-based CLI (`sentinel-cli`).
+- **Roadmap:** Future iterations will include a centralized management dashboard and a cross-agent mesh network for multi-node orchestration.
 
 ## 🏗️ Architecture
 
-- **Engine:** [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — High-performance, memory-safe Rust agent.
-- **Bootstrapping:** Automated via `cargo-binstall` for lightning-fast setup (Option A: Build from source fallback).
-- **Configuration:** Managed robustly via `tomato-toml` (preserves comments and formatting).
-- **AI Detection:** Integrated **MiniJinja** templating for context-aware autonomous tool discovery.
-- **Autonomy:** `Full` mode — The Sentinel acts independently within strict security boundaries.
-- **Security:** Hardware-specific identity, command whitelisting, and filesystem scoping.
+- **Core:** [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) (Model-agnostic AI runtime).
+- **Automation:** `Full` autonomy mode — the node acts independently within its whitelisted policy.
+- **Security:** Hardware-specific identity (`hostname[ip]`), strict command whitelisting, and read-only access to `/etc` and `/var/log`.
+- **Tooling:** Automated bootstrapping using `cargo-binstall` and template-driven AI tool discovery via `minijinja`.
 
-## 🚀 Quick Start
+## 🚀 Deployment
 
-### 1. One-Step Bootstrap
-Run the enhanced bootstrap script. It will install Rust, ZeroClaw, and the required TUI tools automatically:
+### 1. Bootstrap the Node
+Run the bootstrap script to install the environment and the `sentinel-cli` management tool:
 
 ```bash
 ./bootstrap.sh
 ```
 
-### 2. What happens during Bootstrap?
-- **Identity:** Auto-detects `hostname[ip]` to give the sentinel a unique name.
-- **Onboarding:** Interactive wizard to set your AI provider (uses Gemini CLI credentials by default).
-- **AI System Scan:** (Optional) ZeroClaw autonomously scans your specific OS to find relevant monitoring tools.
-- **Whitelist Approval:** You get the final say on which commands the agent is allowed to execute via a TUI checklist.
-- **Daemonization:** Optionally installs the sentinel as a systemd user service.
+### 2. Autonomous Capabilities
+During bootstrap, the Sentinel performs an **AI-driven system scan** to detect relevant monitoring tools (iostat, vmstat, etc.) and presents a final whitelist for your approval.
 
-## 🛡️ Security Policy
+## 🛠️ Node Management
 
-Configured in `config.toml` (which is ignored by Git to prevent leakage):
+All node operations are managed through `sentinel-cli`:
 
-- **Whitelisted Commands:** Strictly limited to monitoring tools (`df`, `free`, `iostat`, etc.).
-- **Filesystem Scoping:** Read-only access to `/etc/gemini-watcher/system/` and the local workspace.
-- **Confidentiality:** Runtime data (memory, sessions, state) is strictly excluded from version control.
+```bash
+sentinel-cli status   # Check service health
+sentinel-cli logs     # Tail active logs
+sentinel-cli restart  # Hot-reload configuration
+```
 
 ## 📂 Project Structure
 
-- `bootstrap.sh`: The central setup entry point.
-- `config.toml`: Master configuration and security gatekeeper.
-- `prompts/`: Jinja2 templates for AI interactions (e.g., `tool-autodetection.prompt`).
-- `workspace/`: 
-  - `AGENTS.md`: Role and personality definition.
-  - `SOPs/`: MarkDown-based monitoring procedures.
-  - `IDENTITY.md` / `SOUL.md`: Local machine identity (tracked).
-  - `memory/` / `sessions/`: Confidential runtime data (ignored).
-
-## 🛠️ Management
-
-Manage the sentinel service using the custom management CLI:
-
-```bash
-sentinel status
-sentinel logs
-sentinel restart
-```
-
-*(Future: Use `sentinel mesh` for cross-agent communication)*
+- `bootstrap.sh`: The automated deployment engine.
+- `sentinel-cli/`: Rust-based management utility.
+- `config.toml`: Master security policy (read-only system roots, whitelisted commands).
+- `workspace/`: Persistent node identity, SOPs, and role definitions.
+- `prompts/`: MiniJinja templates for autonomous tool discovery.

@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "sentinel")]
-#[command(about = "Agentic Server Supervisor Management CLI", long_about = None)]
+#[command(name = "sentinel-cli")]
+#[command(about = "Opinionated Management CLI for the Agentic Server Supervisor", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -11,17 +11,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Check the status of the Server Sentinel
+    /// Check the status of the Server Supervisor service
     Status,
-    /// Restart the Server Sentinel service
+    /// Restart the Supervisor service to apply configuration changes
     Restart,
-    /// View Sentinel service logs
+    /// Tail the Supervisor service logs
     Logs,
-    /// Manage mesh communication (Future)
-    Mesh {
-        #[arg(short, long)]
-        connect: Option<String>,
-    },
 }
 
 fn main() {
@@ -37,24 +32,13 @@ fn main() {
         Commands::Logs => {
             run_zeroclaw("service logs");
         }
-        Commands::Mesh { connect } => {
-            if let Some(peer) = connect {
-                println!("🚀 Connecting to mesh peer: {}", peer);
-                println!("ℹ️ Mesh channel plugin implementation pending...");
-            } else {
-                println!("🌐 Sentinel Mesh: Active (Scanning for peers)");
-            }
-        }
     }
 }
 
 fn run_zeroclaw(sub_cmd: &str) {
     let mut cmd = Command::new("zeroclaw");
-    
-    // Get the current directory to use as config-dir
     let current_dir = std::env::current_dir().expect("Failed to get current directory");
     
-    // We expect the user to run this from the project root
     cmd.arg("--config-dir")
        .arg(current_dir);
 
