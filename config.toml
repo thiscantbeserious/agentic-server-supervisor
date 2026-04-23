@@ -4,12 +4,7 @@
 schema_version = 2
 
 [providers]
-fallback = "gemini"
-
-[providers.models.gemini]
-model = "gemini-2.0-flash"
-temperature = 0.5
-timeout_secs = 60
+# Providers and models will be populated by 'zeroclaw onboard'
 
 [agent]
 name = "Server Sentinel"
@@ -18,21 +13,19 @@ compact_context = true
 
 [autonomy]
 level = "supervised"
-workspace_only = false  # Required to read system paths defined in allowed_roots
+workspace_only = false
 
-# Explicit command whitelist for health monitoring and investigation
+# Fallback command whitelist (will be augmented during bootstrap)
 allowed_commands = [
     "df", "free", "uptime", "cat", "head", "tail", "grep", "wc", "ls", 
     "find", "journalctl", "ss", "ip", "ping", "dig", "git", "ps"
 ]
 
-# Scoping access to specific read-only system paths and the project workspace
 allowed_roots = [
     "/etc/gemini-watcher/system/",
     "./"
 ]
 
-# Hard blocks on sensitive system areas
 forbidden_paths = [
     "/etc/shadow", "/etc/sudoers", "/root", "~/.ssh", "~/.gnupg", 
     "/var/lib/docker", "/proc/config.gz"
@@ -42,7 +35,6 @@ require_approval_for_medium_risk = true
 block_high_risk_commands = true
 
 [security.sandbox]
-# Use auto to detect Firejail/Bubblewrap/Landlock
 backend = "auto"
 
 [memory]
@@ -53,13 +45,11 @@ auto_save = true
 [cron]
 enabled = true
 catch_up_on_startup = true
-# Jobs will be defined via 'zeroclaw cron add' or in the jobs list here
 jobs = []
 
 [heartbeat]
 enabled = true
 interval_minutes = 30
-# The heartbeat will trigger the sentinel to check in even if no cron is due
 
 [observability]
 backend = "log"

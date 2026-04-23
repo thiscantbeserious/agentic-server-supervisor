@@ -3,45 +3,87 @@ set -e
 
 echo "🚀 Bootstrapping ZeroClaw for Agentic Server Supervisor..."
 
+# Ensure ~/.cargo/bin is in PATH for this session
+export PATH="$HOME/.cargo/bin:$PATH"
+
 # 1. Install ZeroClaw if not present
 if ! command -v zeroclaw &> /dev/null; then
   echo "📥 ZeroClaw not found. Installing via Option A (Clone + Local script)..."
   TMP_DIR=$(mktemp -d)
   git clone https://github.com/zeroclaw-labs/zeroclaw.git "$TMP_DIR/zeroclaw"
   cd "$TMP_DIR/zeroclaw"
-  
-  # Run the interactive installer
   ./install.sh
-  
   cd - > /dev/null
   rm -rf "$TMP_DIR"
   echo "✅ ZeroClaw installed."
-  echo "⚠️ Please ensure ~/.cargo/bin is in your PATH. You may need to run: source ~/.cargo/env"
 else
   echo "✅ ZeroClaw is already installed."
 fi
 
 # 2. Setup project-local structure
 echo "📂 Setting up local project workspace..."
+mkdir -p workspace/SOPs workspace/sessions workspace/memory workspace/state
 
-# Ensure necessary directories exist within the project
-mkdir -p workspace/SOPs
-mkdir -p workspace/sessions
-mkdir -p workspace/memory
-mkdir -p workspace/state
+# 3. Interactive Onboarding
+echo "🛠️ Starting ZeroClaw Onboarding..."
+echo "This will help you configure your AI provider and channels."
+zeroclaw onboard --config-dir "$(pwd)"
 
-# config.toml is already provided in the repo.
-if [ ! -f "config.toml" ]; then
-    echo "⚠️ Warning: config.toml not found. You may need to run 'zeroclaw onboard'."
+# 4. Auto-detect System Commands
+echo "🔍 Detecting potential read-only monitoring commands on your system..."
+
+CANDIDATES=(
+    "df" "free" "uptime" "cat" "head" "tail" "grep" "wc" "ls" "find" 
+    "journalctl" "ss" "ip" "ping" "dig" "git" "ps" "top" "htop" 
+    "vmstat" "iostat" "netstat" "lsof" "lsblk" "lscpu" "lsusb" 
+    "sensors" "who" "last" "nmcli" "timedatectl"
+)
+
+EXISTING_COMMANDS=()
+CHECKLIST_ITEMS=()
+
+for cmd in "${CANDIDATES[@]}"; do
+    if command -v "$cmd" &> /dev/null; then
+        EXISTING_COMMANDS+=("$cmd")
+        # By default, we mark them as ON
+        CHECKLIST_ITEMS+=("$cmd" "System tool" "ON")
+    fi
+done
+
+if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
+    echo "💡 Found ${#EXISTING_COMMANDS[@]} monitoring tools."
+    
+    # Use whiptail for the checkbox interface
+    SELECTED_COMMANDS=$(whiptail --title "Command Whitelist Configuration" \
+        --checklist "Select commands to allow the Server Sentinel to execute:" 20 60 12 \
+        "${CHECKLIST_ITEMS[@]}" 3>&1 1>&2 2>&3)
+
+    if [ $? -eq 0 ]; then
+        # Clean up the output (remove quotes)
+        CLEAN_LIST=$(echo "$SELECTED_COMMANDS" | tr -d '"')
+        
+        # Convert space-separated list to TOML array format
+        TOML_ARRAY="["
+        for cmd in $CLEAN_LIST; do
+            TOML_ARRAY+="\"$cmd\", "
+        done
+        TOML_ARRAY="${TOML_ARRAY%, }] " # Remove trailing comma and close
+        
+        echo "📝 Updating config.toml with selected commands..."
+        # Update the allowed_commands line in config.toml
+        # This assumes allowed_commands = [...] format
+        sed -i "s/^allowed_commands = .*/allowed_commands = $TOML_ARRAY/" config.toml
+        echo "✅ Command whitelist updated."
+    else
+        echo "⚠️ Selection cancelled. Keeping fallback commands."
+    fi
+else
+    echo "⚠️ No monitoring tools detected. Keeping fallback commands."
 fi
 
 echo ""
 echo "🎉 Bootstrap complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Next Steps:"
-echo "1. Run the interactive onboarding for this project:"
-echo "   zeroclaw onboard --config-dir \$(pwd)"
-echo ""
-echo "2. Once configured, you can start the server sentinel:"
-echo "   zeroclaw agent --config-dir \$(pwd)"
+echo "Your Server Sentinel is ready."
+echo "You can now start it with: zeroclaw agent --config-dir \$(pwd)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
