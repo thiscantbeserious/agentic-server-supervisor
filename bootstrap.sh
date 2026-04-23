@@ -50,6 +50,11 @@ else
   echo "✅ ZeroClaw is already installed ($(zeroclaw --version))."
 fi
 
+# 1.5 Install Local Management CLI (sentinel)
+echo "🛠️ Building local management CLI..."
+(cd cli && cargo install --path .)
+echo "✅ Local management CLI 'sentinel' installed."
+
 # 2. Setup project structure
 echo "📂 Setting up local project workspace..."
 mkdir -p workspace/SOPs workspace/sessions workspace/memory workspace/state

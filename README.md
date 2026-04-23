@@ -1,4 +1,4 @@
-# Agentic Server Supervisor (v2-ZeroClaw)
+# Agentic Server Supervisor
 
 A state-of-the-art, autonomous server monitoring system built on the **ZeroClaw** Rust framework. This supervisor (Server Sentinel) autonomously monitors resources, detects anomalies using AI, and manages alerts across any LLM provider (Gemini, Anthropic, OpenAI, etc.).
 
@@ -48,10 +48,12 @@ Configured in `config.toml` (which is ignored by Git to prevent leakage):
 
 ## 🛠️ Management
 
-Manage the sentinel service after installation:
+Manage the sentinel service using the custom management CLI:
 
 ```bash
-zeroclaw service status --config-dir $(pwd)
-zeroclaw service logs --config-dir $(pwd)
-zeroclaw service restart --config-dir $(pwd)
+sentinel status
+sentinel logs
+sentinel restart
 ```
+
+*(Future: Use `sentinel mesh` for cross-agent communication)*
