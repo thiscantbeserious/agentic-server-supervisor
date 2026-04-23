@@ -12,3 +12,4 @@ workspace/state/
 .DS_Store
 .idea/
 .vscode/
+.build/

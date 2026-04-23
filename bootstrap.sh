@@ -41,11 +41,25 @@ else
   echo "✅ minijinja-cli already installed."
 fi
 
-# 4. Install ZeroClaw
-echo "📥 Installing ZeroClaw from PR-branch (Gemini Fix #5106)..."
-echo "⏳ This will build from source to ensure you have the latest OAuth and rate-limit fixes."
-cargo install --git https://github.com/rareba/zeroclaw.git --branch fix/4879-gemini-oauth --locked --force
-echo "✅ ZeroClaw (PR-5106) installed."
+# 4. Install ZeroClaw (with Persistent Build Cache)
+echo "📥 Preparing ZeroClaw from PR-branch (Gemini Fix #5106)..."
+BUILD_DIR="$(pwd)/.build/zeroclaw"
+mkdir -p "$BUILD_DIR"
+
+if [ ! -d "$BUILD_DIR/.git" ]; then
+  echo "⏳ Cloning ZeroClaw repository..."
+  git clone https://github.com/rareba/zeroclaw.git "$BUILD_DIR" --branch fix/4879-gemini-oauth
+else
+  echo "🔄 Updating ZeroClaw source..."
+  (cd "$BUILD_DIR" && git pull origin fix/4879-gemini-oauth)
+fi
+
+echo "🏗️ Building ZeroClaw (this uses incremental caching)..."
+(cd "$BUILD_DIR" && cargo build --release -p zeroclawlabs)
+
+echo "📦 Installing ZeroClaw binary..."
+cp "$BUILD_DIR/target/release/zeroclaw" "$HOME/.cargo/bin/zeroclaw"
+echo "✅ ZeroClaw (PR-5106) installed and cached."
 
 # 5. Install Local Management CLI (sentinel-cli)
 echo "🛠️ Building local management CLI..."
