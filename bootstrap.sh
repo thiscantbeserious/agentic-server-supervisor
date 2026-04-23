@@ -42,13 +42,10 @@ else
 fi
 
 # 4. Install ZeroClaw
-if ! command -v zeroclaw &> /dev/null; then
-  echo "📥 ZeroClaw not found. Installing via cargo-binstall..."
-  cargo binstall -y https://github.com/zeroclaw-labs/zeroclaw --locked
-  echo "✅ ZeroClaw installed."
-else
-  echo "✅ ZeroClaw is already installed ($(zeroclaw --version))."
-fi
+echo "📥 Installing ZeroClaw from PR-branch (Gemini Fix #5106)..."
+echo "⏳ This will build from source to ensure you have the latest OAuth and rate-limit fixes."
+cargo install --git https://github.com/rareba/zeroclaw.git --branch fix/4879-gemini-oauth --locked --force
+echo "✅ ZeroClaw (PR-5106) installed."
 
 # 5. Install Local Management CLI (sentinel-cli)
 echo "🛠️ Building local management CLI..."
