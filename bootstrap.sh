@@ -90,9 +90,8 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
         # Clear existing list and append new ones using tomato
         tomato rm autonomy.allowed_commands config.toml &>/dev/null || true
         for cmd in $CLEAN_LIST; do
-            # tomato expects the value to be a valid TOML string (with quotes)
-            # but we need to escape the inner quotes for bash
-            tomato append autonomy.allowed_commands "\"$cmd\"" config.toml &>/dev/null
+            # tomato handles string quoting automatically
+            tomato append autonomy.allowed_commands "$cmd" config.toml &>/dev/null
         done
         echo "✅ Command whitelist updated."
     else
