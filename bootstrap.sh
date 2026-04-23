@@ -24,6 +24,17 @@ fi
 echo "📂 Setting up local project workspace..."
 mkdir -p workspace/SOPs workspace/sessions workspace/memory workspace/state
 
+# Auto-detect unique Agent Name (hostname[ip])
+HOSTNAME=$(hostname)
+IP_ADDR=$(ip route get 1 | awk '{print $7;exit}')
+AGENT_NAME="${HOSTNAME}[${IP_ADDR}]"
+echo "🤖 Auto-detected Agent Name: $AGENT_NAME"
+
+# Update config.toml with the unique name
+if [ -f "config.toml" ]; then
+    sed -i "s/^name = .*/name = \"$AGENT_NAME\"/" config.toml
+fi
+
 # 3. Interactive Onboarding
 echo "🛠️ Starting ZeroClaw Onboarding..."
 echo "This will help you configure your AI provider and channels."
