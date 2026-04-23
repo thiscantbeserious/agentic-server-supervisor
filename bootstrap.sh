@@ -69,14 +69,22 @@ zeroclaw onboard --config-dir "$(pwd)"
 
 # 4. AI & Manual Command Detection
 CANDIDATES=("df" "free" "uptime" "cat" "head" "tail" "grep" "wc" "ls" "find" "journalctl" "ss" "ip" "ping" "dig" "git" "ps")
-
 if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw agent autonomously scan your system to find relevant monitoring commands?" 10 60; then
     echo "🔍 AI is scanning the system for monitoring tools..."
+    echo "----------------------------------------------------------------"
     # Render the template with current config data using minijinja-cli
     RENDERED_PROMPT=$(minijinja-cli prompts/tool-autodetection.prompt config.toml)
-    # Ask the agent for recommendations based on the actual OS
-    AI_LIST=$(zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_PROMPT" 2>/dev/null | grep -oE '[a-z0-9_-]+(,[a-z0-9_-]+)*' || echo "")
-    
+
+    # Create a temporary file to capture the output
+    AI_OUT=$(mktemp)
+    # Run the agent and stream output to terminal (tee) while saving to file
+    zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_PROMPT" 2>/dev/null | tee "$AI_OUT"
+
+    # Parse the commands from the captured output
+    AI_LIST=$(grep -oE '[a-z0-9_-]+(,[a-z0-9_-]+)*' "$AI_OUT" | tail -n 1 || echo "")
+    rm -f "$AI_OUT"
+    echo "----------------------------------------------------------------"
+
     if [ -n "$AI_LIST" ]; then
         IFS=',' read -ra ADDR <<< "$AI_LIST"
         for i in "${ADDR[@]}"; do
@@ -86,6 +94,7 @@ if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw
         echo "✅ AI suggested additional tools: $AI_LIST"
     fi
 fi
+
 
 # Filter candidates to only those actually installed
 CHECKLIST_ITEMS=()
