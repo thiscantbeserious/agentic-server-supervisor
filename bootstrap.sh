@@ -3,6 +3,16 @@ set -e
 
 echo "🚀 Bootstrapping ZeroClaw for Agentic Server Supervisor..."
 
+# 0. Check for Rust/Cargo
+if ! command -v cargo &> /dev/null; then
+  echo "🦀 Rust/Cargo not found. Installing Rustup..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "$HOME/.cargo/env"
+  echo "✅ Rust installed."
+else
+  echo "✅ Rust/Cargo already installed."
+fi
+
 # Ensure ~/.cargo/bin is in PATH for this session
 export PATH="$HOME/.cargo/bin:$PATH"
 
