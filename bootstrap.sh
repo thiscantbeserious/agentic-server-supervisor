@@ -31,8 +31,10 @@ IP_ADDR=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 AGENT_NAME="${HOSTNAME}[${IP_ADDR}]"
 echo "🤖 Auto-detected Agent Name: $AGENT_NAME"
 
-# Update config using ZeroClaw CLI
-zeroclaw config set agent.name "$AGENT_NAME" --config-dir "$(pwd)"
+# Update config.toml with the unique name (using sed for name as it is a custom field)
+if [ -f "config.toml" ]; then
+    sed -i "s/name = .*/name = \"$AGENT_NAME\"/" config.toml
+fi
 
 # 3. Interactive Onboarding
 echo "🛠️ Starting ZeroClaw Onboarding..."
@@ -77,7 +79,7 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
         TOML_ARRAY="${TOML_ARRAY%, }]"
         
         echo "📝 Updating config.toml with selected commands..."
-        # Update using ZeroClaw CLI (No Python!)
+        # Update using ZeroClaw CLI for standard fields
         zeroclaw config set autonomy.allowed_commands "$TOML_ARRAY" --config-dir "$(pwd)"
         echo "✅ Command whitelist updated."
     else
@@ -86,6 +88,10 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
 else
     echo "⚠️ No monitoring tools detected. Keeping fallback commands."
 fi
+
+# 5. Security: Prevent leaking local config
+echo "🛡️ Configuring Git to ignore local changes to config.toml..."
+git update-index --assume-unchanged config.toml 2>/dev/null || true
 
 # 5. Service Installation
 if whiptail --title "Service Installation" --yesno "Would you like to install the Server Sentinel as a system service (auto-start)?" 10 60; then
