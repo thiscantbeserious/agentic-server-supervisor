@@ -77,9 +77,9 @@ if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw
 
     # Create a temporary file to capture the output
     AI_OUT=$(mktemp)
-    # Run the agent in YOLO mode so it can autonomously probe the system
+    # Run the agent to autonomously probe the system
     # We stream output to terminal (tee) while saving to file
-    zeroclaw agent --config-dir "$(pwd)" --approval-mode yolo -m "$RENDERED_PROMPT" 2>/dev/null | tee "$AI_OUT"
+    zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_PROMPT" 2>/dev/null | tee "$AI_OUT"
 
     # Parse the commands from the captured output
     AI_LIST=$(grep -oE '[a-z0-9_-]+(,[a-z0-9_-]+)*' "$AI_OUT" | tail -n 1 || echo "")
