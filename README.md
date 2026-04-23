@@ -1,63 +1,57 @@
-# Agentic Server Supervisor
+# Agentic Server Supervisor (v2-ZeroClaw)
 
-A robust, model-agnostic server monitoring and health-check system built on the **ZeroClaw** agent framework. This sentinel is designed to autonomously monitor system resources, analyze logs, and escalate alerts across multiple LLM providers.
+A state-of-the-art, autonomous server monitoring system built on the **ZeroClaw** Rust framework. This supervisor (Server Sentinel) autonomously monitors resources, detects anomalies using AI, and manages alerts across any LLM provider (Gemini, Anthropic, OpenAI, etc.).
 
 ## 🏗️ Architecture
 
-- **Engine:** [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) (High-performance Rust agent framework).
-- **Control Logic:** Managed via Standard Operating Procedures (SOPs) located in `workspace/SOPs/`.
-- **Security:** Strict command whitelisting and filesystem scoping defined in `config.toml`.
-- **Autonomy:** `Supervised` mode—critical or medium-risk actions require human approval.
+- **Engine:** [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) — High-performance, memory-safe Rust agent.
+- **Bootstrapping:** Automated via `cargo-binstall` for lightning-fast setup (Option A: Build from source fallback).
+- **Configuration:** Managed robustly via `tomato-toml` (preserves comments and formatting).
+- **AI Detection:** Integrated **MiniJinja** templating for context-aware autonomous tool discovery.
+- **Autonomy:** `Full` mode — The Sentinel acts independently within strict security boundaries.
+- **Security:** Hardware-specific identity, command whitelisting, and filesystem scoping.
 
 ## 🚀 Quick Start
 
-### 1. Bootstrap
-Run the bootstrap script to install ZeroClaw and prepare the local environment:
+### 1. One-Step Bootstrap
+Run the enhanced bootstrap script. It will install Rust, ZeroClaw, and the required TUI tools automatically:
 
 ```bash
 ./bootstrap.sh
 ```
 
-### 2. Configure (Onboarding)
-Finalize your AI provider setup (API keys, models, etc.). This command will detect the existing `config.toml` and `workspace` folder:
+### 2. What happens during Bootstrap?
+- **Identity:** Auto-detects `hostname[ip]` to give the sentinel a unique name.
+- **Onboarding:** Interactive wizard to set your AI provider (uses Gemini CLI credentials by default).
+- **AI System Scan:** (Optional) ZeroClaw autonomously scans your specific OS to find relevant monitoring tools.
+- **Whitelist Approval:** You get the final say on which commands the agent is allowed to execute via a TUI checklist.
+- **Daemonization:** Optionally installs the sentinel as a systemd user service.
 
-```bash
-zeroclaw onboard --config-dir $(pwd)
-```
+## 🛡️ Security Policy
 
-### 3. Run the Sentinel
-Start the agent in interactive mode to verify connectivity:
+Configured in `config.toml` (which is ignored by Git to prevent leakage):
 
-```bash
-zeroclaw agent --config-dir $(pwd)
-```
+- **Whitelisted Commands:** Strictly limited to monitoring tools (`df`, `free`, `iostat`, etc.).
+- **Filesystem Scoping:** Read-only access to `/etc/gemini-watcher/system/` and the local workspace.
+- **Confidentiality:** Runtime data (memory, sessions, state) is strictly excluded from version control.
 
-To run as a long-running daemon (with cron and heartbeat enabled):
+## 📂 Project Structure
 
-```bash
-zeroclaw daemon --config-dir $(pwd)
-```
+- `bootstrap.sh`: The central setup entry point.
+- `config.toml`: Master configuration and security gatekeeper.
+- `prompts/`: Jinja2 templates for AI interactions (e.g., `tool-autodetection.prompt`).
+- `workspace/`: 
+  - `AGENTS.md`: Role and personality definition.
+  - `SOPs/`: MarkDown-based monitoring procedures.
+  - `IDENTITY.md` / `SOUL.md`: Local machine identity (tracked).
+  - `memory/` / `sessions/`: Confidential runtime data (ignored).
 
-### 4. Manage as a Service
-If you installed the sentinel as a service during bootstrap, you can manage it using:
+## 🛠️ Management
+
+Manage the sentinel service after installation:
 
 ```bash
 zeroclaw service status --config-dir $(pwd)
 zeroclaw service logs --config-dir $(pwd)
 zeroclaw service restart --config-dir $(pwd)
 ```
-
-## 🛡️ Security Configuration
-
-The system is configured with a strict security boundary in `config.toml`:
-
-- **Allowed Commands:** `df`, `free`, `uptime`, `journalctl`, `git`, `ss`, `ip`, etc.
-- **Allowed Roots:** Read-only access to `/etc/gemini-watcher/system/` and local workspace.
-- **Forbidden Paths:** Sensitive areas like `/etc/shadow`, `~/.ssh`, and `/root` are hard-blocked.
-
-## 📂 Project Structure
-
-- `config.toml`: Central agent configuration and security policies.
-- `workspace/`: The agent's persistent home (SOPs, memory, sessions).
-- `workspace/SOPs/`: MarkDown-based procedures (e.g., `health-check.md`).
-- `ARCHITECTURE.md`: Detailed design goals and migration paths.
