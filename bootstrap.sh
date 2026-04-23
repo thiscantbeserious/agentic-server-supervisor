@@ -26,14 +26,13 @@ mkdir -p workspace/SOPs workspace/sessions workspace/memory workspace/state
 
 # Auto-detect unique Agent Name (hostname[ip])
 HOSTNAME=$(hostname)
-IP_ADDR=$(ip route get 1 | awk '{print $7;exit}')
+IP_ADDR=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
+[ -z "$IP_ADDR" ] && IP_ADDR="127.0.0.1"
 AGENT_NAME="${HOSTNAME}[${IP_ADDR}]"
 echo "🤖 Auto-detected Agent Name: $AGENT_NAME"
 
-# Update config.toml with the unique name
-if [ -f "config.toml" ]; then
-    sed -i "s/^name = .*/name = \"$AGENT_NAME\"/" config.toml
-fi
+# Update config using ZeroClaw CLI
+zeroclaw config set agent.name "$AGENT_NAME" --config-dir "$(pwd)"
 
 # 3. Interactive Onboarding
 echo "🛠️ Starting ZeroClaw Onboarding..."
@@ -56,7 +55,6 @@ CHECKLIST_ITEMS=()
 for cmd in "${CANDIDATES[@]}"; do
     if command -v "$cmd" &> /dev/null; then
         EXISTING_COMMANDS+=("$cmd")
-        # By default, we mark them as ON
         CHECKLIST_ITEMS+=("$cmd" "System tool" "ON")
     fi
 done
@@ -64,25 +62,23 @@ done
 if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
     echo "💡 Found ${#EXISTING_COMMANDS[@]} monitoring tools."
     
-    # Use whiptail for the checkbox interface
     SELECTED_COMMANDS=$(whiptail --title "Command Whitelist Configuration" \
         --checklist "Select commands to allow the Server Sentinel to execute:" 20 60 12 \
         "${CHECKLIST_ITEMS[@]}" 3>&1 1>&2 2>&3)
 
     if [ $? -eq 0 ]; then
-        # Clean up the output (remove quotes)
         CLEAN_LIST=$(echo "$SELECTED_COMMANDS" | tr -d '"')
         
-        # Convert space-separated list to TOML array format
+        # Build TOML array string
         TOML_ARRAY="["
         for cmd in $CLEAN_LIST; do
             TOML_ARRAY+="\"$cmd\", "
         done
-        TOML_ARRAY="${TOML_ARRAY%, }] " # Remove trailing comma and close
+        TOML_ARRAY="${TOML_ARRAY%, }]"
         
         echo "📝 Updating config.toml with selected commands..."
-        # Robustly update the allowed_commands array in config.toml using python
-        python3 -c "import sys, re; c=open('config.toml').read(); n=re.sub(r'allowed_commands = \[.*?\]', 'allowed_commands = $TOML_ARRAY', c, flags=re.DOTALL); open('config.toml', 'w').write(n)"
+        # Update using ZeroClaw CLI (No Python!)
+        zeroclaw config set autonomy.allowed_commands "$TOML_ARRAY" --config-dir "$(pwd)"
         echo "✅ Command whitelist updated."
     else
         echo "⚠️ Selection cancelled. Keeping fallback commands."
