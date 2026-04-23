@@ -38,6 +38,15 @@ To run as a long-running daemon (with cron and heartbeat enabled):
 zeroclaw daemon --config-dir $(pwd)
 ```
 
+### 4. Manage as a Service
+If you installed the sentinel as a service during bootstrap, you can manage it using:
+
+```bash
+zeroclaw service status --config-dir $(pwd)
+zeroclaw service logs --config-dir $(pwd)
+zeroclaw service restart --config-dir $(pwd)
+```
+
 ## 🛡️ Security Configuration
 
 The system is configured with a strict security boundary in `config.toml`:

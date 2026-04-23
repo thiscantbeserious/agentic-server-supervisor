@@ -81,8 +81,24 @@ else
     echo "⚠️ No monitoring tools detected. Keeping fallback commands."
 fi
 
+# 5. Service Installation
+if whiptail --title "Service Installation" --yesno "Would you like to install the Server Sentinel as a system service (auto-start)?" 10 60; then
+    echo "⚙️ Installing ZeroClaw service..."
+    # Ensure cargo path is available for the service
+    zeroclaw service install --config-dir "$(pwd)"
+    
+    if whiptail --title "Service Start" --yesno "Service installed successfully. Would you like to start it now?" 10 60; then
+        echo "🚀 Starting Server Sentinel service..."
+        zeroclaw service start --config-dir "$(pwd)"
+        echo "✅ Service started."
+    fi
+else
+    echo "ℹ️ Skipping service installation. You can run 'zeroclaw service install' manually later."
+fi
+
 echo ""
 echo "🎉 Bootstrap complete!"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Your Server Sentinel is ready."
 echo "You can now start it with: zeroclaw agent --config-dir \$(pwd)"
