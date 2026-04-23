@@ -15,10 +15,17 @@ else
   echo "✅ Rust installed."
 fi
 
+# 0.2 Install cargo-binstall for faster installs
+if ! command -v cargo-binstall &> /dev/null; then
+  echo "🚀 Installing cargo-binstall..."
+  curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+  echo "✅ cargo-binstall installed."
+fi
+
 # 0.5 Install TOML editor (tomato) and template engine (minijinja)
 if ! command -v tomato &> /dev/null; then
   echo "🍅 Installing tomato-toml editor..."
-  cargo install tomato-toml
+  cargo binstall -y tomato-toml
   echo "✅ tomato-toml installed."
 else
   echo "✅ tomato-toml already installed."
@@ -26,7 +33,7 @@ fi
 
 if ! command -v minijinja-cli &> /dev/null; then
   echo "Templates: Installing minijinja-cli..."
-  cargo install minijinja-cli
+  cargo binstall -y minijinja-cli
   echo "✅ minijinja-cli installed."
 else
   echo "✅ minijinja-cli already installed."
@@ -34,9 +41,8 @@ fi
 
 # 1. Install ZeroClaw
 if ! command -v zeroclaw &> /dev/null; then
-  echo "📥 ZeroClaw not found. Installing via Cargo (Build from Source)..."
-  echo "⏳ Note: This may take a few minutes as it builds the latest optimized binary."
-  cargo install --git https://github.com/zeroclaw-labs/zeroclaw.git --locked
+  echo "📥 ZeroClaw not found. Installing via cargo-binstall..."
+  cargo binstall -y https://github.com/zeroclaw-labs/zeroclaw --locked
   echo "✅ ZeroClaw installed."
 else
   echo "✅ ZeroClaw is already installed ($(zeroclaw --version))."
