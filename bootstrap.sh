@@ -84,16 +84,17 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
         "${CHECKLIST_ITEMS[@]}" 3>&1 1>&2 2>&3)
 
     if [ $? -eq 0 ]; then
-        # whiptail returns "df" "free" - we need to strip ALL quotes
+        # whiptail returns "df" "free" - we need a clean JSON array
         CLEAN_LIST=$(echo "$SELECTED_COMMANDS" | tr -d '"')
+        JSON_ARRAY="["
+        for cmd in $CLEAN_LIST; do
+            JSON_ARRAY+="\"$cmd\", "
+        done
+        JSON_ARRAY="${JSON_ARRAY%, }]"
         
         echo "📝 Updating config.toml with selected commands..."
-        # Clear existing list and append new ones using tomato
-        tomato rm autonomy.allowed_commands config.toml &>/dev/null || true
-        for cmd in $CLEAN_LIST; do
-            # tomato handles string quoting automatically for the TOML file
-            tomato append autonomy.allowed_commands "$cmd" config.toml &>/dev/null
-        done
+        # Set the entire array at once to avoid quoting issues
+        tomato set autonomy.allowed_commands "$JSON_ARRAY" config.toml &>/dev/null
         echo "✅ Command whitelist updated."
     else
         echo "⚠️ Selection cancelled. Keeping fallback commands."
