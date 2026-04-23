@@ -1,0 +1,20 @@
+# ZeroClaw Configuration for Server Sentinel
+
+default_provider = "gemini"
+default_model = "gemini-2.0-flash"
+
+[agent]
+max_tool_iterations = 20
+compact_context = true
+
+[autonomy]
+level = "supervised"
+workspace_only = false
+allowed_commands = ["df", "free", "uptime", "cat", "head", "tail", "grep", "wc", "ls", "find", "journalctl", "ss", "ip", "ping", "dig", "git"]
+
+[memory]
+backend = "sqlite"
+path = "state/memory.db"
+
+[observability]
+backend = "log"
