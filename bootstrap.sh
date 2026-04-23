@@ -93,7 +93,7 @@ fi
 echo "🛡️ Configuring Git to ignore local changes to config.toml..."
 git update-index --assume-unchanged config.toml 2>/dev/null || true
 
-# 5. Service Installation
+# 6. Service Installation
 if whiptail --title "Service Installation" --yesno "Would you like to install the Server Sentinel as a system service (auto-start)?" 10 60; then
     echo "⚙️ Installing ZeroClaw service..."
     # Ensure cargo path is available for the service
