@@ -4,17 +4,23 @@ set -e
 echo "🚀 Bootstrapping ZeroClaw for Agentic Server Supervisor..."
 
 # 0. Check for Rust/Cargo
-# Try to source cargo env if it exists
-[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+# Ensure we check common paths even if not in current PATH
 export PATH="$HOME/.cargo/bin:$PATH"
 
-if ! command -v cargo &> /dev/null; then
+if which cargo &> /dev/null || which rustup &> /dev/null || [ -f "$HOME/.cargo/bin/cargo" ]; then
+  [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+  echo "✅ Rust/Cargo detected ($(cargo --version 2>/dev/null || echo 'installed via rustup'))."
+else
   echo "🦀 Rust/Cargo not found. Installing Rustup..."
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   source "$HOME/.cargo/env"
   echo "✅ Rust installed."
-else
-  echo "✅ Rust/Cargo already installed ($(cargo --version))."
+fi
+
+# 0.5 Install TOML editor (tomato)
+if ! command -v tomato &> /dev/null; then
+  echo "🍅 Installing tomato-toml editor..."
+  cargo install tomato-toml
 fi
 
 # 1. Install ZeroClaw if not present
@@ -42,10 +48,8 @@ IP_ADDR=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 AGENT_NAME="${HOSTNAME}[${IP_ADDR}]"
 echo "🤖 Auto-detected Agent Name: $AGENT_NAME"
 
-# Update config.toml with the unique name (using sed for name as it is a custom field)
-if [ -f "config.toml" ]; then
-    sed -i "s/name = .*/name = \"$AGENT_NAME\"/" config.toml
-fi
+# Update agent name using tomato (double quotes ensure it's saved as a TOML string)
+tomato set agent.name "\"$AGENT_NAME\"" config.toml
 
 # 3. Interactive Onboarding
 echo "🛠️ Starting ZeroClaw Onboarding..."
@@ -66,7 +70,7 @@ EXISTING_COMMANDS=()
 CHECKLIST_ITEMS=()
 
 for cmd in "${CANDIDATES[@]}"; do
-    if command -v "$cmd" &> /dev/null; then
+    if which "$cmd" &> /dev/null; then
         EXISTING_COMMANDS+=("$cmd")
         CHECKLIST_ITEMS+=("$cmd" "System tool" "ON")
     fi
@@ -82,16 +86,12 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
     if [ $? -eq 0 ]; then
         CLEAN_LIST=$(echo "$SELECTED_COMMANDS" | tr -d '"')
         
-        # Build TOML array string
-        TOML_ARRAY="["
-        for cmd in $CLEAN_LIST; do
-            TOML_ARRAY+="\"$cmd\", "
-        done
-        TOML_ARRAY="${TOML_ARRAY%, }]"
-        
         echo "📝 Updating config.toml with selected commands..."
-        # Update using ZeroClaw CLI for standard fields
-        zeroclaw config set autonomy.allowed_commands "$TOML_ARRAY" --config-dir "$(pwd)"
+        # Clear existing list and append new ones using tomato
+        tomato rm autonomy.allowed_commands config.toml &>/dev/null || true
+        for cmd in $CLEAN_LIST; do
+            tomato append autonomy.allowed_commands "\"$cmd\"" config.toml &>/dev/null
+        done
         echo "✅ Command whitelist updated."
     else
         echo "⚠️ Selection cancelled. Keeping fallback commands."
