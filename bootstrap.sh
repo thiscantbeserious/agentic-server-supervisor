@@ -3,7 +3,7 @@ set -e
 
 echo "🚀 Bootstrapping ZeroClaw for Agentic Server Supervisor..."
 
-# 0. Check for Rust/Cargo
+# 1. Check for Rust/Cargo
 export PATH="$HOME/.cargo/bin:$PATH"
 if which cargo &> /dev/null || [ -f "$HOME/.cargo/bin/cargo" ]; then
   [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
@@ -15,7 +15,7 @@ else
   echo "✅ Rust installed."
 fi
 
-# 0.2 Install cargo-binstall for faster installs
+# 2. Install cargo-binstall for faster installs
 if ! command -v cargo-binstall &> /dev/null; then
   echo "🚀 Installing cargo-binstall..."
   curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -24,7 +24,7 @@ else
   echo "✅ cargo-binstall already installed."
 fi
 
-# 0.5 Install TOML editor (tomato) and template engine (minijinja)
+# 3. Install TOML editor (tomato) and template engine (minijinja)
 if ! command -v tomato &> /dev/null; then
   echo "🍅 Installing tomato-toml editor..."
   cargo binstall -y tomato-toml
@@ -41,7 +41,7 @@ else
   echo "✅ minijinja-cli already installed."
 fi
 
-# 1. Install ZeroClaw
+# 4. Install ZeroClaw
 if ! command -v zeroclaw &> /dev/null; then
   echo "📥 ZeroClaw not found. Installing via cargo-binstall..."
   cargo binstall -y https://github.com/zeroclaw-labs/zeroclaw --locked
@@ -50,15 +50,16 @@ else
   echo "✅ ZeroClaw is already installed ($(zeroclaw --version))."
 fi
 
-# 1.5 Install Local Management CLI (sentinel-cli)
+# 5. Install Local Management CLI (sentinel-cli)
 echo "🛠️ Building local management CLI..."
 (cd cli && cargo install --path .)
 echo "✅ Local management CLI 'sentinel-cli' installed."
 
-# 2. Setup project structure
+# 6. Setup project structure
 echo "📂 Setting up local project workspace..."
 mkdir -p workspace/SOPs workspace/sessions workspace/memory workspace/state
 
+# 7. Auto-detect unique Agent Name (hostname[ip])
 HOSTNAME=$(hostname)
 IP_ADDR=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 AGENT_NAME="${HOSTNAME}[${IP_ADDR:-127.0.0.1}]"
@@ -67,12 +68,12 @@ echo "🤖 Auto-detected Agent Name: $AGENT_NAME"
 # Set name cleanly via tomato
 tomato set agent.name "\"$AGENT_NAME\"" config.toml
 
-# 3. Interactive Onboarding
+# 8. Interactive Onboarding
 echo "🛠️ Starting ZeroClaw Onboarding..."
 echo "This will help you configure your AI provider and channels."
 zeroclaw onboard --config-dir "$(pwd)"
 
-# 4. AI & Manual Command Detection
+# 9. AI & Manual Command Detection
 CANDIDATES=("df" "free" "uptime" "cat" "head" "tail" "grep" "wc" "ls" "find" "journalctl" "ss" "ip" "ping" "dig" "git" "ps")
 if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw agent autonomously scan your system to find relevant monitoring commands?" 10 60; then
     echo "🔍 AI is scanning the system for monitoring tools..."
@@ -80,9 +81,12 @@ if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw
     # Render the template with current config data using minijinja-cli
     RENDERED_PROMPT=$(minijinja-cli prompts/tool-autodetection.prompt config.toml)
 
+    # Small sleep to prevent burst rate limiting after rendering
+    sleep 2
+
     # Create a temporary file to capture the output
     AI_OUT=$(mktemp)
-    # Run the agent to autonomously probe the system
+    # Run the agent with increased reliability for the scan
     # We stream output to terminal (tee) while saving to file
     zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_PROMPT" 2>/dev/null | tee "$AI_OUT"
 
@@ -130,7 +134,7 @@ else
     echo "⚠️ No monitoring tools detected. Keeping defaults."
 fi
 
-# 4.5 AI Filesystem Policy Detection
+# 10. AI Filesystem Policy Detection
 if whiptail --title "AI Filesystem Scan" --yesno "Would you like to let the ZeroClaw agent autonomously suggest additional allowed and forbidden directories?" 10 60; then
     echo "🔍 AI is scanning the filesystem for policy recommendations..."
     
@@ -189,7 +193,7 @@ if whiptail --title "AI Filesystem Scan" --yesno "Would you like to let the Zero
     fi
 fi
 
-# 5. Security & Service
+# 11. Security & Service
 echo "🛡️ Configuring Git security..."
 git update-index --assume-unchanged config.toml 2>/dev/null || true
 
