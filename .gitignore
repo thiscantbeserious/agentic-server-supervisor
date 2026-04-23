@@ -1,1 +1,14 @@
+# Configuration
 config.toml
+audit.log
+*.log
+
+# Runtime Machine-Specific Data (Confidential)
+workspace/memory/
+workspace/sessions/
+workspace/state/
+
+# System / Editor slop
+.DS_Store
+.idea/
+.vscode/
