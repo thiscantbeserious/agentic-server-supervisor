@@ -16,35 +16,40 @@ This is not just an agent; it is a dedicated **Supervisor Node**.
 
 - **Core:** [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw) (Model-agnostic AI runtime).
 - **Automation:** `Full` autonomy mode — the node acts independently within its whitelisted policy.
-- **Security:** Hardware-specific identity (`hostname[ip]`), strict command whitelisting, and read-only access to `/etc` and `/var/log`.
-- **Tooling:** Automated bootstrapping using `cargo-binstall` and template-driven AI tool discovery via `minijinja`.
+- **Security:** Hardware-specific identity (`hostname[ip]`), strict command whitelisting, and read-only access to system roots.
+- **Tooling:** Automated bootstrapping using `cargo-binstall` and template-driven AI discovery via `minijinja`.
 
-## 🚀 Deployment
+## 🚀 Deployment & Interactive Setup
 
 ### 1. Bootstrap the Node
-Run the bootstrap script to install the environment and the `sentinel-cli` management tool:
+Run the central deployment engine to install the environment and the `sentinel-cli` management tool:
 
 ```bash
 ./bootstrap.sh
 ```
 
-### 2. Autonomous Capabilities
-During bootstrap, the Sentinel performs an **AI-driven system scan** to detect relevant monitoring tools (iostat, vmstat, etc.) and presents a final whitelist for your approval.
+### 2. Interactive AI Discovery
+The bootstrap process isn't just an installer; it's an **intelligent provisioning flow**:
+
+- **AI System Scan:** ZeroClaw autonomously probes your specific OS to find relevant monitoring tools (iostat, vmstat, sensors, etc.).
+- **AI Filesystem Policy:** The agent scans for standard log/config paths and identifies highly sensitive directories to block.
+- **TUI Approval:** Every suggestion (commands, allowed roots, forbidden paths) is presented in a visual checklist. **You have the final say** before any policy is written to disk.
 
 ## 🛠️ Node Management
 
-All node operations are managed through `sentinel-cli`:
+All node operations are managed through the native `sentinel-cli`:
 
 ```bash
 sentinel-cli status   # Check service health
-sentinel-cli logs     # Tail active logs
-sentinel-cli restart  # Hot-reload configuration
+sentinel-cli logs     # Tail active supervisor logs
+sentinel-cli restart  # Hot-reload configuration and restart service
 ```
 
 ## 📂 Project Structure
 
-- `bootstrap.sh`: The automated deployment engine.
+- `bootstrap.sh`: The automated deployment and discovery engine.
 - `sentinel-cli/`: Rust-based management utility.
 - `config.toml`: Master security policy (read-only system roots, whitelisted commands).
+- `prompts/`: MiniJinja templates for autonomous tool and folder discovery.
 - `workspace/`: Persistent node identity, SOPs, and role definitions.
-- `prompts/`: MiniJinja templates for autonomous tool discovery.
+  - `memory/` / `sessions/`: Confidential runtime data (strictly Git-ignored).
