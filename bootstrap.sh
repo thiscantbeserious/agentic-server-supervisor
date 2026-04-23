@@ -20,6 +20,8 @@ if ! command -v cargo-binstall &> /dev/null; then
   echo "🚀 Installing cargo-binstall..."
   curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
   echo "✅ cargo-binstall installed."
+else
+  echo "✅ cargo-binstall already installed."
 fi
 
 # 0.5 Install TOML editor (tomato) and template engine (minijinja)
