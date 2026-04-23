@@ -1,0 +1,11 @@
+I am an autonomous Server Sentinel monitor.
+
+Current Forbidden Paths:
+{{ autonomy.forbidden_paths | join(', ') }}
+
+Task:
+Identify highly sensitive directories on this OS that should be explicitly blocked to ensure maximum security and are NOT already in my forbidden list.
+
+Output:
+Return ONLY a comma-separated list of new forbidden absolute paths.
+Do not include explanations or markdown.

@@ -101,7 +101,6 @@ if whiptail --title "AI System Scan" --yesno "Would you like to let the ZeroClaw
     fi
 fi
 
-
 # Filter candidates to only those actually installed
 CHECKLIST_ITEMS=()
 UNIQUE_CANDIDATES=$(echo "${CANDIDATES[@]}" | tr ' ' '\n' | sort -u)
@@ -120,7 +119,8 @@ if [ ${#CHECKLIST_ITEMS[@]} -gt 0 ]; then
         # Clear existing list and append approved ones
         tomato rm autonomy.allowed_commands config.toml &>/dev/null || true
         for cmd in $(echo "$SELECTED" | tr -d '"'); do
-            tomato append autonomy.allowed_commands "\"$cmd\"" config.toml &>/dev/null
+            # tomato handles string quoting automatically for the TOML file
+            tomato append autonomy.allowed_commands "$cmd" config.toml &>/dev/null
         done
         echo "✅ Whitelist updated in config.toml."
     else
@@ -128,6 +128,65 @@ if [ ${#CHECKLIST_ITEMS[@]} -gt 0 ]; then
     fi
 else
     echo "⚠️ No monitoring tools detected. Keeping defaults."
+fi
+
+# 4.5 AI Filesystem Policy Detection
+if whiptail --title "AI Filesystem Scan" --yesno "Would you like to let the ZeroClaw agent autonomously suggest additional allowed and forbidden directories?" 10 60; then
+    echo "🔍 AI is scanning the filesystem for policy recommendations..."
+    
+    # 1. Allowed Roots
+    echo "--- Detecting Allowed Roots ---"
+    RENDERED_ALLOWED=$(minijinja-cli prompts/allowed-folders.prompt config.toml)
+    AI_ALLOWED_OUT=$(mktemp)
+    zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_ALLOWED" 2>/dev/null | tee "$AI_ALLOWED_OUT"
+    AI_ALLOWED_LIST=$(grep -oE '[a-zA-Z0-9_/.-]+(,[a-zA-Z0-9_/.-]+)*' "$AI_ALLOWED_OUT" | tail -n 1 || echo "")
+    rm -f "$AI_ALLOWED_OUT"
+    
+    if [ -n "$AI_ALLOWED_LIST" ]; then
+        IFS=',' read -ra ADDR <<< "$AI_ALLOWED_LIST"
+        ALLOWED_CHECKLIST=()
+        for path in "${ADDR[@]}"; do
+            path=$(echo $path | xargs)
+            [ -d "$path" ] && ALLOWED_CHECKLIST+=("$path" "System Path" "ON")
+        done
+        
+        if [ ${#ALLOWED_CHECKLIST[@]} -gt 0 ]; then
+            SELECTED_ALLOWED=$(whiptail --title "Allowed Roots Configuration" --checklist "Approve additional read-only system roots:" 20 60 12 "${ALLOWED_CHECKLIST[@]}" 3>&1 1>&2 2>&3)
+            if [ $? -eq 0 ]; then
+                for path in $(echo "$SELECTED_ALLOWED" | tr -d '"'); do
+                    tomato append autonomy.allowed_roots "$path" config.toml &>/dev/null
+                done
+                echo "✅ Allowed roots updated."
+            fi
+        fi
+    fi
+
+    # 2. Forbidden Paths
+    echo "--- Detecting Forbidden Paths ---"
+    RENDERED_FORBIDDEN=$(minijinja-cli prompts/forbidden-folders.prompt config.toml)
+    AI_FORBIDDEN_OUT=$(mktemp)
+    zeroclaw agent --config-dir "$(pwd)" -m "$RENDERED_FORBIDDEN" 2>/dev/null | tee "$AI_FORBIDDEN_OUT"
+    AI_FORBIDDEN_LIST=$(grep -oE '[a-zA-Z0-9_/.-]+(,[a-zA-Z0-9_/.-]+)*' "$AI_FORBIDDEN_OUT" | tail -n 1 || echo "")
+    rm -f "$AI_FORBIDDEN_OUT"
+
+    if [ -n "$AI_FORBIDDEN_LIST" ]; then
+        IFS=',' read -ra ADDR <<< "$AI_FORBIDDEN_LIST"
+        FORBIDDEN_CHECKLIST=()
+        for path in "${ADDR[@]}"; do
+            path=$(echo $path | xargs)
+            [ -e "$path" ] && FORBIDDEN_CHECKLIST+=("$path" "Sensitive Path" "ON")
+        done
+        
+        if [ ${#FORBIDDEN_CHECKLIST[@]} -gt 0 ]; then
+            SELECTED_FORBIDDEN=$(whiptail --title "Forbidden Paths Configuration" --checklist "Approve additional security blocks:" 20 60 12 "${FORBIDDEN_CHECKLIST[@]}" 3>&1 1>&2 2>&3)
+            if [ $? -eq 0 ]; then
+                for path in $(echo "$SELECTED_FORBIDDEN" | tr -d '"'); do
+                    tomato append autonomy.forbidden_paths "$path" config.toml &>/dev/null
+                done
+                echo "✅ Forbidden paths updated."
+            fi
+        fi
+    fi
 fi
 
 # 5. Security & Service
