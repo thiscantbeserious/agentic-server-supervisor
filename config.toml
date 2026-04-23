@@ -7,7 +7,7 @@ schema_version = 2
 # Providers and models will be populated by 'zeroclaw onboard'
 
 [agent]
-name = "bam"
+name = "Server Sentinel"
 max_tool_iterations = 20
 compact_context = true
 
@@ -60,7 +60,7 @@ enabled = true
 [channels.telegram]
 enabled = true
 # Replace with your own bot token from @BotFather
-bot_token = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
-allowed_users = ["*"] # Adjust to your telegram username(s)
+bot_token = ""
+allowed_users = [] # Adjust to your telegram username(s)
 stream_mode = "off"
 
