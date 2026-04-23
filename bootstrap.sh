@@ -81,9 +81,8 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
         TOML_ARRAY="${TOML_ARRAY%, }] " # Remove trailing comma and close
         
         echo "📝 Updating config.toml with selected commands..."
-        # Update the allowed_commands line in config.toml
-        # This assumes allowed_commands = [...] format
-        sed -i "s/^allowed_commands = .*/allowed_commands = $TOML_ARRAY/" config.toml
+        # Robustly update the allowed_commands array in config.toml using python
+        python3 -c "import sys, re; c=open('config.toml').read(); n=re.sub(r'allowed_commands = \[.*?\]', 'allowed_commands = $TOML_ARRAY', c, flags=re.DOTALL); open('config.toml', 'w').write(n)"
         echo "✅ Command whitelist updated."
     else
         echo "⚠️ Selection cancelled. Keeping fallback commands."
