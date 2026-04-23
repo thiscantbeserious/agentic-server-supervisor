@@ -1,0 +1,12 @@
+[Unit]
+Description=Gemini ACP Sentinel Agent
+After=network.target
+
+[Service]
+WorkingDirectory=/etc/gemini-watcher
+ExecStart=/etc/gemini-watcher/start-agent.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

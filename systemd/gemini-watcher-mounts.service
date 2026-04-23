@@ -1,0 +1,24 @@
+[Unit]
+Description=Read-only bind mounts for Gemini Watcher
+Before=gemini-sentinel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '\
+  umount /etc/gemini-watcher/system/var/log 2>/dev/null; \
+  umount /etc/gemini-watcher/system/scripts 2>/dev/null; \
+  umount /etc/gemini-watcher/system/etc 2>/dev/null; \
+  mount --bind /var/log /etc/gemini-watcher/system/var/log && \
+  mount --bind /scripts /etc/gemini-watcher/system/scripts && \
+  mount --bind /etc /etc/gemini-watcher/system/etc && \
+  mount -o bind,remount,ro /etc/gemini-watcher/system/var/log && \
+  mount -o bind,remount,ro /etc/gemini-watcher/system/scripts && \
+  mount -o bind,remount,ro /etc/gemini-watcher/system/etc'
+ExecStop=/bin/bash -c '\
+  umount /etc/gemini-watcher/system/var/log; \
+  umount /etc/gemini-watcher/system/scripts; \
+  umount /etc/gemini-watcher/system/etc'
+
+[Install]
+WantedBy=multi-user.target
