@@ -93,8 +93,8 @@ if [ ${#EXISTING_COMMANDS[@]} -gt 0 ]; then
         TOML_ARRAY="${TOML_ARRAY%, }]"
         
         echo "📝 Updating config.toml with selected commands..."
-        # Use sed for the final injection to guarantee perfect formatting
-        sed -i "s|^allowed_commands = .*|allowed_commands = $TOML_ARRAY|" config.toml
+        # Use sed with flexible whitespace matching to guarantee perfect formatting
+        sed -i "s|[[:space:]]*allowed_commands = .*|allowed_commands = $TOML_ARRAY|" config.toml
         echo "✅ Command whitelist updated."
     else
         echo "⚠️ Selection cancelled. Keeping fallback commands."
