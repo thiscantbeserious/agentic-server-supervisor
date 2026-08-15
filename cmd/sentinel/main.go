@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -35,15 +36,20 @@ var version = "dev"
 var errNotImplemented = errors.New("not yet implemented")
 
 func main() {
-	code := 1
+	os.Exit(guard(os.Stderr, func() int { return run(os.Args[1:]) }))
+}
+
+// guard runs f and converts a panic into exit code 1 (C2: "internal failure …
+// recovered panic"). It takes the writer and the func so the recovery path is
+// testable without a panic hook in the production dispatch.
+func guard(stderr io.Writer, f func() int) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintln(os.Stderr, "sentinel: internal error:", r)
-			os.Exit(1)
+			fmt.Fprintln(stderr, "sentinel: internal error:", r)
+			code = 1
 		}
-		os.Exit(code)
 	}()
-	code = run(os.Args[1:])
+	return f()
 }
 
 func run(args []string) int {

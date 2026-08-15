@@ -279,3 +279,29 @@ func TestConfigErrorExits78AndNamesVariable(t *testing.T) {
 		t.Fatalf("stderr = %q, expected it to name TICK_INTERVAL", stderr)
 	}
 }
+
+// C2 maps a recovered panic to exit 1. guard is the seam that makes that path
+// reachable without a panic hook in the production dispatch: main wraps run in
+// it, and this test wraps a deliberately panicking func.
+func TestGuardRecoversPanicAsExitOne(t *testing.T) {
+	var stderr bytes.Buffer
+	code := guard(&stderr, func() int { panic("boom") })
+	if code != 1 {
+		t.Errorf("guard() = %d, want 1 for a recovered panic (C2)", code)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Errorf("stderr = %q, want it to name the panic value", stderr.String())
+	}
+}
+
+func TestGuardPassesThroughNormalExitCodes(t *testing.T) {
+	var stderr bytes.Buffer
+	for _, want := range []int{0, 64, 78} {
+		if got := guard(&stderr, func() int { return want }); got != want {
+			t.Errorf("guard() = %d, want %d", got, want)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty when nothing panicked", stderr.String())
+	}
+}
