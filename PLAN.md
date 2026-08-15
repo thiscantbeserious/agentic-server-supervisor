@@ -18,7 +18,8 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 ```
 ├── ARCHITECTURE.md                 # what & why
 ├── PLAN.md                         # this document: how (TODOs, protocol)
-├── CONTRACTS.md                    # authoritative component contracts (Go)
+├── CONTRACTS.md                    # binding conventions C1–C9 + index
+├── contracts/                      # per-component contracts, one file per implementation stage
 ├── CLAUDE.md                       # working rules: TDD loop + gates + model matrix
 │
 ├── go.mod                          # github.com/thiscantbeserious/agentic-server-supervisor
@@ -43,7 +44,7 @@ Rollout on `bam` is exactly: copy `deploy/`, fill `.env`, run `install-host.sh`,
 
 ## 2. Component Specification
 
-**[CONTRACTS.md](CONTRACTS.md) is authoritative** — CLI, env vars (C3), paths/mounts (C4), shared types & JSON rules (C5), the dedup algorithm (C6), logging (C7), in-process seams (C8), test layout (C9), plus per-component contracts with struct definitions, example documents, exit codes, failure behavior, and 1:1 test tables. Implementers make zero design decisions.
+**[CONTRACTS.md](CONTRACTS.md) is authoritative** — CLI, env vars (C3), paths/mounts (C4), shared types & JSON rules (C5), the dedup algorithm (C6), logging (C7), in-process seams (C8), test layout (C9), plus per-component contracts under [contracts/](contracts/) (split per implementation stage; each implementer reads C1–C9 plus only its stage's file) with struct definitions, example documents, exit codes, failure behavior, and 1:1 test tables. Implementers make zero design decisions.
 
 Summary of what stays true from v3 (unchanged semantics, now typed):
 
