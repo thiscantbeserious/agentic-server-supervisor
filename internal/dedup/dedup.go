@@ -45,6 +45,12 @@ func EvidenceCore(evidence string) string {
 	}, evidence)
 
 	s = monotonicStampRe.ReplaceAllString(s, " ")
+
+	// C6 strips a *leading* syslog or ISO stamp, and both regexes are anchored
+	// with ^. Removing a monotonic stamp first can leave whitespace in front of
+	// that stamp ("[ 123.456] 2026-08-15T20:20:14Z msg"), which would defeat the
+	// anchor and fragment the key for every timestamp. Trim before matching.
+	s = strings.TrimLeft(s, " ")
 	s = syslogStampRe.ReplaceAllString(s, "")
 	s = isoStampRe.ReplaceAllString(s, "")
 
