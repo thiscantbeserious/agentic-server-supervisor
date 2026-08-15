@@ -346,7 +346,7 @@ type Section[T any] struct {
 }
 
 func (s Section[T]) MarshalJSON() ([]byte, error)
-func (s *Section[T]) UnmarshalJSON(b []byte) error // probes for a lone "error" key
+func (s *Section[T]) UnmarshalJSON(b []byte) error // "error" present ⇒ section failed, data ignored
 
 type Facts struct {
 	Meta      Meta                    `json:"meta"`
