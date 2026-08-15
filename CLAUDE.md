@@ -26,9 +26,12 @@ If a Haiku implementer fails the gate or review twice in a row, escalate that TO
 
 With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` active, the per-TODO loop runs as a **team**: implementer and reviewer are spawned as named teammates and talk to each other directly via `SendMessage` — the REJECT defect list, follow-up questions about a contract clause, and the re-review request go peer-to-peer instead of through main-agent respawns. Rules:
 
+- **Both teammates are spawned at the start of the TODO and stay alive for its whole duration.** The reviewer is not spawned after the implementer finishes: it boots in parallel, reads the docs while the implementer writes code, and is then re-used for every round via `SendMessage`. Re-spawning a reviewer per round burns its context re-reading the contracts and loses what it already knows about the diff.
 - The main agent remains the **gate authority**: independent V run, container smoke run, and agy second opinion stay with the main agent; teammates cannot approve their own gate.
 - The reviewer's fresh-context property must survive messaging: the implementer sends the diff + RED/GREEN outputs, never its own reasoning transcript.
 - Iteration cap (3) still counts per REJECT→fix round, whoever transports the message.
+- **Never respawn an agent that already exists** — the implementer is resumed with the fix list via `SendMessage`, so it keeps the code and the reasoning behind it. A fresh spawn re-reads every contract and pays for context that was already bought.
+- The **agy gate runs after every implementer action**, not only at the end of a TODO — its findings go to the implementer in the same message as the reviewer's, so one fix round covers both.
 - If the teams flag is not active in the session, fall back to the classic loop (main agent relays between fresh spawns) — same protocol, more context cost.
 
 ## Reporting Behavior (applies to me, not just the supervisor)

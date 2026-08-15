@@ -70,12 +70,26 @@ One exit-code table for the whole binary (sysexits, overriding the per-contract 
 
 ### C3. Environment variables (complete; compose passes every one explicitly)
 
-`internal/config.Load()` reads them once. Malformed, out-of-range, or non-numeric-where-numeric ⇒ **exit 78 naming the variable** — the silent-default policy of the collect/state contracts is dropped.
+`internal/config.Load()` reads them once. Malformed, out-of-range, or non-numeric-where-numeric ⇒ **exit 78 naming the variable** — the silent-default policy of the collect/state contracts is dropped. Every duration value is parsed by `time.ParseDuration` with no rewriting of the input; every default in the table below is written in that syntax.
+
+Ranges, binding for every numeric variable (a value outside its range is exit 78, same as a malformed one):
+
+| Variable | Range |
+|---|---|
+| `TICK_INTERVAL` | 60–3600 |
+| `RAW_ALERT_MAX_PRIORITY` | 0–7 (a syslog priority, C5) |
+| `RAW_ALERT_MAX_LINES` | 1–20 |
+| `HEARTBEAT_HOUR` | 0–23 (hour of day) |
+| every other numeric variable | `> 0`; durations `> 0s` |
+
+A variable's own row always wins over the catch-all row. `RAW_ALERT_MAX_PRIORITY=0` and `HEARTBEAT_HOUR=0` are therefore **legal** — priority 0 is `emerg`, the most important value in the raw-alert path, and hour 0 is midnight. Only variables falling under the catch-all row reject zero: a zero timeout, budget, history depth or outbox cap has no defined behaviour anywhere in this document. No numeric variable accepts a negative value.
+
+These range rules apply to numeric variables only. `DEEP_ENABLED` is the `0`|`1` boolean and is validated as such — `DEEP_ENABLED=0` means disabled, not out of range.
 
 | Name | Default | Owner |
 |---|---|---|
 | `TICK_INTERVAL` | `300` (60–3600, s) | runtime |
-| `TICK_WINDOW` | `10min` (validated `> TICK_INTERVAL`) | collect |
+| `TICK_WINDOW` | `10m` (validated `> TICK_INTERVAL`) | collect |
 | `DEEP_WINDOW` | `24h` | collect |
 | `SECTION_TIMEOUT` | `10` (s) | collect |
 | `FACTS_MAX_BYTES` | `262144` | collect |
@@ -175,9 +189,11 @@ Marshaling: RFC3339 UTC with `Z` for timestamps, integers for sizes and counts (
 
 ### C6. Dedup key — one algorithm
 
-`dedup.Key(component, evidence string) string` = `hex(sha256(component + "\n" + EvidenceCore(evidence)))[:16]`. `EvidenceCore`: flatten `\n\r\t` to spaces → strip kernel monotonic stamps `[\s*\d+\.\d+]` → strip a leading syslog or ISO stamp → ASCII-only lowercase (not `strings.ToLower`) → `strings.Fields` → replace tokens matching `^0x[0-9a-f]+$` or `^[0-9]+([.,:][0-9]+)*$` with `#` → join with a space → truncate to 200 runes.
+`dedup.Key(component, evidence string) string` = `hex(sha256(component + "\n" + EvidenceCore(evidence)))[:16]`. `EvidenceCore`: flatten `\n\r\t` to spaces → strip kernel monotonic stamps `[\s*\d+\.\d+]` → strip a leading syslog or ISO stamp → ASCII-only lowercase (not `strings.ToLower`) → `strings.Fields` → **mask each field**: split it on `=`, replace every part matching `^0x[0-9a-f]+$` or `^[0-9]+([.,:][0-9]+)*$` with `#`, rejoin with `=` → join the fields with a space → truncate to 200 runes.
 
-Token-scoped on purpose: `nvme0n1`, `sda`, `zed[2914]:` survive; a rising counter `1 → 7` keeps one key. `analyze` computes the key and injects it into `findings[].key`; `state` and the raw-alert path consume it. The raw-alert path uses `dedup.Key("kernel", entry.Message)` — priority is not part of the key. Nobody recomputes a key that is already set.
+Token-scoped on purpose: `nvme0n1`, `sda`, `zed[2914]:` survive (no `=`, and the digits are not a whole part); a rising counter `1 → 7` keeps one key.
+
+The `=`-scoped masking is normative, not an optimization: zed evidence carries its counters as `key=value` without spaces (`eid=1841`, `cksum_errors=1`), so whole-field matching alone would give every checksum event its own key and defeat trend tracking. It is what makes the ARCHITECTURE §2.7 CKSUM benchmark and `contracts/analyze.md` test 8 (evidence differing only in `eid=` digits ⇒ identical key) reachable. `analyze` computes the key and injects it into `findings[].key`; `state` and the raw-alert path consume it. The raw-alert path uses `dedup.Key("kernel", entry.Message)` — priority is not part of the key. Nobody recomputes a key that is already set.
 
 ### C7. Logging
 

@@ -1,0 +1,311 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sentinel facts",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta"],
+  "definitions": {
+    "journalEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ts", "priority", "identifier", "unit", "message"],
+      "properties": {
+        "ts": { "type": "string" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "identifier": { "type": "string" },
+        "unit": { "type": ["string", "null"] },
+        "message": { "type": "string" }
+      }
+    },
+    "sectionError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": { "type": "string" }
+      }
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proto", "addr", "port"],
+      "properties": {
+        "proto": { "type": "string", "enum": ["tcp", "udp"] },
+        "addr": { "type": "string" },
+        "port": { "type": "integer" }
+      }
+    },
+    "collectorError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "reason", "exit_code"],
+      "properties": {
+        "section": { "type": "string" },
+        "reason": { "type": "string" },
+        "exit_code": { "type": "integer" }
+      }
+    },
+    "storeFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size", "mtime"],
+      "properties": {
+        "name": { "type": "string" },
+        "size": { "type": "integer" },
+        "mtime": { "type": "integer" }
+      }
+    },
+    "truncatedImpliesDropped": {
+      "if": { "properties": { "truncated": { "const": true } } },
+      "then": { "properties": { "dropped_entries": { "minimum": 1 } } }
+    },
+    "kernelSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count", "truncated", "dropped_entries", "entries"],
+              "properties": {
+                "count": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "rasSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count", "truncated", "dropped_entries", "entries", "store"],
+              "properties": {
+                "count": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "store": { "type": "array", "items": { "$ref": "#/definitions/storeFile" } }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "sensorsSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["truncated", "dropped_entries", "chips"],
+              "properties": {
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "chips": { "type": "object" }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "zfsSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count", "truncated", "dropped_entries", "events", "arc", "pools"],
+              "properties": {
+                "count": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "events": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "arc": { "type": "object" },
+                "pools": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "resourcesSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["truncated", "dropped_entries", "filesystems", "memory_kb", "load", "uptime_seconds"],
+              "properties": {
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "filesystems": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["mount", "source", "size_kb", "used_kb", "avail_kb", "use_percent"],
+                    "properties": {
+                      "mount": { "type": "string" },
+                      "source": { "type": "string" },
+                      "size_kb": { "type": "integer" },
+                      "used_kb": { "type": "integer" },
+                      "avail_kb": { "type": "integer" },
+                      "use_percent": { "type": "integer" }
+                    }
+                  }
+                },
+                "memory_kb": { "type": "object" },
+                "load": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["load1", "load5", "load15", "running", "total_procs"],
+                  "properties": {
+                    "load1": { "type": "number" },
+                    "load5": { "type": "number" },
+                    "load15": { "type": "number" },
+                    "running": { "type": "integer" },
+                    "total_procs": { "type": "integer" }
+                  }
+                },
+                "uptime_seconds": { "type": "integer" }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "servicesSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["count", "truncated", "dropped_entries", "entries", "failed_units"],
+              "properties": {
+                "count": { "type": "integer" },
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "failed_units": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "networkSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["truncated", "dropped_entries", "baseline_initialized", "listeners", "new_listeners", "closed_listeners"],
+              "properties": {
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "baseline_initialized": { "type": "boolean" },
+                "listeners": { "type": "array", "items": { "$ref": "#/definitions/listener" } },
+                "new_listeners": { "type": "array", "items": { "$ref": "#/definitions/listener" } },
+                "closed_listeners": { "type": "array", "items": { "$ref": "#/definitions/listener" } }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    },
+    "deepSection": {
+      "oneOf": [
+        { "$ref": "#/definitions/sectionError" },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["component", "truncated", "dropped_entries"],
+              "properties": {
+                "component": { "type": "string", "enum": ["zfs", "smart", "kernel", "ras"] },
+                "truncated": { "type": "boolean" },
+                "dropped_entries": { "type": "integer" },
+                "entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "zed_events": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "smart_entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "kernel_entries": { "type": "array", "items": { "$ref": "#/definitions/journalEntry" } },
+                "store": { "type": "array", "items": { "$ref": "#/definitions/storeFile" } },
+                "pool_kstat": { "type": "object" },
+                "arc": { "type": "object" },
+                "history": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ts", "status", "headline"],
+                    "properties": {
+                      "ts": { "type": "string" },
+                      "status": { "type": "string" },
+                      "headline": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            },
+            { "$ref": "#/definitions/truncatedImpliesDropped" }
+          ]
+        }
+      ]
+    }
+  },
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "hostname", "timestamp", "tick_seq", "mode", "deep_component", "window", "duration_ms", "truncated", "collector_errors"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "hostname": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "tick_seq": { "type": "integer" },
+        "mode": { "type": "string", "enum": ["tick", "deep"] },
+        "deep_component": { "type": ["string", "null"] },
+        "window": { "type": "string" },
+        "duration_ms": { "type": "integer" },
+        "truncated": { "type": "boolean" },
+        "collector_errors": { "type": "array", "items": { "$ref": "#/definitions/collectorError" } }
+      }
+    },
+    "kernel": { "$ref": "#/definitions/kernelSection" },
+    "ras": { "$ref": "#/definitions/rasSection" },
+    "smart": { "$ref": "#/definitions/kernelSection" },
+    "sensors": { "$ref": "#/definitions/sensorsSection" },
+    "zfs": { "$ref": "#/definitions/zfsSection" },
+    "resources": { "$ref": "#/definitions/resourcesSection" },
+    "services": { "$ref": "#/definitions/servicesSection" },
+    "network": { "$ref": "#/definitions/networkSection" },
+    "deep": { "$ref": "#/definitions/deepSection" }
+  }
+}

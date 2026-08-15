@@ -96,7 +96,13 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
 4. **Independent verification:** the main agent re-runs V itself. Red ⇒ back to phase 1 with the error output.
 5. **Runnability gate (mandatory after every step):**
    a. **Container smoke run:** the affected code is actually executed — from T3 onward inside the sentinel container image (`docker build` + `docker run` with test mounts), before that via the compiled binary locally. Code that is green in tests but does not run in the container (missing tool, path, permission) fails here.
-   b. **agy second validation:** `agy --print` receives the diff + smoke-run output and checks as an independent second opinion (different vendor): "Is this code runnable in the target setup (read_only, cap_drop ALL, ro mounts, unprivileged)? Which runtime errors are foreseeable?" Substantiated findings ⇒ back to phase 1.
+   b. **agy second validation:** an independent second opinion from a different vendor on the question "Is this code runnable in the target setup (read_only, cap_drop ALL, ro mounts, unprivileged, CGO_ENABLED=0, debian-slim)? Which runtime errors are foreseeable?" Substantiated findings ⇒ back to phase 1. Invocation (verified 2026-08-15):
+
+   ```bash
+   agy -p "$(cat prompt.txt)" --print-timeout 8m
+   ```
+
+   Print mode does **not** read stdin — the prompt must be an argument. `--print-timeout` needs a duration unit (`8m`, not `300`). Start the prompt with "Do not use any tools, answer only from the text below" and inline the files; otherwise agy tries to read the workspace and headless mode auto-denies the permission (`--dangerously-skip-permissions` is not used). Run it from the scratchpad directory, not the repo.
 
 **Phase 3 — Review (reviewer subagent, fresh context):**
 6. Sees ARCHITECTURE.md, CONTRACTS.md, the diff, RED/GREEN outputs, and gate outputs — not the implementer transcript. Checks adversarially:

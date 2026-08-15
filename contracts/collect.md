@@ -129,7 +129,7 @@ Tick mode, realistic example — `sensors` failed, `services` truncated, the rea
     "tick_seq": 412,
     "mode": "tick",
     "deep_component": null,
-    "window": "10min",
+    "window": "10m",
     "duration_ms": 1873,
     "truncated": true,
     "collector_errors": [
@@ -504,7 +504,7 @@ var ErrNoJournal = errors.New("journal directory not found")
 
 type Query struct {
 	Dirs  []string // existing directories only
-	Since string   // e.g. "10min"
+	Since string   // e.g. "10m"
 	Args  []string // e.g. []string{"-k", "-p", "err"}
 }
 

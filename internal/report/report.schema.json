@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sentinel report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "headline", "body", "findings", "resolved"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["OK", "WATCH", "ALERT"],
+      "description": "Overall tick status. Equals the highest finding severity (info->OK, watch->WATCH, alert->ALERT); OK when there are no findings."
+    },
+    "headline": { "type": "string", "minLength": 1, "maxLength": 80,
+      "description": "One human-readable line. No log syntax, no raw timestamps, no markdown." },
+    "body": { "type": "string", "minLength": 1, "maxLength": 2000,
+      "description": "Plain prose: what, why, since when, trend. No markdown, no code fences, no brackets." },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "component", "evidence", "explanation"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["info", "watch", "alert"] },
+          "component": { "type": "string",
+            "enum": ["kernel","ras","smart","sensors","resources","services","network","zfs","meta"] },
+          "evidence": { "type": "string", "minLength": 1, "maxLength": 1000,
+            "description": "Verbatim original log line(s) from FACTS, newline-separated. Never invented." },
+          "explanation": { "type": "string", "minLength": 1, "maxLength": 800 },
+          "analysis": { "type": "string", "maxLength": 1200,
+            "description": "Stage 2 only: transient vs. trend, redundancy state, blast radius." },
+          "recommendation": { "type": "string", "maxLength": 800,
+            "description": "Stage 2 only: concrete conditional proposal. Proposed, never executed." },
+          "key": { "type": "string", "pattern": "^[0-9a-f]{16}$",
+            "description": "Injected by analyze. The model must not emit this field." },
+          "first_seen": { "type": "integer", "minimum": 0,
+            "description": "Epoch seconds. Annotated by state." },
+          "occurrences": { "type": "integer", "minimum": 1,
+            "description": "Annotated by state." }
+        }
+      }
+    },
+    "resolved": {
+      "type": "array", "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostname": { "type": "string" },
+        "tick_seq": { "type": "integer", "minimum": 0 },
+        "raw": { "type": "boolean", "description": "true for the LLM-free raw-alert path." }
+      }
+    }
+  }
+}
