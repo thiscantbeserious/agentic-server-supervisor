@@ -88,6 +88,7 @@ func TestValidate_Accepts(t *testing.T) {
 var schemaDivergesFromValidate = map[string]bool{
 	"status inconsistent with highest severity (alert finding but status WATCH)": true,
 	"status OK with a watch finding present":                                     true,
+	"status OK with an alert finding":                                            true,
 }
 
 var rejectCases = []struct {
@@ -95,6 +96,38 @@ var rejectCases = []struct {
 	mutate func(map[string]any)
 }{
 	{"invalid status enum", func(d map[string]any) { d["status"] = "CRITICAL" }},
+	// contracts/analyze.md §10 case 12 lists nine validator negatives; these are
+	// the ones the table was missing, plus the Validate bounds that had no
+	// coverage at all (explanation, analysis, recommendation, first_seen).
+	{"evidence exceeds 1000 runes", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("evidence", repeatRune('e', 1001))}
+	}},
+	{"status OK with an alert finding", func(d map[string]any) {
+		f := findingWith("severity", "alert")
+		d["status"] = "OK"
+		d["findings"] = []any{f}
+	}},
+	{"finding empty explanation", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("explanation", "")}
+	}},
+	{"explanation exceeds 800 runes", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("explanation", repeatRune('x', 801))}
+	}},
+	{"analysis exceeds 1200 runes", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("analysis", repeatRune('a', 1201))}
+	}},
+	{"recommendation exceeds 800 runes", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("recommendation", repeatRune('r', 801))}
+	}},
+	{"negative first_seen", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("first_seen", -1)}
+	}},
 	// occurrences is omitempty, so an explicit 0 is indistinguishable from an
 	// absent field after unmarshal — the schema's minimum:1 must still hold.
 	{"explicit occurrences 0", func(d map[string]any) {
