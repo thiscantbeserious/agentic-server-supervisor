@@ -217,9 +217,12 @@ func Load() (*Config, error) {
 			return nil, errf("SENTINEL_NOW", "must be RFC3339")
 		}
 		cfg.Now = now.UTC()
-	} else {
-		cfg.Now = time.Now().UTC()
 	}
+	// SENTINEL_NOW unset ⇒ Now stays the zero Time. C3 calls it a test-only
+	// override and contracts/state.md §S.2 makes the consumer rule explicit
+	// ("zero ⇒ time.Now()"), so consumers must be able to tell "no override"
+	// from a real one. Config is loaded once per process: stamping time.Now()
+	// here would freeze the clock for every tick of `tick --loop`.
 
 	return &cfg, nil
 }

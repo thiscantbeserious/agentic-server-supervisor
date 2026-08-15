@@ -96,13 +96,15 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
 4. **Independent verification:** the main agent re-runs V itself. Red ⇒ back to phase 1 with the error output.
 5. **Runnability gate (mandatory after every step):**
    a. **Container smoke run:** the affected code is actually executed — from T3 onward inside the sentinel container image (`docker build` + `docker run` with test mounts), before that via the compiled binary locally. Code that is green in tests but does not run in the container (missing tool, path, permission) fails here.
-   b. **agy second validation:** an independent second opinion from a different vendor on the question "Is this code runnable in the target setup (read_only, cap_drop ALL, ro mounts, unprivileged, CGO_ENABLED=0, debian-slim)? Which runtime errors are foreseeable?" Substantiated findings ⇒ back to phase 1. Invocation (verified 2026-08-15):
+   b. **agy second validation:** an independent second opinion from a different vendor on two questions: "Is this code runnable in the target setup (read_only, cap_drop ALL, ro mounts, unprivileged, CGO_ENABLED=0, debian-slim)? Which runtime errors are foreseeable?" and "Where does the code contradict CONTRACTS.md C1–C9, or hide a bug the tests would miss?" Substantiated findings ⇒ back to phase 1. Invocation (verified 2026-08-16):
 
    ```bash
-   agy -p "$(cat prompt.txt)" --print-timeout 8m
+   agy -p "<prompt>" --print-timeout 10m
    ```
 
-   Print mode does **not** read stdin — the prompt must be an argument. `--print-timeout` needs a duration unit (`8m`, not `300`). Start the prompt with "Do not use any tools, answer only from the text below" and inline the files; otherwise agy tries to read the workspace and headless mode auto-denies the permission (`--dangerously-skip-permissions` is not used). Run it from the scratchpad directory, not the repo.
+   Run it **from the repo root and let agy read the files itself** — name the packages and tell it to read CONTRACTS.md first; never inline file contents. Reading the real tree is what makes the gate worth running: it is how the frozen-clock defect was found, by comparing `config.go` against C3 without being handed either.
+
+   Mechanics: print mode does **not** read stdin, so the prompt must be an argument, and `--print-timeout` needs a duration unit (`10m`, not `300`). Permissions live in **`~/.gemini/antigravity-cli/settings.json`** (the path `~/.gemini/settings.json` is silently ignored — the log line `applyUserSettings: no shared config permissions` is the tell), as `action(target)` rules under `permissions.allow`: `read_file(...)` **and** `command(...)` are both needed, because agy shells out to `find`/`grep` as well as using its native reader. Writes and network are in `deny`. Diagnose any denial with `--log-file <path>` and grep `permission_manager` for the exact action it wanted. `--dangerously-skip-permissions` is not used.
 
 **Phase 3 — Review (reviewer subagent, fresh context):**
 6. Sees ARCHITECTURE.md, CONTRACTS.md, the diff, RED/GREEN outputs, and gate outputs — not the implementer transcript. Checks adversarially:

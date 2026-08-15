@@ -8,6 +8,19 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// findingWith builds a valid WATCH finding and sets one extra field, so a
+// fixture can isolate a single offending property.
+func findingWith(field string, value any) map[string]any {
+	f := map[string]any{
+		"severity":    "watch",
+		"component":   "zfs",
+		"evidence":    "eid=1841 class=checksum pool='hotstore' cksum_errors=1",
+		"explanation": "Single checksum error on one mirror member.",
+	}
+	f[field] = value
+	return f
+}
+
 func minimalOK() map[string]any {
 	return map[string]any{
 		"status":   "OK",
@@ -82,6 +95,16 @@ var rejectCases = []struct {
 	mutate func(map[string]any)
 }{
 	{"invalid status enum", func(d map[string]any) { d["status"] = "CRITICAL" }},
+	// occurrences is omitempty, so an explicit 0 is indistinguishable from an
+	// absent field after unmarshal — the schema's minimum:1 must still hold.
+	{"explicit occurrences 0", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("occurrences", 0)}
+	}},
+	{"negative occurrences", func(d map[string]any) {
+		d["status"] = "WATCH"
+		d["findings"] = []any{findingWith("occurrences", -3)}
+	}},
 	{"empty headline", func(d map[string]any) { d["headline"] = "" }},
 	{"headline exceeds 80 runes", func(d map[string]any) { d["headline"] = repeatRune('h', 81) }},
 	{"empty body", func(d map[string]any) { d["body"] = "" }},

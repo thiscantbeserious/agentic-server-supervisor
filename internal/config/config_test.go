@@ -395,16 +395,21 @@ func TestLoad_SentinelNowClock(t *testing.T) {
 	}
 }
 
-func TestLoad_SentinelNowUnsetUsesRealClock(t *testing.T) {
+// C3 calls SENTINEL_NOW a test-only override and contracts/state.md §S.2 spells
+// out the consumer rule: "Now (from SENTINEL_NOW, test-only; zero => time.Now())".
+// Load() must therefore leave Now as the zero Time when the variable is unset.
+// Stamping time.Now() here would be indistinguishable from a real override, and
+// Config is loaded ONCE per process: in `tick --loop` every later tick would
+// reuse the container's start time, so history filenames, stale-alert pruning,
+// re-notify windows and the daily heartbeat would all freeze forever.
+func TestLoad_SentinelNowUnsetLeavesNowZero(t *testing.T) {
 	clearKnownEnv(t)
-	before := time.Now().UTC()
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() unexpected error: %v", err)
 	}
-	after := time.Now().UTC()
-	if cfg.Now.Before(before) || cfg.Now.After(after) {
-		t.Errorf("Now = %v, want between %v and %v", cfg.Now, before, after)
+	if !cfg.Now.IsZero() {
+		t.Errorf("Now = %v, want the zero Time so consumers fall back to the live clock", cfg.Now)
 	}
 }
 

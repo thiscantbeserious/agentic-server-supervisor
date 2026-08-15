@@ -69,6 +69,17 @@ func Validate(raw []byte) (*Report, error) {
 			return nil, fmt.Errorf("report: %s: required", field)
 		}
 	}
+	// Same absent-vs-present problem one level down: occurrences is omitempty,
+	// so an explicit 0 unmarshals identically to an omitted field, while the
+	// schema sets minimum 1. Probe the raw findings for it.
+	var rawFindings []map[string]json.RawMessage
+	if err := json.Unmarshal(probe["findings"], &rawFindings); err == nil {
+		for i, rf := range rawFindings {
+			if v, ok := rf["occurrences"]; ok && string(v) == "0" {
+				return nil, fmt.Errorf("report: findings[%d].occurrences: must be >= 1", i)
+			}
+		}
+	}
 
 	var r Report
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -118,7 +129,7 @@ func Validate(raw []byte) (*Report, error) {
 		if f.FirstSeen < 0 {
 			return nil, fmt.Errorf("report: findings[%d].first_seen: must be >= 0", i)
 		}
-		if f.Occurrences != 0 && f.Occurrences < 1 {
+		if f.Occurrences < 0 {
 			return nil, fmt.Errorf("report: findings[%d].occurrences: must be >= 1", i)
 		}
 		if rank > highest {
