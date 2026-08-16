@@ -93,7 +93,8 @@ func newLogger(level slog.Level) *slog.Logger {
 // shutdown is not an analyzer failure and must not fabricate an ALERT.
 // Callers must nil-check before using the report. Any other non-nil error
 // means the returned report is the deterministic fallback. Run never panics
-// and writes only under TmpDir and the deep-dive queue in StateDir.
+// and writes only under TmpDir, the deep-dive queue in StateDir, and agy's
+// home directory (created if absent, since agy refuses to start without it).
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cfg := o.Cfg
 	logger := newLogger(logging.ParseLevel(cfg.LogLevel))

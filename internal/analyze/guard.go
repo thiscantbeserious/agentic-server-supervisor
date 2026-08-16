@@ -75,8 +75,9 @@ const recommendationWithheldEvidence = "recommendation withheld"
 
 // guardRecommendations blanks any recommendation matching the deny-list and
 // appends one watch finding recording the withholding. The record is never
-// dropped: if the report is at the findings cap, the least important
-// finding is evicted to make room — losing an "all clear" line is better
+// dropped: if the report is at the findings cap, the first "info"
+// (all-clear) finding is evicted to make room, or the last finding when the
+// report carries no "info" finding — losing an existing finding is better
 // than silently losing the fact that a dangerous proposal was suppressed.
 // Idempotent, and a no-op when no finding carries a recommendation.
 func guardRecommendations(rep *report.Report) {

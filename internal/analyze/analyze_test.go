@@ -585,6 +585,70 @@ func TestRun_CorrectionBlockCarriesRealValidationError(t *testing.T) {
 	}
 }
 
+// TestBuildCorrection_ExactBytes pins buildCorrection's rendered output to
+// the exact bytes the pre-refactor Go string literal produced (sha256
+// ebc6bbd0426562dfb5db29184f9c6cd8b0fc43442112dd463f6833c924eaf0b8, 449
+// bytes for this input) — a substring check alone would pass even if the
+// template lost a word, a punctuation mark, or the 300-rune truncation
+// bound, none of which any other test in this file catches. buildCorrection
+// is the one prompt-shell fragment not covered by TestPromptGoldenFiles, so
+// this is its only byte-level guard.
+func TestBuildCorrection_ExactBytes(t *testing.T) {
+	got, err := buildCorrection("VALIDATION_ERROR_SENTINEL")
+	if err != nil {
+		t.Fatalf("buildCorrection: %v", err)
+	}
+	want := "\n\n===== CORRECTION =====\n" +
+		"Your previous answer failed validation: VALIDATION_ERROR_SENTINEL\n" +
+		`Output ONE JSON object only - no prose, no markdown fence, no explanation
+before or after it. It must match the schema exactly: required keys status,
+headline, body, findings, resolved; no additional keys; status must equal the
+highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
+not emit "key", "meta", "first_seen" or "occurrences".`
+	if got != want {
+		t.Fatalf("buildCorrection bytes changed.\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+	sum := sha256.Sum256([]byte(got))
+	const wantSHA = "ebc6bbd0426562dfb5db29184f9c6cd8b0fc43442112dd463f6833c924eaf0b8"
+	if hex.EncodeToString(sum[:]) != wantSHA {
+		t.Fatalf("buildCorrection sha256 = %x, want %s", sum, wantSHA)
+	}
+	if len(got) != 449 {
+		t.Fatalf("buildCorrection length = %d, want 449", len(got))
+	}
+}
+
+// TestBuildCorrection_TruncatesValidationErrorTo300Runes asserts the 300-rune
+// bound the contract requires: without it, a pathological
+// validator message (or a future validator that got chattier) could blow
+// past agy's prompt-length cliff on retry. Using a multi-byte rune (é, 2
+// bytes in UTF-8) makes a byte-count assertion alone insufficient to prove
+// rune-based truncation.
+func TestBuildCorrection_TruncatesValidationErrorTo300Runes(t *testing.T) {
+	long := strings.Repeat("é", 400)
+	got, err := buildCorrection(long)
+	if err != nil {
+		t.Fatalf("buildCorrection: %v", err)
+	}
+	const marker = "Your previous answer failed validation: "
+	i := strings.Index(got, marker)
+	if i < 0 {
+		t.Fatalf("marker not found in buildCorrection output:\n%s", got)
+	}
+	rest := got[i+len(marker):]
+	j := strings.Index(rest, "\nOutput ONE JSON")
+	if j < 0 {
+		t.Fatalf("task suffix not found after the validation error:\n%s", got)
+	}
+	quoted := rest[:j]
+	if n := len([]rune(quoted)); n != 300 {
+		t.Fatalf("quoted validation error is %d runes, want exactly 300 (truncation bound not applied): %q", n, quoted)
+	}
+	if strings.Count(quoted, "é") != 300 {
+		t.Fatalf("quoted validation error does not consist of exactly 300 'é' runes: %q", quoted)
+	}
+}
+
 // =====================================================================
 // Case 6: deep-dive cap — three NEW deep-capable findings, one consumed
 // =====================================================================

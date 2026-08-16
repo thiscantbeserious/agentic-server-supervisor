@@ -158,7 +158,7 @@ All `maxLength` bounds count **runes**, never bytes. The schema is normative for
 #### 3.3 stdout / stderr
 
 - **stdout:** nothing in the in-process path. In debug mode, exactly one compact JSON document + `\n`.
-- **stderr:** `slog` with component `analyze`, e.g. `triage attempt=1 rc=0 bytes=1412`, `triage invalid, retrying`, `deep-dive component=zfs key=3f9c1a7e40b2d558`, `deep-dive failed, keeping triage report`, `fallback report built reason=agy_timeout`. Never prompt content, facts content, agy stdout, or any env value.
+- **stderr:** `slog` with component `analyze`, e.g. `triage attempt=1 rc=0 bytes=1412`, `triage invalid, retrying`, `deep-dive target=zfs key=3f9c1a7e40b2d558`, `deep-dive failed, keeping triage report`, `fallback report built reason=agy_timeout`. Never prompt content, facts content, agy stdout, or any env value. `target`, not `component`: the log handler diverts any attr literally named `component` into the line's own component slot (`analyze`), so the deep-dive component name uses a different key to avoid overwriting it.
 
 ### 4. Exit codes (debug invocation)
 

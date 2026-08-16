@@ -18,15 +18,21 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 )
 
-// The prompt/ directory holds every fixed prompt byte: the role document,
-// the prompt skeleton, and the deep-dive response schema. No instruction,
-// boundary paragraph or fence originates in a Go string literal, which is
-// what keeps the prompt auditable as text. The variable payloads are of
-// course marshalled from Go — the facts and finding JSON, the history
-// projection's field names, and the validator's own message quoted in the
-// retry correction. (The one model-facing file outside this directory is
-// report.schema.json, which lives in internal/report because go:embed
-// cannot cross packages.)
+// The prompt/ directory holds everything this package says TO the model:
+// the role document, the prompt skeleton, and the deep-dive response
+// schema. No instruction, boundary paragraph or fence originates in a Go
+// string literal, which is what keeps the prompt auditable as text.
+//
+// The payloads are a different matter and some of their bytes are
+// Go-authored: the history projection's field names, the validator message
+// the correction quotes, and text this package itself wrote into an
+// earlier tick's report — a withheld-recommendation note, a fallback
+// placeholder — which returns here as history evidence. Auditing what the
+// model is told means reading this directory; auditing everything it sees
+// means following the payloads too.
+//
+// (The one model-facing file outside this directory is report.schema.json,
+// which lives in internal/report because go:embed cannot cross packages.)
 //
 // text/template, not html/template: HTML escaping would corrupt the
 // embedded JSON payloads. Both calls share one header define so the fence
@@ -51,7 +57,7 @@ var promptTmpl = template.Must(template.ParseFS(promptFS, "prompt/prompt.tmpl"))
 // zero. DeepDive selects the deep-dive boundary paragraph, which names all
 // three of that prompt's fenced payloads.
 type promptData struct {
-	SentinelMD      string
+	RoleMD          string
 	DeepDive        bool
 	Nonce           string
 	HistoryN        int
@@ -95,11 +101,11 @@ func renderTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []strin
 		return "", err
 	}
 	data := promptData{
-		SentinelMD: roleMD,
-		Nonce:      nonce,
-		HistoryN:   cfg.HistoryN,
-		History:    strings.Join(historyLines, "\n"),
-		FactsJSON:  string(factsJSON),
+		RoleMD:    roleMD,
+		Nonce:     nonce,
+		HistoryN:  cfg.HistoryN,
+		History:   strings.Join(historyLines, "\n"),
+		FactsJSON: string(factsJSON),
 	}
 	var b strings.Builder
 	if err := promptTmpl.ExecuteTemplate(&b, "triage", data); err != nil {
@@ -175,7 +181,7 @@ func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
 // collection, task.
 func renderDeepDivePrompt(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
 	data := promptData{
-		SentinelMD:  roleMD,
+		RoleMD:      roleMD,
 		DeepDive:    true,
 		Nonce:       nonce,
 		HistoryN:    cfg.HistoryN,
