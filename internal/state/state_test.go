@@ -1428,7 +1428,14 @@ func TestProcess_RejectsCraftedKeyPathEscape(t *testing.T) {
 			f := finding("alert", "crafted-key-evidence")
 			f.Key = tc.key
 			b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f}})
-			d := mustProcess(t, s, b)
+			// Call Process directly, NOT mustProcess: mustProcess t.Fatal's
+			// on the first error, which would abort the test before the
+			// containment check below ever runs. The contract is explicit
+			// that the exit-5 schema validator "does not save us" here
+			// because it fires after the write — so a test that only
+			// detects the regression by way of that same validator's
+			// error is proving nothing about containment itself.
+			d, procErr := s.Process(b)
 
 			after, err := os.ReadDir(parent)
 			if err != nil {
@@ -1436,6 +1443,10 @@ func TestProcess_RejectsCraftedKeyPathEscape(t *testing.T) {
 			}
 			if len(after) != 1 || after[0].Name() != "state" {
 				t.Fatalf("crafted key %q wrote outside $STATE_DIR: parent dir now contains %v", tc.key, after)
+			}
+
+			if procErr != nil {
+				t.Fatalf("Process: unexpected error: %v", procErr)
 			}
 
 			// (b) the finding must still be processed, under its
@@ -1519,12 +1530,95 @@ func TestProcess_AllClearDeletesByFilenameNotStoredKey(t *testing.T) {
 		t.Fatalf("all-clear delete escaped $STATE_DIR via the stored key: parent dir now contains %v", after)
 	}
 
-	if !d.Notify || d.Reason != "all_clear" || len(d.Report.Resolved) != 1 || d.Report.Resolved[0] != "doomed headline" {
-		t.Errorf("all-clear: notify=%v reason=%s resolved=%v, want notify=true reason=all_clear resolved=[doomed headline]",
-			d.Notify, d.Reason, d.Report.Resolved)
+	// loadAlertByFile now rejects the record at the load boundary (S.7:
+	// a body key that disagrees with its filename is corrupt, same as
+	// unparsable JSON) and deletes it there — before step (e) ever gets
+	// to compare its headline. So this is NOT a genuine all-clear: the
+	// operator was never told about a "doomed headline" alert that had a
+	// trustworthy identity, and fabricating one from a corrupt record
+	// would itself be the kind of invented all-clear S.3(e) forbids.
+	if d.Notify {
+		t.Errorf("notify=%v reason=%s, want notify=false: a key/filename mismatch is corrupt (S.7), not a legitimate all-clear", d.Notify, d.Reason)
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "active-alerts", filenameKey+".json")); !os.IsNotExist(err) {
-		t.Errorf("the actual record (by filename %s.json) must be deleted on match, got err=%v", filenameKey, err)
+		t.Errorf("the corrupt record (by filename %s.json) must be cleaned up, got err=%v", filenameKey, err)
+	}
+}
+
+// TestProcess_ExistingAlertRecordKeyMismatchTreatedAsCorrupt is BLOCKER 1
+// from t5-review2: the step-(d) "exists" branch loads an active alert via
+// loadAlert(key), and the OLD code trusted alert.Key from the record's own
+// JSON body for the saveAlert rewrite immediately after — a record at a
+// perfectly legitimate filename whose body claims "key":"../../pwned"
+// would have been rewritten right back out to that escaped path. The fix
+// is the same load-boundary check as the all-clear sink: loadAlert deletes
+// and reports "absent" on a key/filename mismatch, so the finding takes
+// the "new_finding" path instead and a fresh, correctly-keyed record is
+// what saveAlert ever sees.
+func TestProcess_ExistingAlertRecordKeyMismatchTreatedAsCorrupt(t *testing.T) {
+	parent := t.TempDir()
+	stateDir := filepath.Join(parent, "state")
+	if err := os.MkdirAll(filepath.Join(stateDir, "active-alerts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, time.Unix(1000, 0))
+	cfg.StateDir = stateDir
+	s := newStore(t, cfg)
+
+	const filenameKey = "1111111111111111"
+	crafted := ActiveAlert{
+		Key:         "../../pwned",
+		Component:   "kernel",
+		Headline:    "Test",
+		Severity:    "watch",
+		FirstSeen:   500,
+		LastSeen:    500,
+		Occurrences: 1,
+	}
+	raw, err := json.Marshal(crafted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "active-alerts", filenameKey+".json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("setup guard: expected exactly the state dir under parent, got %d entries", len(before))
+	}
+
+	// An input finding carrying the record's filename as its (valid,
+	// well-formed) key — this is what puts Process on the "exists"
+	// branch that reads the crafted record and, pre-fix, would have
+	// rewritten it straight back out under its body's escaped key.
+	f := finding("alert", "mismatch-evidence")
+	f.Key = filenameKey
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f}})
+	d, procErr := s.Process(b)
+
+	after, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0].Name() != "state" {
+		t.Fatalf("saveAlert escaped $STATE_DIR via the stored record's key: parent dir now contains %v", after)
+	}
+
+	if procErr != nil {
+		t.Fatalf("Process: unexpected error: %v", procErr)
+	}
+	if len(d.Report.Findings) != 1 || d.Report.Findings[0].Key != filenameKey {
+		t.Fatalf("finding must still be processed under the supplied (valid) key %q: %+v", filenameKey, d.Report.Findings)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "active-alerts", "pwned.json")); !os.IsNotExist(err) {
+		t.Error("saveAlert wrote a record under the corrupt body's key instead of the validated one")
+	}
+	if _, ok := s.loadAlert(filenameKey); !ok {
+		t.Errorf("a correctly-keyed active-alerts record was not saved under %s", filenameKey)
 	}
 }
 
