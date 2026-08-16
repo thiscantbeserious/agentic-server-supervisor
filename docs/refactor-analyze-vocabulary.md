@@ -1,9 +1,11 @@
 # Refactor: analyze vocabulary, layout and documentation
 
-Working spec for the `refactor-analyze-vocabulary` branch. It records four
-passes of design decisions so the reasoning survives the merge. Delete this
-file once the contract amendments have landed — `contracts/analyze.md` is the
-durable record; this is scaffolding.
+**Historical design record, August 2026. Not a live specification.**
+`contracts/analyze.md` is binding and wins on every conflict; if this file ever
+disagrees with it, this file is the stale one — leave it alone rather than
+"correct" it. It is kept because the reasoning is not recoverable from the
+result: why `stage 1`/`stage 2` had to go, what was rejected on the way, and
+which rejected options are not worth re-proposing.
 
 **Nothing here changes what the program computes.** Rendered prompt bytes,
 report contents, state layout and dedup keys are all unchanged. The only

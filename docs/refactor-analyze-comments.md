@@ -1,7 +1,10 @@
 # Doc comments for the refactored `internal/analyze`
 
-Final text, to be used as written. Rules and rationale: see
-`refactor-analyze-vocabulary.md` §3. Delete both files once the refactor merges.
+**Historical design record, August 2026. Not a live specification.** This was
+the text applied to the package; the files themselves are now authoritative and
+will drift from this document as the code changes. Kept for the rules and the
+reasoning in `refactor-analyze-vocabulary.md` §3, not as a comment source of
+truth — never "restore" a comment from here without checking the code first.
 
 Only `analyze.go` carries the package doc (godoc permits one); the other seven
 files get a plain comment above their `package` clause.
