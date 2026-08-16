@@ -98,6 +98,7 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `TICK_WINDOW` | `10m` (validated `> TICK_INTERVAL`) | collect |
 | `DEEP_WINDOW` | `24h` | collect |
 | `SECTION_TIMEOUT` | `10` (s) | collect |
+| `JOURNAL_MAX_RECORDS` | `20000` (per journalctl query) | journal |
 | `FACTS_MAX_BYTES` | `262144` | collect |
 | `SERVICES_MAX_BYTES` | `65536` | collect |
 | `STATE_DIR` | `/state` | all |

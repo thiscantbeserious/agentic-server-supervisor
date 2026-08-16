@@ -72,7 +72,9 @@ Environment is read exclusively through `internal/config.Load()`. The variables 
 
 ### 3. Sections — exact behaviour
 
-**Journal helper** (`internal/journal`): for each of `$HOST_JOURNAL_DIR`, `$HOST_JOURNAL_VOLATILE_DIR` that exists as a directory, run journalctl and stream-decode stdout with `json.Decoder`. Concatenate, sort by `ts` ascending (stable, ties broken by original order), de-duplicate on `(ts, message)`. Neither directory present ⇒ `ErrNoJournal` and the calling section records `"<dir> not readable"`.
+**Journal helper** (`internal/journal`): for each of `$HOST_JOURNAL_DIR`, `$HOST_JOURNAL_VOLATILE_DIR` that exists as a directory, run journalctl and stream-decode stdout with `json.Decoder`.
+
+**Record cap.** Each query stops decoding after `$JOURNAL_MAX_RECORDS` records (default 20000), counts the remainder into that section's `dropped_entries`, and sets `truncated: true`. The decoder must then **drain stdout to EOF** (`io.Copy(io.Discard, stdout)`) before `cmd.Wait()`: journalctl blocks writing into a full 64 KB pipe buffer while the parent waits for it to exit, so abandoning the pipe early deadlocks the section until its timeout kills it. The same drain applies to every early exit from the decode loop, decode errors included. Without the cap, a 24h deep query on a busy host loads the whole journal into the heap and the OOM killer takes the container down — losing every alert, which is strictly worse than losing the oldest records of one query. Concatenate, sort by `ts` ascending (stable, ties broken by original order), de-duplicate on `(ts, message)`. Neither directory present ⇒ `ErrNoJournal` and the calling section records `"<dir> not readable"`.
 
 Normalization of one record into `facts.Entry`:
 
@@ -93,10 +95,22 @@ Normalization of one record into `facts.Entry`:
 | 3 | `smart` | journal `-t smartd` | `count`, `truncated`, `dropped_entries`, `entries[]` |
 | 4 | `sensors` | `sensors -j`, stdout into `map[string]any`; non-JSON stdout ⇒ section error `unparseable sensors output` (65) | `truncated`, `dropped_entries`, `chips` (verbatim document) |
 | 5 | `zfs` | journal `-t zed` ⇒ `events[]`; `arc` = whitespace-split `$HOST_PROC/spl/kstat/zfs/arcstats` (skip the 2 header lines; field 1 = name, field 3 = value), keeping exactly `size, c, c_max, c_min, hits, misses, l2_size, l2_hits, l2_misses` as int64, missing key omitted; `pools[]` = names of directories directly under `$HOST_PROC/spl/kstat/zfs/`, sorted. **No `zpool` binary** (ARCHITECTURE §2.8) | `count`, `truncated`, `dropped_entries`, `events[]`, `arc`, `pools[]` |
-| 6 | `resources` | `$HOST_PROC/mounts` ⇒ candidate mountpoints; skip fstypes in the pseudo-fs set `{proc, sysfs, devtmpfs, devpts, tmpfs, cgroup, cgroup2, mqueue, hugetlbfs, debugfs, tracefs, securityfs, pstore, bpf, configfs, fusectl, autofs, nsfs, ramfs, binfmt_misc, overlay, squashfs, efivarfs, rpc_pipefs, selinuxfs}`; for each remaining mountpoint `m` call `syscall.Statfs(filepath.Join(HOST_ROOT, m))` — failure or `Blocks == 0` ⇒ skipped. `size_kb = Blocks*Bsize/1024`, `used_kb = (Blocks-Bfree)*Bsize/1024`, `avail_kb = Bavail*Bsize/1024`, `use_percent = ceil(used_kb*100 / (used_kb+avail_kb))` (0 when the denominator is 0). `mount` is the **host** path, `source` the mounts-file device field. Sorted by `mount`. `$HOST_PROC/meminfo` ⇒ `MemTotal, MemAvailable, MemFree, SwapTotal, SwapFree, Dirty` as kB int64. `$HOST_PROC/loadavg` ⇒ 5 fields. `$HOST_PROC/uptime` ⇒ field 1 truncated to int64 | `truncated`, `dropped_entries`, `filesystems[]`, `memory_kb`, `load`, `uptime_seconds` |
+| 6 | `resources` | `$HOST_PROC/mounts` ⇒ candidate mountpoints; skip fstypes in the pseudo-fs set `{proc, sysfs, devtmpfs, devpts, tmpfs, cgroup, cgroup2, mqueue, hugetlbfs, debugfs, tracefs, securityfs, pstore, bpf, configfs, fusectl, autofs, nsfs, ramfs, binfmt_misc, overlay, squashfs, efivarfs, rpc_pipefs, selinuxfs}` **and the remote-fs set `{nfs, nfs4, cifs, smb3, smbfs, ceph, glusterfs, fuse.sshfs, fuse.s3fs, fuse.rclone, afs, 9p}`** (see the note below); for each remaining mountpoint `m` call `syscall.Statfs(filepath.Join(HOST_ROOT, m))` — failure or `Blocks == 0` ⇒ skipped. `size_kb = Blocks*Bsize/1024`, `used_kb = (Blocks-Bfree)*Bsize/1024`, `avail_kb = Bavail*Bsize/1024`, `use_percent = ceil(used_kb*100 / (used_kb+avail_kb))` (0 when the denominator is 0). `mount` is the **host** path, `source` the mounts-file device field. Sorted by `mount`. `$HOST_PROC/meminfo` ⇒ `MemTotal, MemAvailable, MemFree, SwapTotal, SwapFree, Dirty` as kB int64. `$HOST_PROC/loadavg` ⇒ 5 fields. `$HOST_PROC/uptime` ⇒ field 1 truncated to int64 | `truncated`, `dropped_entries`, `filesystems[]`, `memory_kb`, `load`, `uptime_seconds` |
 | 7 | `services` | journal `-p err`, then drop records with `_TRANSPORT == "kernel"` (covered by §1). `failed_units[]` = unique non-empty `unit` (fallback `identifier`) of entries whose `message` matches the compiled regexp `Failed to start\|entered failed state\|Start request repeated`, sorted. Then apply the `SERVICES_MAX_BYTES` budget to the marshaled `entries` array with the §5 drop rule | `count`, `truncated`, `dropped_entries`, `entries[]`, `failed_units[]` |
 | 8 | `network` | parse `$HOST_PROC/net/{tcp,tcp6,udp,udp6}`, skipping the header line. Listening = TCP state `0A`, UDP state `07`. `addr` = hex local address before the `:`, verbatim; `port` = `strconv.ParseUint(hexAfterColon, 16, 16)`. Unique-sort by `(proto, port, addr)`. Compare `proto/port` strings against `$STATE_DIR/baseline-ports`: `new_listeners[]` = current − baseline, `closed_listeners[]` = baseline − current. Baseline missing ⇒ create it from the current list, `baseline_initialized: true`, both diffs empty | `truncated`, `dropped_entries`, `baseline_initialized`, `listeners[]`, `new_listeners[]`, `closed_listeners[]` |
 | 9 | `meta` | §2 + below | — |
+
+**Why remote filesystems are skipped (§3 row 6):** `syscall.Statfs` on a hung NFS/CIFS mount blocks in uninterruptible kernel sleep (D-state). Go cannot cancel a blocking syscall, so `SECTION_TIMEOUT` does **not** save the collector — the goroutine and its OS thread are stuck until the mount responds, which on a partitioned server may be never. The target host is a NAS, so this is a realistic every-tick risk, and disk usage of a remote share is not this supervisor's job anyway.
+
+**Absent optional sources are not section failures.** A source that simply does not exist on this host degrades to an empty result, not an `{"error": …}` section:
+
+| Missing | Behaviour |
+|---|---|
+| `$HOST_PROC/net/tcp6`, `udp6` (IPv6 disabled) | that file contributes no listeners; the IPv4 files still produce the section |
+| `$HOST_RASDAEMON` (rasdaemon not installed) | `store: []`; the journal-backed `entries[]` are still collected |
+| `$HOST_PROC/spl/kstat/zfs/**` (no ZFS module) | `arc: {}`, `pools: []`; the `zed` journal `events[]` are still collected |
+
+A section error is reserved for a source that *should* be there and could not be read (permission denied, timeout, unparseable output). Failing a whole section because one optional input is absent would blind the analyzer to the parts that did work — and on a host where the absence is permanent, it would fire that error on every tick forever.
 
 `count` is the number of entries **collected**, before any truncation. Invariant: `len(entries) + dropped_entries == count`.
 
@@ -506,6 +520,12 @@ type Query struct {
 	Dirs  []string // existing directories only
 	Since string   // e.g. "10m"
 	Args  []string // e.g. []string{"-k", "-p", "err"}
+
+	// ExcludeTransport drops records by _TRANSPORT (e.g. "kernel" for the
+	// services section, §3 row 7). The filter lives here because C5 forbids
+	// _TRANSPORT from leaving internal/journal, so this is the last place
+	// that still has the field.
+	ExcludeTransport []string
 }
 
 // Run execs journalctl once per dir, decodes the JSON stream, normalizes,
