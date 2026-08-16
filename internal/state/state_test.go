@@ -1,9 +1,15 @@
 package state
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +20,11 @@ import (
 )
 
 func testConfig(t *testing.T, now time.Time) *config.Config {
-	loc, _ := time.LoadLocation("UTC")
+	t.Helper()
+	loc, err := time.LoadLocation("UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &config.Config{
 		StateDir:         t.TempDir(),
 		HistoryKeep:      50,
@@ -31,971 +41,962 @@ func testConfig(t *testing.T, now time.Time) *config.Config {
 	}
 }
 
-func TestProcess_SameWatchFinding3Ticks(t *testing.T) {
-	// Case 1: same WATCH finding, 3 ticks, Now +5 min each
-	cfg := testConfig(t, time.Unix(1000, 0))
+func newStore(t *testing.T, cfg *config.Config) *Store {
+	t.Helper()
 	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s
+}
+
+// mustProcess runs Process and fails the test immediately on an
+// unexpected error — every case below has a schema-valid fixture, so a
+// non-nil error is a bug, not an expected outcome, and must never be
+// discarded (a discarded error here nil-derefs on the returned *Decision).
+func mustProcess(t *testing.T, s *Store, raw []byte) *Decision {
+	t.Helper()
+	d, err := s.Process(raw)
+	if err != nil {
+		t.Fatalf("Process: unexpected error: %v (input: %s)", err, raw)
+	}
+	return d
+}
+
+func marshalReport(t *testing.T, r *report.Report) []byte {
+	t.Helper()
+	if r.Findings == nil {
+		r.Findings = []report.Finding{}
+	}
+	if r.Resolved == nil {
+		r.Resolved = []string{}
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	return b
+}
+
+func finding(severity, evidence string) report.Finding {
+	return report.Finding{
+		Severity:    severity,
+		Component:   "kernel",
+		Evidence:    evidence,
+		Explanation: "explanation for " + evidence,
+	}
+}
+
+var historyNameRe = regexp.MustCompile(`^[0-9]{10}-[0-9]{6}\.json$`)
+
+func readHistoryFiles(t *testing.T, stateDir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(stateDir, "history"))
+	if err != nil {
+		t.Fatalf("read history dir: %v", err)
+	}
+	return entries
+}
+
+// --- S1: history annotation — the cross-component assertion (C9) ---
+
+func TestS1_HistoryAnnotatesBothNotifiedAndSuppressed(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	// Tick 1: establish finding B as an active alert (notifies as new).
+	fB := finding("watch", "B evidence")
+	b1 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "B", Body: "body", Findings: []report.Finding{fB}})
+	d1 := mustProcess(t, s, b1)
+	if !d1.Notify {
+		t.Fatal("tick 1: expected notify=true for a new finding")
+	}
+
+	// Tick 2 (small delta, inside the renotify window): finding A is new
+	// (notifies), finding B repeats unchanged (suppressed).
+	cfg.Now = time.Unix(1010, 0)
+	fA := finding("watch", "A evidence")
+	fB2 := finding("watch", "B evidence")
+	b2 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Two findings", Body: "body", Findings: []report.Finding{fA, fB2}})
+	d2 := mustProcess(t, s, b2)
+	if !d2.Notify || d2.SuppressedCount != 1 {
+		t.Fatalf("tick 2: notify=%v suppressed=%d, want notify=true suppressed=1", d2.Notify, d2.SuppressedCount)
+	}
+
+	entries := readHistoryFiles(t, cfg.StateDir)
+	var newest os.DirEntry
+	for _, e := range entries {
+		if newest == nil || e.Name() > newest.Name() {
+			newest = e
+		}
+	}
+	if newest == nil {
+		t.Fatal("no history file written")
+	}
+	if !historyNameRe.MatchString(newest.Name()) {
+		t.Fatalf("history filename %q does not match ^[0-9]{10}-[0-9]{6}\\.json$", newest.Name())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfg.StateDir, "history", newest.Name()))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Create minimal valid JSON - no optional fields that would be zero-valued
-	b1 := []byte(`{"status":"WATCH","headline":"Test","body":"Test body","findings":[{"severity":"watch","component":"kernel","evidence":"test evidence","explanation":"test"}],"resolved":[]}`)
-
-	d1, err := s.Process(b1)
-	if err != nil {
-		t.Fatalf("Process failed: %v, input was: %s", err, string(b1))
+	var histRep report.Report
+	if err := json.Unmarshal(data, &histRep); err != nil {
+		t.Fatalf("unmarshal history file: %v", err)
 	}
+	if len(histRep.Findings) != 2 {
+		t.Fatalf("history findings: got %d, want 2 (one notified, one suppressed)", len(histRep.Findings))
+	}
+	for _, f := range histRep.Findings {
+		if f.Occurrences == 0 {
+			t.Errorf("history finding %q: occurrences=0, want > 0 (read from disk, per S.3b)", f.Evidence)
+		}
+		if f.FirstSeen == 0 {
+			t.Errorf("history finding %q: first_seen=0, want > 0", f.Evidence)
+		}
+		if f.Key == "" {
+			t.Errorf("history finding %q: key empty", f.Evidence)
+		}
+	}
+}
+
+// --- S2: no stray files in history/ ---
+
+func TestS2_NoStrayFilesInHistoryDir(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	rep := &report.Report{Status: "OK", Headline: "H", Body: "body"}
+	for i := 0; i < 5; i++ {
+		cfg.Now = time.Unix(int64(1000+i*100), 0)
+		mustProcess(t, s, marshalReport(t, rep))
+	}
+
+	for _, e := range readHistoryFiles(t, cfg.StateDir) {
+		if !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("stray file in history/: %q — a leftover .tmp-* evicts a real report from analyze's window", e.Name())
+		}
+	}
+}
+
+// --- S3: Health() ---
+
+func TestS3_Health(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	// Fresh heartbeat: a Process call just stamped mtime at cfg.Now.
+	mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b"}))
+	if err := s.Health(); err != nil {
+		t.Errorf("fresh heartbeat: Health() = %v, want nil", err)
+	}
+
+	// Stale: mtime backdated past 3*TickInterval relative to cfg.Now.
+	hbPath := filepath.Join(cfg.StateDir, "heartbeat")
+	stale := cfg.Now.Add(-3*cfg.TickInterval - time.Second)
+	if err := os.Chtimes(hbPath, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err == nil {
+		t.Error("stale heartbeat: Health() = nil, want non-nil")
+	}
+
+	// Missing: no heartbeat file at all.
+	if err := os.Remove(hbPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err == nil {
+		t.Error("missing heartbeat: Health() = nil, want non-nil")
+	}
+}
+
+// --- case 1 ---
+
+func TestProcess_SameWatchFinding3Ticks(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	b1 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Test", Body: "Test body", Findings: []report.Finding{finding("watch", "evidence")}})
+
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify || d1.Reason != "new_finding" || d1.SuppressedCount != 0 || d1.ActiveCount != 1 {
-		t.Errorf("Tick 1: notify=%v reason=%s suppressed=%d active=%d, want notify=true reason=new_finding",
+		t.Errorf("Tick 1: notify=%v reason=%s suppressed=%d active=%d, want notify=true reason=new_finding suppressed=0 active=1",
 			d1.Notify, d1.Reason, d1.SuppressedCount, d1.ActiveCount)
 	}
 
 	cfg.Now = time.Unix(1000+300, 0) // +5 min
-	d2, err := s.Process(b1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d2.Notify || d2.Reason != "suppressed" || d2.SuppressedCount != 1 {
-		t.Errorf("Tick 2: notify=%v reason=%s suppressed=%d, want notify=false reason=suppressed suppressed=1",
-			d2.Notify, d2.Reason, d2.SuppressedCount)
-	}
-	if d2.Report.Status != "OK" {
-		t.Errorf("Tick 2: status=%s, want OK", d2.Report.Status)
+	d2 := mustProcess(t, s, b1)
+	if d2.Notify || d2.Reason != "suppressed" || d2.SuppressedCount != 1 || d2.Report.Status != "OK" {
+		t.Errorf("Tick 2: notify=%v reason=%s suppressed=%d status=%s, want notify=false reason=suppressed suppressed=1 status=OK",
+			d2.Notify, d2.Reason, d2.SuppressedCount, d2.Report.Status)
 	}
 
 	cfg.Now = time.Unix(1000+600, 0) // +10 min
-	d3, err := s.Process(b1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d3 := mustProcess(t, s, b1)
 	if d3.Notify || d3.Reason != "suppressed" || d3.SuppressedCount != 1 {
 		t.Errorf("Tick 3: notify=%v reason=%s suppressed=%d, want notify=false reason=suppressed suppressed=1",
 			d3.Notify, d3.Reason, d3.SuppressedCount)
 	}
 }
 
+// --- case 2 ---
+
 func TestProcess_Escalation(t *testing.T) {
-	// Case 2: tick 4 with escalation from WATCH to ALERT
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	watchFinding := report.Finding{
-		Severity:    "watch",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "WATCH",
-		Headline: "Test",
-		Body:     "Test body",
-		Findings: []report.Finding{watchFinding},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	s.Process(b1)
-
+	watch := finding("watch", "evidence")
+	b1 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Test", Body: "Test body", Findings: []report.Finding{watch}})
+	mustProcess(t, s, b1)
 	cfg.Now = time.Unix(1000+300, 0)
-	s.Process(b1)
+	mustProcess(t, s, b1)
 	cfg.Now = time.Unix(1000+600, 0)
-	s.Process(b1)
+	mustProcess(t, s, b1)
 
-	// Now escalate to ALERT
 	cfg.Now = time.Unix(1000+900, 0)
-	alertFinding := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
-	report4 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Test body",
-		Findings: []report.Finding{alertFinding},
-		Resolved: []string{},
-	}
-	b4, _ := json.Marshal(report4)
-	d4, err := s.Process(b4)
-	if err != nil {
-		t.Fatal(err)
-	}
+	alert := finding("alert", "evidence") // same evidence -> same key -> same active alert
+	b4 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Test body", Findings: []report.Finding{alert}})
+	d4 := mustProcess(t, s, b4)
 	if !d4.Notify || d4.Reason != "escalation" {
 		t.Errorf("Tick 4 escalation: notify=%v reason=%s, want notify=true reason=escalation", d4.Notify, d4.Reason)
 	}
+
+	// AC (PLAN.md T5): 3 ticks same finding -> exactly 1 notification, then
+	// tick 4 -> exactly 1 escalation. Combined with case 1's assertions,
+	// this is that AC end to end.
 }
+
+// --- case 3 ---
 
 func TestProcess_RenotifyWatch(t *testing.T) {
-	// Case 3: WATCH finding at +5h59min / +6h1min
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	finding := report.Finding{
-		Severity:    "watch",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "WATCH",
-		Headline: "Test",
-		Body:     "Test body",
-		Findings: []report.Finding{finding},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	b1 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Test", Body: "Test body", Findings: []report.Finding{finding("watch", "evidence")}})
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify {
-		t.Fatal("Initial notify failed")
+		t.Fatal("initial notify failed")
 	}
 
-	// +5h 59 min (just before renotify window)
-	cfg.Now = time.Unix(1000+5*3600+59*60, 0)
-	d2, _ := s.Process(b1)
+	// Window edge: just before (suppressed), at/after (renotify), watch = 21600s (6h).
+	cfg.Now = time.Unix(1000+21600-1, 0)
+	d2 := mustProcess(t, s, b1)
 	if d2.Notify || d2.Reason != "suppressed" {
-		t.Errorf("At 5h59m: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
+		t.Errorf("at window-1s: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
 	}
 
-	// +6h 1 min (after renotify window, watch is 6h)
-	cfg.Now = time.Unix(1000+6*3600+60, 0)
-	d3, _ := s.Process(b1)
+	cfg.Now = time.Unix(1000+21600, 0)
+	d3 := mustProcess(t, s, b1)
 	if !d3.Notify || d3.Reason != "renotify" {
-		t.Errorf("At 6h1m: notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
+		t.Errorf("at window (exact, >=): notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
 	}
 }
+
+// --- case 4 ---
 
 func TestProcess_RenotifyAlert(t *testing.T) {
-	// Case 4: ALERT finding at +59min / +1h1min
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	finding := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Test body",
-		Findings: []report.Finding{finding},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Test body", Findings: []report.Finding{finding("alert", "evidence")}})
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify {
-		t.Fatal("Initial notify failed")
+		t.Fatal("initial notify failed")
 	}
 
-	// +59 min (just before renotify window)
-	cfg.Now = time.Unix(1000+59*60, 0)
-	d2, _ := s.Process(b1)
+	// alert window = 3600s (1h).
+	cfg.Now = time.Unix(1000+3600-1, 0)
+	d2 := mustProcess(t, s, b1)
 	if d2.Notify || d2.Reason != "suppressed" {
-		t.Errorf("At 59m: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
+		t.Errorf("at window-1s: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
 	}
 
-	// +1h 1 min (after renotify window, alert is 1h)
-	cfg.Now = time.Unix(1000+3600+60, 0)
-	d3, _ := s.Process(b1)
+	cfg.Now = time.Unix(1000+3600, 0)
+	d3 := mustProcess(t, s, b1)
 	if !d3.Notify || d3.Reason != "renotify" {
-		t.Errorf("At 1h1m: notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
+		t.Errorf("at window (exact, >=): notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
 	}
 }
+
+// S.3(g) rule 1: when findings are notified AND an unrelated alert resolves
+// in the same tick, "resolved" on the outgoing report must still be
+// all_clear (S.4's own worked example shows exactly this combination) — an
+// implementation that only fills rep.Resolved on rule 2 silently drops the
+// all-clear on the ONE tick it happens to coincide with a notification, and
+// step (e) has already deleted the key file by then, so it is unrecoverable.
+func TestProcess_NotifyRuleCarriesResolvedFromSameTick(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	// Establish an unrelated alert that will resolve this tick.
+	b0 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Load average elevated on bam", Body: "b", Findings: []report.Finding{finding("alert", "load high")}})
+	mustProcess(t, s, b0)
+
+	cfg.Now = time.Unix(1010, 0)
+	b1 := marshalReport(t, &report.Report{
+		Status:   "ALERT",
+		Headline: "New alert",
+		Body:     "b",
+		Findings: []report.Finding{finding("alert", "brand new evidence")}, // notifies -> rule 1
+		Resolved: []string{"Load average elevated on bam"},                 // unrelated alert clears same tick
+	})
+	d1 := mustProcess(t, s, b1)
+	if !d1.Notify || d1.Reason == "" {
+		t.Fatalf("expected rule 1 to notify: notify=%v reason=%s", d1.Notify, d1.Reason)
+	}
+	if len(d1.Report.Resolved) != 1 || d1.Report.Resolved[0] != "Load average elevated on bam" {
+		t.Errorf("rule 1 dropped the same-tick all-clear: resolved=%v, want [Load average elevated on bam]", d1.Report.Resolved)
+	}
+}
+
+// --- case 5 ---
 
 func TestProcess_AllClear(t *testing.T) {
-	// Case 5: report with resolved, finding absent from findings[]
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	finding := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test headline",
-		Body:     "Test body",
-		Findings: []report.Finding{finding},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test headline", Body: "Test body", Findings: []report.Finding{finding("alert", "evidence")}})
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify {
-		t.Fatal("Initial notify failed")
+		t.Fatal("initial notify failed")
 	}
 
-	// Now resolve it
 	cfg.Now = time.Unix(2000, 0)
-	report2 := &report.Report{
-		Status:   "OK",
-		Headline: "Resolved",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{"Test headline"},
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "Resolved", Body: "irrelevant, overwritten by rule 2", Resolved: []string{"Test headline"}})
+	d2 := mustProcess(t, s, b2)
+	if !d2.Notify || d2.Reason != "all_clear" || len(d2.Report.Resolved) != 1 || d2.Report.Resolved[0] != "Test headline" {
+		t.Errorf("all-clear: notify=%v reason=%s resolved=%v, want notify=true reason=all_clear resolved=[Test headline]",
+			d2.Notify, d2.Reason, d2.Report.Resolved)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts")); len(entries) != 0 {
+		t.Errorf("active-alerts: %d files remain, want 0", len(entries))
 	}
 
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
-	if !d2.Notify || d2.Reason != "all_clear" || len(d2.Report.Resolved) != 1 {
-		t.Errorf("All-clear: notify=%v reason=%s resolved=%d, want notify=true reason=all_clear resolved=1",
-			d2.Notify, d2.Reason, len(d2.Report.Resolved))
-	}
-
-	// Check that key file is gone
-	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
-	files, _ := os.ReadDir(alertDir)
-	if len(files) != 0 {
-		t.Errorf("Active alerts: %d files remain, want 0", len(files))
-	}
-
-	// Second all-clear on same finding should not notify
 	cfg.Now = time.Unix(3000, 0)
-	report3 := &report.Report{
-		Status:   "OK",
-		Headline: "Still clear",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{"Test headline"},
-	}
-
-	b3, _ := json.Marshal(report3)
-	d3, _ := s.Process(b3)
+	b3 := marshalReport(t, &report.Report{Status: "OK", Headline: "Still clear", Body: "body", Resolved: []string{"Test headline"}})
+	d3 := mustProcess(t, s, b3)
 	if d3.Notify {
-		t.Errorf("Second all-clear: notify=%v, want false", d3.Notify)
+		t.Errorf("second all-clear on the same headline: notify=%v, want false (key already gone)", d3.Notify)
 	}
 }
+
+// --- case 6 ---
 
 func TestProcess_ResolvedUnknownHeadline(t *testing.T) {
-	// Case 6: resolved naming a never-active headline
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Empty",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{"Unknown headline"},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	b1 := marshalReport(t, &report.Report{Status: "OK", Headline: "Empty", Body: "body", Resolved: []string{"Unknown headline"}})
+	d1 := mustProcess(t, s, b1)
 	if d1.Notify || len(d1.Report.Resolved) != 0 {
-		t.Errorf("Unknown resolved: notify=%v resolved=%d, want false resolved=0", d1.Notify, len(d1.Report.Resolved))
+		t.Errorf("unknown resolved: notify=%v resolved=%v, want false []", d1.Notify, d1.Report.Resolved)
 	}
 }
+
+// --- case 7 ---
 
 func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
-	// Case 7: two findings sharing a headline; next tick one persists
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	f1 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "evidence1",
-		Explanation: "test",
-	}
-	f2 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "evidence2",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Shared headline",
-		Body:     "Test",
-		Findings: []report.Finding{f1, f2},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	f1 := finding("alert", "evidence1")
+	f2 := finding("alert", "evidence2")
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Shared headline", Body: "body", Findings: []report.Finding{f1, f2}})
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify || d1.ActiveCount != 2 {
-		t.Fatal("Initial: should have 2 active alerts")
+		t.Fatalf("initial: notify=%v active=%d, want true 2", d1.Notify, d1.ActiveCount)
 	}
 
-	// Second tick: only f1 persists, resolve the shared headline
+	// f1 persists but within the renotify window (suppressed, still
+	// "touched" in step d); resolved names the shared headline, which must
+	// close only f2 (S-D7), even though f1 is not in the notified list.
 	cfg.Now = time.Unix(2000, 0)
-	report2 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Shared headline",
-		Body:     "Test",
-		Findings: []report.Finding{f1},
-		Resolved: []string{"Shared headline"},
-	}
-
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
+	b2 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Shared headline", Body: "body", Findings: []report.Finding{f1}, Resolved: []string{"Shared headline"}})
+	d2 := mustProcess(t, s, b2)
 	if len(d2.Report.Resolved) != 1 {
-		t.Errorf("Resolved: %d entries, want 1", len(d2.Report.Resolved))
+		t.Errorf("resolved: %d entries, want exactly 1 (S-D7)", len(d2.Report.Resolved))
 	}
 	if d2.ActiveCount != 1 {
-		t.Errorf("Active: %d, want 1", d2.ActiveCount)
+		t.Errorf("active: %d, want 1 — f1 must survive being 'touched' in step (d)", d2.ActiveCount)
+	}
+	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts"))
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), dedup.Key("kernel", "evidence1")) {
+		t.Errorf("surviving active-alert should be f1's key, got %v", entries)
 	}
 }
+
+// --- case 8 ---
 
 func TestProcess_AllClearHeadlineTruncate(t *testing.T) {
-	// Case 8: all-clear headline of 80 runes + "(+2 more)"
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
 	headline := strings.Repeat("x", 80)
-
-	f1 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "e1",
-		Explanation: "test",
-	}
-	f2 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "e2",
-		Explanation: "test",
-	}
-	f3 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "e3",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: headline,
-		Body:     "Test",
-		Findings: []report.Finding{f1, f2, f3},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	s.Process(b1)
+	fs := []report.Finding{finding("alert", "e1"), finding("alert", "e2"), finding("alert", "e3")}
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: headline, Body: "body", Findings: fs})
+	mustProcess(t, s, b1)
 
 	cfg.Now = time.Unix(2000, 0)
-	report2 := &report.Report{
-		Status:   "OK",
-		Headline: "",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{headline, headline, headline},
+	// All 3 findings absent this tick, all sharing the resolved headline.
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "irrelevant", Body: "body", Resolved: []string{headline}})
+	d2 := mustProcess(t, s, b2)
+	if !d2.Notify || d2.Reason != "all_clear" {
+		t.Fatalf("notify=%v reason=%s, want notify=true reason=all_clear", d2.Notify, d2.Reason)
 	}
-
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
-	if d2.Notify && d2.Reason == "all_clear" {
-		emitHeadline := d2.Report.Headline
-		if len([]rune(emitHeadline)) > 80 {
-			t.Errorf("All-clear headline: %d runes, want <= 80", len([]rune(emitHeadline)))
-		}
+	if n := len([]rune(d2.Report.Headline)); n > 80 {
+		t.Errorf("all-clear headline: %d runes, want <= 80", n)
+	}
+	if _, err := report.Validate(marshalReport(t, &d2.Report)); err != nil {
+		t.Errorf("emitted all-clear report failed schema validation: %v", err)
 	}
 }
 
+// --- case 9 ---
+
 func TestProcess_HistoryRotation(t *testing.T) {
-	// Case 9: 60 reports processed
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
+	s := newStore(t, cfg)
 
 	for i := 0; i < 60; i++ {
 		cfg.Now = time.Unix(int64(1000+i*100), 0)
-		s.Process(b1)
+		mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body"}))
 	}
 
-	historyDir := filepath.Join(cfg.StateDir, "history")
-	files, _ := os.ReadDir(historyDir)
-	if len(files) != 50 {
-		t.Errorf("History files: %d, want 50", len(files))
+	entries := readHistoryFiles(t, cfg.StateDir)
+	if len(entries) != 50 {
+		t.Fatalf("history files: %d, want 50", len(entries))
 	}
 
-	// Check that names sort chronologically (lexicographically by construction)
-	if len(files) > 0 {
-		first := files[0].Name()
-		last := files[len(files)-1].Name()
-		if first >= last {
-			t.Errorf("History not sorted: first=%s, last=%s", first, last)
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+		if !historyNameRe.MatchString(e.Name()) {
+			t.Errorf("history filename %q does not match the contract pattern", e.Name())
 		}
+	}
+	sort.Strings(names)
+	// oldest 10 ticks (epoch 1000..1900) must be gone, newest (epoch 1000+59*100=6900) must survive.
+	oldestSurviving := epochOf(t, names[0])
+	if oldestSurviving < 1000+10*100 {
+		t.Errorf("oldest surviving history epoch = %d, want >= %d (the 10 oldest of 60 must be gone)", oldestSurviving, 1000+10*100)
+	}
+	newestWant := int64(1000 + 59*100)
+	if got := epochOf(t, names[len(names)-1]); got != newestWant {
+		t.Errorf("newest history epoch = %d, want %d", got, newestWant)
 	}
 }
 
-func TestOutbox(t *testing.T) {
-	// Case 10: outbox operations
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
+func epochOf(t *testing.T, name string) int64 {
+	t.Helper()
+	epochStr, _, _ := strings.Cut(name, "-")
+	n, err := strconv.ParseInt(epochStr, 10, 64)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("bad history filename %q: %v", name, err)
+	}
+	return n
+}
+
+// --- case 10: outbox ---
+
+func TestOutbox(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	payload := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Test body"})
+
+	cfg.Now = time.Unix(1000, 0)
+	id1, err := s.OutboxAdd(payload)
+	if err != nil {
+		t.Fatalf("OutboxAdd: %v", err)
+	}
+	cfg.Now = time.Unix(1001, 0)
+	id2, err := s.OutboxAdd(payload)
+	if err != nil {
+		t.Fatalf("OutboxAdd: %v", err)
+	}
+	if id1 == id2 {
+		t.Fatalf("two adds produced the same id %q", id1)
 	}
 
-	payload := []byte(`{"status":"ALERT","headline":"Test","body":"Test body","findings":[],"resolved":[]}`)
-
-	// Add two entries
-	id1, _ := s.OutboxAdd(payload)
-	_, _ = s.OutboxAdd(payload)
-
-	// Take should return 2, oldest first, with attempts=1
-	items, _ := s.OutboxTake()
+	items, err := s.OutboxTake()
+	if err != nil {
+		t.Fatalf("OutboxTake: %v", err)
+	}
 	if len(items) != 2 {
 		t.Fatalf("OutboxTake: %d items, want 2", len(items))
 	}
+	if items[0].ID != id1 || items[1].ID != id2 {
+		t.Errorf("OutboxTake order: got [%s,%s], want oldest first [%s,%s]", items[0].ID, items[1].ID, id1, id2)
+	}
 	if items[0].Attempts != 1 || items[1].Attempts != 1 {
-		t.Errorf("Attempts: got %d,%d want 1,1", items[0].Attempts, items[1].Attempts)
+		t.Errorf("attempts after first take: got %d,%d want 1,1", items[0].Attempts, items[1].Attempts)
 	}
 	if items[0].FallbackSMTP || items[1].FallbackSMTP {
-		t.Errorf("FallbackSMTP too early")
+		t.Errorf("fallback_smtp true too early (attempt 1)")
+	}
+	if !bytes.Equal(items[0].Payload, payload) {
+		t.Errorf("payload did not round-trip byte-identically: got %s, want %s", items[0].Payload, payload)
 	}
 
-	// Two more takes (attempts 2, then 3)
-	s.OutboxTake()
-	s.OutboxTake()
-
-	// Third take should have fallback_smtp=true
-	items, _ = s.OutboxTake()
-	if len(items) > 0 && !items[0].FallbackSMTP {
-		t.Errorf("FallbackSMTP not set at attempt 3")
+	// Two more takes -> attempts 2, then 3 -> fallback_smtp flips at OutboxSMTPAfter=3.
+	if _, err := s.OutboxTake(); err != nil {
+		t.Fatal(err)
 	}
-
-	// Ack one
-	s.OutboxAck(id1)
-
-	// Ack unknown ID should error
-	err = s.OutboxAck("unknown")
-	if err != ErrUnknownID {
-		t.Errorf("Ack unknown: got %v, want ErrUnknownID", err)
-	}
-
-	// Add 60 entries, should keep only 50
-	for i := 0; i < 60; i++ {
-		s.OutboxAdd(payload)
-	}
-
-	// Payload should round-trip byte-identically
-	items, _ = s.OutboxTake()
-	if len(items) > 0 && !json.Valid(items[0].Payload) {
-		t.Errorf("Payload not valid JSON")
-	}
-}
-
-func TestHeartbeat(t *testing.T) {
-	// Case 11: heartbeat timing
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
+	items, err = s.OutboxTake()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Empty",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{},
+	if len(items) != 2 || !items[0].FallbackSMTP || !items[1].FallbackSMTP {
+		t.Errorf("attempt 3: fallback_smtp = %v,%v want true,true", items[0].FallbackSMTP, items[1].FallbackSMTP)
+	}
+	if items[0].Attempts != 3 {
+		t.Errorf("attempts at 3rd take: got %d, want 3", items[0].Attempts)
 	}
 
-	b1, _ := json.Marshal(report1)
+	// Ack removes exactly one.
+	if err := s.OutboxAck(id1); err != nil {
+		t.Fatalf("OutboxAck(%s): %v", id1, err)
+	}
+	remaining, _ := os.ReadDir(filepath.Join(cfg.StateDir, "outbox"))
+	if len(remaining) != 1 {
+		t.Errorf("after acking one of two: %d files remain, want 1", len(remaining))
+	}
+	if err := s.OutboxAck(id2); err != nil {
+		t.Fatalf("OutboxAck(%s): %v", id2, err)
+	}
 
-	// 07:59 UTC
-	cfg.Now = time.Date(2000, 1, 1, 7, 59, 0, 0, time.UTC)
-	d1, _ := s.Process(b1)
+	if err := s.OutboxAck("bogus"); err != ErrUnknownID {
+		t.Errorf("OutboxAck(bogus) = %v, want ErrUnknownID", err)
+	}
+
+	// 60 adds -> only OUTBOX_MAX (50) kept, oldest dropped first.
+	var lastID string
+	for i := 0; i < 60; i++ {
+		cfg.Now = time.Unix(int64(2000+i), 0)
+		lastID, err = s.OutboxAdd(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, _ := os.ReadDir(filepath.Join(cfg.StateDir, "outbox"))
+	if len(files) != 50 {
+		t.Fatalf("after 60 adds: %d files, want 50 (OUTBOX_MAX)", len(files))
+	}
+	if err := s.OutboxAck(lastID); err != nil {
+		t.Errorf("the most recently added id must survive the trim: OutboxAck(%s) = %v", lastID, err)
+	}
+
+	// S.2: outbox-add input must be a JSON object.
+	if _, err := s.OutboxAdd([]byte(`"not an object"`)); err != ErrBadInput {
+		t.Errorf("OutboxAdd(non-object) = %v, want ErrBadInput", err)
+	}
+	if _, err := s.OutboxAdd([]byte(`not json`)); err != ErrBadInput {
+		t.Errorf("OutboxAdd(non-JSON) = %v, want ErrBadInput", err)
+	}
+}
+
+// --- case 11: heartbeat timing ---
+
+func TestHeartbeat(t *testing.T) {
+	cfg := testConfig(t, time.Date(2000, 1, 1, 7, 59, 0, 0, time.UTC))
+	s := newStore(t, cfg)
+
+	empty := &report.Report{Status: "OK", Headline: "Empty", Body: "body"}
+
+	d1 := mustProcess(t, s, marshalReport(t, empty))
 	if d1.Notify || d1.Heartbeat {
 		t.Errorf("07:59: notify=%v heartbeat=%v, want both false", d1.Notify, d1.Heartbeat)
 	}
 
-	// 08:01 UTC (after heartbeat hour)
 	cfg.Now = time.Date(2000, 1, 1, 8, 1, 0, 0, time.UTC)
-	d2, _ := s.Process(b1)
-	if !d2.Heartbeat || d2.Reason != "heartbeat" {
-		t.Errorf("08:01: heartbeat=%v reason=%s, want true heartbeat", d2.Heartbeat, d2.Reason)
+	d2 := mustProcess(t, s, marshalReport(t, empty))
+	if !d2.Notify || !d2.Heartbeat || d2.Reason != "heartbeat" {
+		t.Errorf("08:01: notify=%v heartbeat=%v reason=%s, want true true heartbeat", d2.Notify, d2.Heartbeat, d2.Reason)
 	}
 
-	// Same day again should not send heartbeat
 	cfg.Now = time.Date(2000, 1, 1, 9, 0, 0, 0, time.UTC)
-	d3, _ := s.Process(b1)
+	d3 := mustProcess(t, s, marshalReport(t, empty))
 	if d3.Heartbeat {
-		t.Errorf("Same day: heartbeat=%v, want false", d3.Heartbeat)
+		t.Errorf("same day again: heartbeat=%v, want false", d3.Heartbeat)
 	}
 
-	// Next day at 11:00 should send heartbeat
 	cfg.Now = time.Date(2000, 1, 2, 11, 0, 0, 0, time.UTC)
-	d4, _ := s.Process(b1)
+	d4 := mustProcess(t, s, marshalReport(t, empty))
 	if !d4.Heartbeat {
-		t.Errorf("Next day 11:00: heartbeat=%v, want true", d4.Heartbeat)
+		t.Errorf("next day 11:00: heartbeat=%v, want true", d4.Heartbeat)
 	}
 }
+
+// --- case 12: heartbeat suppression ---
 
 func TestHeartbeatSuppression(t *testing.T) {
-	// Case 12: heartbeat suppression when alert notified
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
+	cfg := testConfig(t, time.Date(2000, 1, 1, 9, 0, 0, 0, time.UTC))
+	s := newStore(t, cfg)
+
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Alert", Body: "Body", Findings: []report.Finding{finding("alert", "e")}})
+	d1 := mustProcess(t, s, b1)
+	if !d1.Notify {
+		t.Fatal("alert should notify")
+	}
+
+	cfg.Now = time.Date(2000, 1, 1, 9, 0, 1, 0, time.UTC)
+	empty := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b"})
+	d2 := mustProcess(t, s, empty)
+	if d2.Heartbeat {
+		t.Errorf("heartbeat suppressed by the earlier alert: got true, want false")
+	}
+
+	hbData, err := os.ReadFile(filepath.Join(cfg.StateDir, "heartbeat"))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	f := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Alert",
-		Body:     "Body",
-		Findings: []report.Finding{f},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-
-	// 09:00 - alert notified
-	cfg.Now = time.Date(2000, 1, 1, 9, 0, 0, 0, time.UTC)
-	d1, _ := s.Process(b1)
-	if !d1.Notify {
-		t.Fatal("Alert should notify")
-	}
-
-	// Still 09:00 - no heartbeat
-	cfg.Now = time.Date(2000, 1, 1, 9, 0, 1, 0, time.UTC)
-	report2 := &report.Report{
-		Status:   "OK",
-		Headline: "",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{},
-	}
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
-	if d2.Heartbeat {
-		t.Errorf("Heartbeat suppressed: got true, want false")
-	}
-
-	// Verify heartbeat content is today
-	hbFile := filepath.Join(cfg.StateDir, "heartbeat")
-	hbData, _ := os.ReadFile(hbFile)
-	hbStr := strings.TrimSpace(string(hbData))
-	if hbStr != "2000-01-01" {
-		t.Errorf("Heartbeat content: %s, want 2000-01-01", hbStr)
+	if got := strings.TrimSpace(string(hbData)); got != "2000-01-01" {
+		t.Errorf("heartbeat content: %q, want 2000-01-01 (advanced by the alert notification)", got)
 	}
 }
+
+// --- case 13: liveness ---
 
 func TestLiveness(t *testing.T) {
-	// Case 13: liveness - heartbeat mtime advances on every Process
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
+	cfg := testConfig(t, time.Date(2000, 1, 1, 8, 0, 0, 0, time.UTC))
+	s := newStore(t, cfg)
+
+	empty := &report.Report{Status: "OK", Headline: "Test", Body: "body"}
+
+	mustProcess(t, s, marshalReport(t, empty))
+	hbPath := filepath.Join(cfg.StateDir, "heartbeat")
+	info1, err := os.Stat(hbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Test",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-
-	cfg.Now = time.Date(2000, 1, 1, 8, 0, 0, 0, time.UTC)
-	s.Process(b1)
-
-	hbFile := filepath.Join(cfg.StateDir, "heartbeat")
-	info1, _ := os.Stat(hbFile)
 	mtime1 := info1.ModTime()
 
-	// Process again
 	cfg.Now = time.Date(2000, 1, 1, 8, 0, 1, 0, time.UTC)
-	s.Process(b1)
-
-	info2, _ := os.Stat(hbFile)
-	mtime2 := info2.ModTime()
-
-	if !mtime2.After(mtime1) {
-		t.Errorf("Heartbeat mtime not advanced: %v -> %v", mtime1, mtime2)
-	}
-
-	// Health should be nil (mtime recent)
-	err = s.Health()
+	mustProcess(t, s, marshalReport(t, empty))
+	info2, err := os.Stat(hbPath)
 	if err != nil {
-		t.Errorf("Health check: got error %v, want nil", err)
+		t.Fatal(err)
+	}
+	if !info2.ModTime().After(mtime1) {
+		t.Errorf("heartbeat mtime not advanced by a fully suppressed Process call: %v -> %v", mtime1, info2.ModTime())
+	}
+	if err := s.Health(); err != nil {
+		t.Errorf("Health() right after a Process call: got %v, want nil", err)
 	}
 
-	// Backdate mtime past 3 × TICK_INTERVAL
-	cfg.Now = time.Date(2000, 1, 1, 9, 0, 0, 0, time.UTC)
-	os.Chtimes(hbFile, cfg.Now.Add(-20*time.Minute), cfg.Now.Add(-20*time.Minute))
-
-	err = s.Health()
-	if err == nil {
-		t.Errorf("Health check: got nil, want error (stale mtime)")
+	// Backdate the file relative to cfg.Now (not real wall-clock time —
+	// cfg.Now is year 2000, so comparing against time.Now() would always
+	// read as stale for the wrong reason).
+	stale := cfg.Now.Add(-3*cfg.TickInterval - time.Minute)
+	if err := os.Chtimes(hbPath, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err == nil {
+		t.Error("Health() after backdating past 3xTickInterval: got nil, want error")
 	}
 }
+
+// --- case 14: stale expiry ---
 
 func TestStaleExpiry(t *testing.T) {
-	// Case 14: stale expiry
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	f := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test",
-		Explanation: "test",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{f},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{finding("alert", "e")}})
+	d1 := mustProcess(t, s, b1)
 	if !d1.Notify {
-		t.Fatal("Initial notify failed")
+		t.Fatal("initial notify failed")
 	}
 
-	// Process empty report 25 hours later
-	cfg.Now = time.Unix(1000+25*3600, 0)
-	report2 := &report.Report{
-		Status:   "OK",
-		Headline: "",
-		Body:     "",
-		Findings: []report.Finding{},
-		Resolved: []string{},
+	// Exactly StaleAlertSec: survives (S.3c uses >, not >=).
+	cfg.Now = time.Unix(1000+86400, 0)
+	empty := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b"})
+	mustProcess(t, s, empty)
+	if entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts")); len(entries) != 1 {
+		t.Errorf("at exactly StaleAlertSec: %d active alerts remain, want 1 (must survive, boundary is >)", len(entries))
 	}
 
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
+	// Past the boundary: expires silently, no all-clear.
+	cfg.Now = time.Unix(1000+86400+1, 0)
+	d2 := mustProcess(t, s, empty)
 	if d2.Notify || len(d2.Report.Resolved) != 0 {
-		t.Errorf("Stale expiry: notify=%v resolved=%d, want false resolved=0", d2.Notify, len(d2.Report.Resolved))
+		t.Errorf("stale expiry: notify=%v resolved=%v, want false []", d2.Notify, d2.Report.Resolved)
 	}
-
-	// Verify key file is gone
-	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
-	files, _ := os.ReadDir(alertDir)
-	if len(files) != 0 {
-		t.Errorf("Active alerts: %d files, want 0", len(files))
+	if entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts")); len(entries) != 0 {
+		t.Errorf("active-alerts: %d files, want 0", len(entries))
 	}
 }
+
+// --- case 15: error paths ---
 
 func TestErrorPaths(t *testing.T) {
-	// Case 15: error paths
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
+	s := newStore(t, cfg)
+
+	if _, err := s.Process([]byte("not json")); err != ErrBadInput {
+		t.Errorf("non-JSON: got %v, want ErrBadInput", err)
+	}
+	if _, err := s.Process([]byte(`{"status":"OK","headline":"","body":"","resolved":[]}`)); err != ErrBadInput {
+		t.Errorf("no findings array: got %v, want ErrBadInput", err)
+	}
+
+	cfg2 := testConfig(t, time.Unix(1000, 0))
+	cfg2.StateDir = filepath.Join(cfg2.StateDir, "does", "not", "exist")
+	if _, err := New(cfg2); err != ErrStateDir {
+		t.Errorf("nonexistent StateDir: got %v, want ErrStateDir", err)
+	}
+
+	// Truncated active-alerts file -> treated as absent -> re-notified as new.
+	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
+	os.MkdirAll(alertDir, 0o700)
+	corruptKey := dedup.Key("kernel", "corrupt-evidence")
+	if err := os.WriteFile(filepath.Join(alertDir, corruptKey+".json"), []byte("{invalid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Non-JSON
-	_, err = s.Process([]byte("not json"))
-	if err != ErrBadInput {
-		t.Errorf("Non-JSON: got %v, want ErrBadInput", err)
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{finding("alert", "corrupt-evidence")}})
+	d1 := mustProcess(t, s, b1)
+	if !d1.Notify || d1.Reason != "new_finding" {
+		t.Errorf("corrupt alert file: notify=%v reason=%s, want true new_finding (re-notified as new)", d1.Notify, d1.Reason)
 	}
 
-	// Object without findings
-	_, err = s.Process([]byte(`{"status":"OK","headline":"","body":"","resolved":[]}`))
-	if err != ErrBadInput {
-		t.Errorf("No findings: got %v, want ErrBadInput", err)
-	}
-
-	// Nonexistent STATE_DIR
-	cfg2 := testConfig(t, time.Unix(1000, 0))
-	cfg2.StateDir = "/nonexistent/path/should/fail"
-	_, err = New(cfg2)
-	if err != ErrStateDir {
-		t.Errorf("Nonexistent StateDir: got %v, want ErrStateDir", err)
-	}
-
-	// Truncated active-alerts file (should be treated as new)
-	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
-	os.MkdirAll(alertDir, 0755)
-	os.WriteFile(filepath.Join(alertDir, "corrupt.json"), []byte("{invalid"), 0644)
-
-	f := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "test",
-		Explanation: "test",
-	}
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{f},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
-	if !d1.Notify {
-		t.Errorf("Corrupt alert file: should re-notify as new")
-	}
-
-	// Corrupt history file (should be skipped but still rotated)
+	// Corrupt history file: skipped by History, but still counts for rotation.
 	historyDir := filepath.Join(cfg.StateDir, "history")
-	os.MkdirAll(historyDir, 0755)
-	os.WriteFile(filepath.Join(historyDir, "0000001000-000000.json"), []byte("{invalid"), 0644)
-
-	_, err = s.History(5)
+	os.MkdirAll(historyDir, 0o700)
+	if err := os.WriteFile(filepath.Join(historyDir, "0000000001-000000.json"), []byte("{invalid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hist, err := s.History(5)
 	if err != nil {
-		t.Errorf("Corrupt history: got error %v, want to skip silently", err)
+		t.Errorf("History with a corrupt file: got error %v, want nil (skip silently)", err)
+	}
+	for _, h := range hist {
+		if !json.Valid(h) {
+			t.Errorf("History returned invalid JSON: %s", h)
+		}
 	}
 }
 
-func TestWriteContainment(t *testing.T) {
-	// Case 16: write containment - all writes under StateDir
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+// --- case 16: write containment (A1) ---
 
-	stateDir := cfg.StateDir
-
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	s.Process(b1)
-
-	// Check all modified paths are under StateDir
-	err = filepath.WalkDir(stateDir, func(path string, d os.DirEntry, err error) error {
+func snapshotFS(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	err := filepath.Walk(root, func(path string, _ os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(path, stateDir) {
-			t.Errorf("Write outside StateDir: %s", path)
-		}
+		out[path] = true
 		return nil
 	})
 	if err != nil {
-		t.Errorf("WalkDir error: %v", err)
+		t.Fatal(err)
 	}
+	return out
 }
 
-func TestHistory(t *testing.T) {
-	// Case 17: History returns newest first
+func TestWriteContainment(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
+	s := newStore(t, cfg)
+
+	roDir := t.TempDir()
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	origWD, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chdir(roDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Chdir(origWD)
+		os.Chmod(roDir, 0o755) // let t.TempDir() clean up
+	})
 
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{},
-		Resolved: []string{},
+	before := snapshotFS(t, cfg.StateDir)
+
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "B", Findings: []report.Finding{finding("alert", "e")}})
+	d, err := s.Process(b)
+	if err != nil {
+		t.Fatalf("Process with a 0o555 working directory must still succeed: %v", err)
+	}
+	if !d.Notify {
+		t.Fatal("expected a notification")
 	}
 
-	b1, _ := json.Marshal(report1)
+	roEntries, err := os.ReadDir(roDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roEntries) != 0 {
+		t.Errorf("Process wrote into the read-only working directory: %v", roEntries)
+	}
+
+	after := snapshotFS(t, cfg.StateDir)
+	for p := range after {
+		if !strings.HasPrefix(p, cfg.StateDir) {
+			t.Errorf("write outside StateDir: %s", p)
+		}
+	}
+	if len(after) <= len(before) {
+		t.Error("Process produced no new files under StateDir — snapshot comparison is not exercising anything")
+	}
+}
+
+// --- case 17 ---
+
+func TestHistory(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
 
 	for i := 0; i < 10; i++ {
 		cfg.Now = time.Unix(int64(1000+i*100), 0)
-		s.Process(b1)
+		mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body"}))
 	}
 
-	history, _ := s.History(5)
-	if len(history) != 5 {
-		t.Errorf("History(5): %d entries, want 5", len(history))
+	hist, err := s.History(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 5 {
+		t.Fatalf("History(5): %d entries, want 5", len(hist))
 	}
 
-	// Empty history should return []
+	// Newest-first: cross-check directly against the sorted directory listing.
+	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "history"))
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	for i := 0; i < 5; i++ {
+		want, err := os.ReadFile(filepath.Join(cfg.StateDir, "history", names[i]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(bytes.TrimSpace(hist[i]), bytes.TrimSpace(want)) {
+			t.Errorf("History(5)[%d] does not match the %d-th newest file %s (order is not newest-first)", i, i, names[i])
+		}
+	}
+
 	cfg2 := testConfig(t, time.Unix(1000, 0))
-	s2, _ := New(cfg2)
-	history2, _ := s2.History(5)
-	if history2 == nil || len(history2) != 0 {
-		t.Errorf("Empty history: got %v, want []", history2)
+	s2 := newStore(t, cfg2)
+	hist2, err := s2.History(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hist2 == nil || len(hist2) != 0 {
+		t.Errorf("empty history: got %v, want []", hist2)
 	}
 }
+
+// --- case 18: tick_seq is read-only, with meta.tick_seq precedence ---
 
 func TestTickSeqReadOnly(t *testing.T) {
-	// Case 18: tick_seq is read-only
 	cfg := testConfig(t, time.Unix(1000, 0))
 	cfg.TickSeq = 123
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	report1 := &report.Report{
-		Status:   "OK",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
-
-	// TickSeq should be from cfg.TickSeq
+	b1 := marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body", Meta: &report.Meta{TickSeq: 999}})
+	d1 := mustProcess(t, s, b1)
 	if d1.TickSeq != 123 {
-		t.Errorf("TickSeq: got %d, want 123", d1.TickSeq)
+		t.Errorf("cfg.TickSeq must win over report.meta.tick_seq: got %d, want 123", d1.TickSeq)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "tick-seq")); err == nil {
+		t.Error("a tick-seq file exists; state must never write it (S-D3)")
 	}
 
-	// No tick-seq file should be created
-	tickSeqFile := filepath.Join(cfg.StateDir, "tick-seq")
-	if _, err := os.Stat(tickSeqFile); err == nil {
-		t.Errorf("tick-seq file exists, should not")
+	// cfg.TickSeq unset -> report.meta.tick_seq wins over 0.
+	cfg2 := testConfig(t, time.Unix(1000, 0))
+	s2 := newStore(t, cfg2)
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body", Meta: &report.Meta{TickSeq: 77}})
+	d2 := mustProcess(t, s2, b2)
+	if d2.TickSeq != 77 {
+		t.Errorf("with cfg.TickSeq unset, report.meta.tick_seq must win over 0: got %d, want 77", d2.TickSeq)
 	}
 }
+
+// --- case 19: key reuse + the C6 cross-package proof ---
 
 func TestKeyReuse(t *testing.T) {
-	// Case 19: key reuse - explicit key kept, no key gets computed
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
+	s := newStore(t, cfg)
+
+	f1 := finding("alert", "evidence1")
+	f1.Key = "aaabbbcccdddeee0"
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f1}})
+	d1 := mustProcess(t, s, b1)
+	if len(d1.Report.Findings) != 1 || d1.Report.Findings[0].Key != "aaabbbcccdddeee0" {
+		t.Errorf("an explicit key must be kept byte-for-byte: got %+v", d1.Report.Findings)
 	}
 
-	f1 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "evidence1",
-		Explanation: "test",
-		Key:         "aaabbbcccdddeee0",
-	}
-
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{f1},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
-
-	// Key should be preserved
-	if len(d1.Report.Findings) > 0 && d1.Report.Findings[0].Key != "aaabbbcccdddeee0" {
-		t.Errorf("Key: got %s, want aaabbbcccdddeee0", d1.Report.Findings[0].Key)
-	}
-
-	// Finding without key should get one computed
-	f2 := report.Finding{
-		Severity:    "alert",
-		Component:   "test",
-		Evidence:    "evidence2",
-		Explanation: "test",
-	}
-
-	report2 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{f2},
-		Resolved: []string{},
-	}
-
-	b2, _ := json.Marshal(report2)
-	d2, _ := s.Process(b2)
-
-	if len(d2.Report.Findings) > 0 && d2.Report.Findings[0].Key == "" {
-		t.Errorf("Computed key: got empty string")
-	}
-
-	// Verify computed key matches dedup.Key
-	expectedKey := dedup.Key("test", dedup.EvidenceCore("evidence2"))
-	if len(d2.Report.Findings) > 0 && d2.Report.Findings[0].Key != expectedKey {
-		t.Errorf("Computed key: got %s, want %s", d2.Report.Findings[0].Key, expectedKey)
+	f2 := finding("alert", "evidence2")
+	b2 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f2}})
+	d2 := mustProcess(t, s, b2)
+	// Independently specified expectation (C6's literal algorithm), not a
+	// call through the same helper the production path calls — otherwise
+	// the test tracks whatever dedup.Key/EvidenceCore currently compute
+	// instead of catching a drift in either.
+	wantKey := literalDedupKey("kernel", "evidence2")
+	if len(d2.Report.Findings) != 1 || d2.Report.Findings[0].Key != wantKey {
+		t.Errorf("computed key: got %q, want %q (C6 literal)", d2.Report.Findings[0].Key, wantKey)
 	}
 }
+
+// literalDedupKey reimplements C6's algorithm from CONTRACTS.md directly —
+// deliberately not calling dedup.Key/EvidenceCore — so a break in either is
+// caught rather than tracked. "evidence2" has no timestamps, digits, or
+// '=', so C6's masking is a no-op and the core is the lowercased string
+// itself.
+func literalDedupKey(component, evidence string) string {
+	sum := sha256.Sum256([]byte(component + "\n" + strings.ToLower(evidence)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// --- case 20: schema agreement across the full behaviour set ---
 
 func TestSchemaAgreement(t *testing.T) {
-	// Case 20: every decision.report validates against report.schema.json
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newStore(t, cfg)
 
-	report1 := &report.Report{
-		Status:   "ALERT",
-		Headline: "Test",
-		Body:     "Body",
-		Findings: []report.Finding{
-			{
-				Severity:    "alert",
-				Component:   "test",
-				Evidence:    "test",
-				Explanation: "test",
-			},
+	scenarios := []func(t *testing.T){
+		func(t *testing.T) { // new finding
+			mustProcess(t, s, marshalReport(t, &report.Report{Status: "WATCH", Headline: "N", Body: "b", Findings: []report.Finding{finding("watch", "s20-1")}}))
 		},
-		Resolved: []string{},
+		func(t *testing.T) { // suppressed
+			cfg.Now = cfg.Now.Add(time.Minute)
+			mustProcess(t, s, marshalReport(t, &report.Report{Status: "WATCH", Headline: "N", Body: "b", Findings: []report.Finding{finding("watch", "s20-1")}}))
+		},
+		func(t *testing.T) { // escalation
+			cfg.Now = cfg.Now.Add(time.Minute)
+			mustProcess(t, s, marshalReport(t, &report.Report{Status: "ALERT", Headline: "N", Body: "b", Findings: []report.Finding{finding("alert", "s20-1")}}))
+		},
+		func(t *testing.T) { // all-clear
+			cfg.Now = cfg.Now.Add(time.Minute)
+			mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "N", Body: "b", Resolved: []string{"N"}}))
+		},
+		func(t *testing.T) { // suppressed (no findings, no resolved, no heartbeat due)
+			cfg.Now = cfg.Now.Add(time.Minute)
+			mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "N", Body: "b"}))
+		},
 	}
 
-	b1, _ := json.Marshal(report1)
-	d1, _ := s.Process(b1)
+	for i, scenario := range scenarios {
+		t.Run(strconv.Itoa(i), scenario)
+	}
 
-	reportBytes, _ := json.Marshal(d1.Report)
-	_, err = report.Validate(reportBytes)
-	if err != nil {
-		t.Errorf("Schema validation: %v", err)
+	// Directly assert the last decision.report validates.
+	cfg.Now = cfg.Now.Add(time.Minute)
+	d := mustProcess(t, s, marshalReport(t, &report.Report{Status: "ALERT", Headline: "Final", Body: "b", Findings: []report.Finding{finding("alert", "s20-final")}}))
+	if _, err := report.Validate(marshalReport(t, &d.Report)); err != nil {
+		t.Errorf("decision.report failed report.schema.json validation: %v", err)
 	}
 }
 
+// --- case 21 ---
+
 func TestCLIExitCodes(t *testing.T) {
-	// Case 21: exit codes via cmd/sentinel (not directly in state)
-	// This is tested in the CLI tests, not here
-	t.Skip("CLI exit code mapping tested elsewhere")
+	t.Skip("S.6 exit-code mapping is tested in cmd/sentinel against the real sentinel binary")
 }

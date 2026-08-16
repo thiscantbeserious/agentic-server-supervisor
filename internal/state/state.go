@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,10 @@ var (
 	ErrBadInput  = errors.New("invalid input json")
 	ErrUnknownID = errors.New("unknown outbox id")
 )
+
+// severityRank orders info < watch < alert (S.3d) — the single ranking
+// used both to detect escalation and to pick the outgoing status (g).
+var severityRank = map[string]int{"info": 0, "watch": 1, "alert": 2}
 
 type Decision struct {
 	Notify          bool          `json:"notify"`
@@ -35,25 +40,28 @@ type Store struct {
 	cfg *config.Config
 }
 
+// C4: dirs 0o700.
+const dirMode = 0o700
+
 func New(cfg *config.Config) (*Store, error) {
-	// Probe STATE_DIR is writable
+	// Probe STATE_DIR is writable (S.6: missing/not-a-dir/not-writable -> 69).
 	testFile := filepath.Join(cfg.StateDir, ".probe")
-	err := os.WriteFile(testFile, []byte{}, 0644)
-	if err != nil {
+	if err := os.WriteFile(testFile, []byte{}, 0o600); err != nil {
 		return nil, ErrStateDir
 	}
 	os.Remove(testFile)
 
-	// Create required directories
 	for _, dir := range []string{"active-alerts", "history", "outbox"} {
-		p := filepath.Join(cfg.StateDir, dir)
-		os.MkdirAll(p, 0700)
+		if err := os.MkdirAll(filepath.Join(cfg.StateDir, dir), dirMode); err != nil {
+			return nil, ErrStateDir
+		}
 	}
 
-	// Initialize heartbeat file
+	// Seed the heartbeat file so its mtime exists from the first Process
+	// call; empty content is "absent" for the S.3(f) due-check.
 	hbPath := filepath.Join(cfg.StateDir, "heartbeat")
 	if _, err := os.Stat(hbPath); err != nil {
-		os.WriteFile(hbPath, []byte("\n"), 0644)
+		writeAtomic(cfg.StateDir, "heartbeat", []byte("\n"), 0o644)
 	}
 
 	return &Store{cfg: cfg}, nil
@@ -66,9 +74,17 @@ func (s *Store) now() int64 {
 	return time.Now().Unix()
 }
 
-func (s *Store) tickSeq() int64 {
-	if s.cfg.TickSeq > 0 {
-		return s.cfg.TickSeq
+// resolveTickSeq is S.3(a): cfg.TickSeq if > 0, else report.meta.tick_seq
+// if present, else 0. This is the single tick_seq used everywhere in this
+// Process call — the outgoing Decision, the history filename, and the
+// ActiveAlert tick_seq_first/last bookkeeping — never written back to disk
+// (state owns no tick-seq file; that's runtime's, S-D3).
+func resolveTickSeq(cfg *config.Config, rep *report.Report) int64 {
+	if cfg.TickSeq > 0 {
+		return cfg.TickSeq
+	}
+	if rep.Meta != nil && rep.Meta.TickSeq > 0 {
+		return rep.Meta.TickSeq
 	}
 	return 0
 }
@@ -76,52 +92,50 @@ func (s *Store) tickSeq() int64 {
 func (s *Store) Process(raw []byte) (*Decision, error) {
 	now := s.now()
 
-	// Parse input: S.2 requires JSON with findings/resolved, unknown fields ignored
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	// S.2: "not an object, or no findings array -> exit 65". Input
+	// validation is deliberately permissive beyond that — S.7 requires a
+	// state failure never lose an alert ("tick sends the report
+	// unfiltered"), so an input that report.Validate would reject (e.g. an
+	// 81-rune headline) must still be processed. What must validate against
+	// report.schema.json is the OUTGOING decision.report (S-D6), not this.
+	var probe struct {
+		Findings *[]json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || probe.Findings == nil {
 		return nil, ErrBadInput
 	}
-
-	// Check required fields per S.2
-	if _, ok := probe["findings"]; !ok {
+	var rep report.Report
+	if err := json.Unmarshal(raw, &rep); err != nil {
 		return nil, ErrBadInput
 	}
-	if _, ok := probe["resolved"]; !ok {
-		return nil, ErrBadInput
+	if rep.Resolved == nil {
+		rep.Resolved = []string{}
 	}
 
-	// Unmarshal into Report type (unknown fields ignored by json.Unmarshal)
-	rep := &report.Report{}
-	json.Unmarshal(raw, rep)
+	tickSeq := resolveTickSeq(s.cfg, &rep)
+	decision := &Decision{TickSeq: tickSeq}
 
-	decision := &Decision{
-		TickSeq: s.tickSeq(),
-	}
-
-	// Determine tick_seq for history filename (S.3a)
-	histTickSeq := decision.TickSeq
-	if histTickSeq == 0 && rep.Meta != nil && rep.Meta.TickSeq > 0 {
-		histTickSeq = rep.Meta.TickSeq
-	}
-
-	// c) Stale expiry - do this first
+	// c) stale expiry, first, silent.
 	s.expireStaleAlerts(now)
 
-	// d) Process findings - build suppressed list for annotation later
-	notified := []report.Finding{}
-	suppressedFinding := make(map[string]*report.Finding) // key -> suppressed finding
-	allClear := []string{}
+	// d) per finding, in input order.
+	notified := make([]report.Finding, 0, len(rep.Findings))
+	annotated := make([]report.Finding, len(rep.Findings)) // full input order, for history (S.3b)
+	touchedKeys := make(map[string]bool, len(rep.Findings))
 	suppressedCount := 0
+	reason := ""
 
-	for _, f := range rep.Findings {
+	for i, f := range rep.Findings {
 		key := f.Key
 		if key == "" {
-			key = dedup.Key(f.Component, f.Evidence)
+			key = dedup.Key(f.Component, f.Evidence) // C6: Key normalizes internally; never double-normalize
 		}
+		touchedKeys[key] = true
 
 		alert, exists := s.loadAlert(key)
+		isNotify := false
+		findingReason := ""
 		if !exists {
-			// New finding
 			alert = &ActiveAlert{
 				Key:          key,
 				Component:    f.Component,
@@ -130,208 +144,134 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				Severity:     f.Severity,
 				FirstSeen:    now,
 				LastSeen:     now,
-				LastNotified: now,
-				NotifyCount:  1,
+				TickSeqFirst: tickSeq,
+				TickSeqLast:  tickSeq,
 				Occurrences:  1,
-				TickSeqFirst: decision.TickSeq,
-				TickSeqLast:  decision.TickSeq,
 			}
-			s.saveAlert(alert)
-			decision.Notify = true
-			decision.Reason = "new_finding"
-			notified = append(notified, f)
+			isNotify = true
+			findingReason = "new_finding"
 		} else {
-			// Existing finding
 			alert.LastSeen = now
 			alert.Occurrences++
-			alert.TickSeqLast = decision.TickSeq
+			alert.TickSeqLast = tickSeq
 
-			severity := map[string]int{"info": 0, "watch": 1, "alert": 2}
-			oldRank := severity[alert.Severity]
-			newRank := severity[f.Severity]
-
-			if newRank > oldRank {
-				// Escalation
+			if severityRank[f.Severity] > severityRank[alert.Severity] {
 				alert.Severity = f.Severity
-				alert.LastNotified = now
-				alert.NotifyCount++
-				s.saveAlert(alert)
-				decision.Notify = true
-				decision.Reason = "escalation"
-				notified = append(notified, f)
+				isNotify = true
+				findingReason = "escalation"
 			} else {
-				// De-escalation or same: update severity, check window
-				alert.Severity = f.Severity
-				s.saveAlert(alert)
-
-				// Check renotify window based on current severity
+				if f.Severity != alert.Severity {
+					// De-escalation never notifies on its own, but it does
+					// lower the stored severity and switch the renotify
+					// window (S.3d).
+					alert.Severity = f.Severity
+				}
 				window := s.cfg.RenotifyAlertSec
 				if alert.Severity != "alert" {
 					window = s.cfg.RenotifyWatchSec
 				}
-
 				if now-alert.LastNotified >= int64(window) {
-					// Renotify
-					alert.LastNotified = now
-					alert.NotifyCount++
-					s.saveAlert(alert)
-					if decision.Reason == "" {
-						decision.Notify = true
-						decision.Reason = "renotify"
-					}
-					notified = append(notified, f)
-				} else {
-					// Suppressed
-					s.saveAlert(alert)
-					suppressedCount++
-					fCopy := f
-					suppressedFinding[key] = &fCopy
+					isNotify = true
+					findingReason = "renotify"
 				}
 			}
 		}
-	}
 
-	// e) Resolved / all-clear - only consider alerts NOT touched in step (d)
-	// Collect keys of notified findings
-	notifiedKeys := make(map[string]bool)
-	for _, f := range notified {
-		key := f.Key
-		if key == "" {
-			key = dedup.Key(f.Component, dedup.EvidenceCore(f.Evidence))
+		if isNotify {
+			alert.LastNotified = now
+			alert.NotifyCount++
+			if reason == "" {
+				reason = findingReason
+			}
+		} else {
+			suppressedCount++
 		}
-		notifiedKeys[key] = true
+		s.saveAlert(alert)
+
+		f.Key = alert.Key
+		f.FirstSeen = alert.FirstSeen
+		f.Occurrences = alert.Occurrences
+		annotated[i] = f
+		if isNotify {
+			notified = append(notified, f)
+		}
 	}
 
+	// e) resolved / all-clear — only alerts NOT touched in step (d) (S-D7).
+	var allClear []string
 	for _, res := range rep.Resolved {
 		res = strings.TrimSpace(strings.ToLower(res))
 		if res == "" {
 			continue
 		}
-
-		// Find matching active alert not touched in step (d)
 		alertFiles, _ := os.ReadDir(filepath.Join(s.cfg.StateDir, "active-alerts"))
-		for _, f := range alertFiles {
-			alert, err := s.loadAlertByFile(filepath.Join(s.cfg.StateDir, "active-alerts", f.Name()))
-			if err != nil {
+		for _, af := range alertFiles {
+			alert, err := s.loadAlertByFile(filepath.Join(s.cfg.StateDir, "active-alerts", af.Name()))
+			if err != nil || touchedKeys[alert.Key] {
 				continue
 			}
-
-			// Skip if this alert was touched in step (d)
-			if notifiedKeys[alert.Key] {
+			if strings.TrimSpace(strings.ToLower(alert.Headline)) != res {
 				continue
 			}
-
-			normHeadline := strings.TrimSpace(strings.ToLower(alert.Headline))
-			if normHeadline == res {
-				// Match - add to all-clear and delete
-				found := false
-				for _, existing := range allClear {
-					if existing == alert.Headline {
-						found = true
-						break
-					}
+			found := false
+			for _, existing := range allClear {
+				if existing == alert.Headline {
+					found = true
+					break
 				}
-				if !found {
-					allClear = append(allClear, alert.Headline)
-				}
-				os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
 			}
+			if !found {
+				allClear = append(allClear, alert.Headline)
+			}
+			os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
 		}
 	}
 
-	// f) Heartbeat check
+	// f) heartbeat due-check.
 	hbPath := filepath.Join(s.cfg.StateDir, "heartbeat")
 	hbTime := time.Unix(now, 0).In(s.cfg.Loc)
 	hbStr := hbTime.Format("2006-01-02")
-
 	hbData, _ := os.ReadFile(hbPath)
 	hbCurrent := strings.TrimSpace(string(hbData))
-	hbDue := false
+	hbDue := hbCurrent != hbStr && hbTime.Hour() >= s.cfg.HeartbeatHour
 
-	if hbCurrent != hbStr && hbTime.Hour() >= s.cfg.HeartbeatHour {
-		hbDue = true
-	}
-
-	// g) Message assembly
+	// g) message assembly — first matching rule.
 	switch {
 	case len(notified) > 0:
-		// Rule 1: notified non-empty
 		decision.Notify = true
-		if decision.Reason == "" {
-			decision.Reason = "new_finding"
-		}
+		decision.Reason = reason
 
 		highest := 0
-		severityRank := map[string]int{"info": 0, "watch": 1, "alert": 2}
-		firstNotifiedReason := ""
-		for i, f := range notified {
-			if severityRank[f.Severity] > highest {
-				highest = severityRank[f.Severity]
-			}
-			// Capture reason of first notified finding
-			if i == 0 {
-				if _, exists := s.loadAlert(f.Key); exists {
-					// This was escalation or renotify; reason set earlier
-				} else {
-					firstNotifiedReason = "new_finding"
-				}
+		for _, f := range notified {
+			if r := severityRank[f.Severity]; r > highest {
+				highest = r
 			}
 		}
-		if firstNotifiedReason != "" {
-			decision.Reason = firstNotifiedReason
-		}
-
-		statusMap := []string{"OK", "WATCH", "ALERT"}
-		rep.Status = statusMap[highest]
+		statusByRank := []string{"OK", "WATCH", "ALERT"}
+		rep.Status = statusByRank[highest]
 		rep.Findings = notified
 		rep.Resolved = allClear
-
-		// Update heartbeat on notification
-		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+		if rep.Resolved == nil {
+			rep.Resolved = []string{}
+		}
 
 	case len(allClear) > 0:
-		// Rule 2: all_clear non-empty
 		decision.Notify = true
 		decision.Reason = "all_clear"
 		rep.Status = "OK"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = allClear
-
-		// Update heartbeat on notification
-		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
-
-		headline := allClear[0]
-		if len(allClear) > 1 {
-			suffix := fmt.Sprintf(" (+%d more)", len(allClear)-1)
-			full := headline + suffix
-			if len([]rune(full)) > 80 {
-				runes := []rune(headline)
-				keep := 80 - len([]rune(suffix)) - 1
-				if keep > 0 {
-					headline = string(runes[:keep]) + suffix
-				} else {
-					headline = string(runes[:min(len(runes), 80)])
-				}
-			} else {
-				headline = full
+		rep.Headline = allClearHeadline(allClear)
+		var body strings.Builder
+		for i, ac := range allClear {
+			if i > 0 {
+				body.WriteByte('\n')
 			}
+			body.WriteString("- " + ac)
 		}
-		if len([]rune(headline)) > 80 {
-			runes := []rune(headline)
-			headline = string(runes[:80])
-		}
-		rep.Headline = "Resolved: " + headline
-		rep.Body = ""
-		for _, ac := range allClear {
-			rep.Body += "- " + ac + "\n"
-		}
-		rep.Body = strings.TrimSuffix(rep.Body, "\n")
-
-		// Update heartbeat
-		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+		rep.Body = body.String()
 
 	case hbDue:
-		// Rule 3: heartbeat due
 		decision.Notify = true
 		decision.Reason = "heartbeat"
 		decision.Heartbeat = true
@@ -339,126 +279,99 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		rep.Headline = "Daily heartbeat: all clear"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = []string{}
-
-		// Count history files for body
-		histDir := filepath.Join(s.cfg.StateDir, "history")
-		histFiles, _ := os.ReadDir(histDir)
-		histCount := len(histFiles)
-		oldest := ""
-		if histCount > 0 {
-			oldest = histFiles[0].Name()
-		}
-
-		rep.Body = fmt.Sprintf("No open findings. %d ticks since", histCount)
-		if oldest != "" {
-			// Parse oldest timestamp - format is XXXXXXXXXX-XXXXXX.json
-			parts := strings.Split(oldest, "-")
-			if len(parts) >= 1 {
-				rep.Body = fmt.Sprintf("No open findings. %d ticks since %s.", histCount, oldest[:10])
-			}
-		}
-
-		// Update heartbeat
-		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+		rep.Body = heartbeatBody(s.cfg.StateDir)
 
 	default:
-		// Rule 4: suppressed
 		decision.Reason = "suppressed"
 		rep.Status = "OK"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = []string{}
 	}
 
-	decision.Report = *rep
+	// f, continued) content advances to today only when a notification was
+	// actually emitted this tick; the file is rewritten every Process call
+	// regardless, so mtime always tracks liveness (S.3f).
+	hbContent := hbCurrent
+	if decision.Notify {
+		hbContent = hbStr
+	}
+	writeAtomic(s.cfg.StateDir, "heartbeat", []byte(hbContent+"\n"), 0o644)
+
+	decision.Report = rep
 	decision.SuppressedCount = suppressedCount
 
-	// Count active alerts
 	alertFiles, _ := os.ReadDir(filepath.Join(s.cfg.StateDir, "active-alerts"))
 	decision.ActiveCount = len(alertFiles)
 
-	// Always update heartbeat mtime (but preserve content from any prior notification this tick)
-	// ponytail: read current content to preserve it if already advanced by a notification
-	if data, err := os.ReadFile(hbPath); err == nil && len(data) > 0 {
-		os.Chtimes(hbPath, time.Unix(now, 0), time.Unix(now, 0))
-	} else {
-		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+	// b) history write — after (d), because it needs the post-update
+	// annotations; every finding (notified AND suppressed), original
+	// input order, never verbatim and never decision.report (S.3b).
+	s.writeAnnotatedHistory(now, tickSeq, &rep, annotated)
+
+	// S-D6: the outgoing document must validate against report.schema.json.
+	outBytes, err := json.Marshal(decision.Report)
+	if err != nil {
+		return nil, fmt.Errorf("state: marshal decision.report: %w", err)
 	}
-
-	// b) History write - AFTER step (d), with annotations
-	s.writeAnnotatedHistory(now, histTickSeq, rep, suppressedFinding)
-
-	// Validate output report against schema (S-D6)
-	outBytes, _ := json.Marshal(decision.Report)
 	if _, err := report.Validate(outBytes); err != nil {
-		// Output validation failure is a state bug, not input error
-		return nil, fmt.Errorf("state: output validation failed (bug): %w", err)
+		return nil, fmt.Errorf("state: decision.report failed schema validation (bug): %w", err)
 	}
 
 	return decision, nil
 }
 
-func (s *Store) writeAnnotatedHistory(now int64, tickSeq int64, rep *report.Report, suppressedFinding map[string]*report.Finding) {
-	// Merge notified and suppressed findings with annotations from active-alert records
-	allFindings := append([]report.Finding{}, rep.Findings...)
-
-	// Add suppressed findings in their original order
-	for _, f := range rep.Findings {
-		key := f.Key
-		if key == "" {
-			key = dedup.Key(f.Component, f.Evidence)
-		}
-		// Note: this won't duplicate notified findings since they're already in allFindings
+// allClearHeadline is S.3(g) rule 2: "Resolved: <first>" (+N more) when
+// more than one, truncated to 80 runes so the schema bound holds.
+func allClearHeadline(allClear []string) string {
+	headline := allClear[0]
+	if len(allClear) > 1 {
+		headline += fmt.Sprintf(" (+%d more)", len(allClear)-1)
 	}
-
-	// Now add suppressedFindings (those that weren't in the notified list)
-	for key, suppressedF := range suppressedFinding {
-		allFindings = append(allFindings, *suppressedF)
-		_ = key // for clarity
+	full := "Resolved: " + headline
+	runes := []rune(full)
+	if len(runes) > 80 {
+		full = string(runes[:80])
 	}
+	return full
+}
 
-	// Annotate all findings with key/first_seen/occurrences
-	for i := range allFindings {
-		key := allFindings[i].Key
-		if key == "" {
-			key = dedup.Key(allFindings[i].Component, dedup.EvidenceCore(allFindings[i].Evidence))
-		}
-
-		if alert, exists := s.loadAlert(key); exists {
-			allFindings[i].Key = alert.Key
-			allFindings[i].FirstSeen = alert.FirstSeen
-			allFindings[i].Occurrences = alert.Occurrences
-		} else {
-			allFindings[i].Key = key
-			allFindings[i].FirstSeen = now
-			allFindings[i].Occurrences = 1
+// heartbeatBody is S.3(g) rule 3: "No open findings. <k> ticks since
+// <RFC3339 UTC of the oldest kept history entry>." k = number of kept
+// history files that exist BEFORE this tick's own entry is written.
+func heartbeatBody(stateDir string) string {
+	histDir := filepath.Join(stateDir, "history")
+	files, _ := os.ReadDir(histDir) // ReadDir returns entries sorted by name (== chronological)
+	k := len(files)
+	since := time.Now().UTC()
+	if k > 0 {
+		epochStr, _, _ := strings.Cut(files[0].Name(), "-")
+		if epoch, err := strconv.ParseInt(epochStr, 10, 64); err == nil {
+			since = time.Unix(epoch, 0).UTC()
 		}
 	}
+	return fmt.Sprintf("No open findings. %d ticks since %s.", k, since.Format(time.RFC3339))
+}
 
-	// Create annotated history document
+func (s *Store) writeAnnotatedHistory(now, tickSeq int64, rep *report.Report, annotated []report.Finding) {
 	histRep := report.Report{
 		Status:   rep.Status,
 		Headline: rep.Headline,
 		Body:     rep.Body,
-		Findings: allFindings,
+		Findings: annotated,
 		Resolved: rep.Resolved,
 		Meta:     rep.Meta,
 	}
-
-	// Write atomically with cleanup of temp files
-	histPath := filepath.Join("history", fmt.Sprintf("%010d-%06d.json", now, tickSeq))
-	data, _ := json.Marshal(histRep)
-	writeAtomic(s.cfg.StateDir, histPath, data, 0644)
-
-	// Clean up any stray temp files from the history dir
-	histDir := filepath.Join(s.cfg.StateDir, "history")
-	files, _ := os.ReadDir(histDir)
-	for _, f := range files {
-		if strings.HasPrefix(f.Name(), ".tmp-") {
-			os.Remove(filepath.Join(histDir, f.Name()))
-		}
+	if histRep.Findings == nil {
+		histRep.Findings = []report.Finding{}
+	}
+	if histRep.Resolved == nil {
+		histRep.Resolved = []string{}
 	}
 
-	// Rotate history: delete all but the HISTORY_KEEP newest
+	name := fmt.Sprintf("%010d-%06d.json", now, tickSeq)
+	data, _ := json.Marshal(histRep)
+	writeAtomic(s.cfg.StateDir, filepath.Join("history", name), data, 0o644)
+
 	s.rotateHistory()
 }
 
@@ -467,14 +380,10 @@ func (s *Store) rotateHistory() {
 	files, _ := os.ReadDir(histDir)
 
 	if len(files) > s.cfg.HistoryKeep {
-		// Sort by name descending (newest first), then delete oldest
-		sort.Slice(files, func(i, j int) bool {
-			return files[i].Name() > files[j].Name()
-		})
-
+		sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
 		toDelete := len(files) - s.cfg.HistoryKeep
 		for i := 0; i < toDelete; i++ {
-			os.Remove(filepath.Join(histDir, files[len(files)-1-i].Name()))
+			os.Remove(filepath.Join(histDir, files[i].Name()))
 		}
 	}
 }
@@ -489,7 +398,6 @@ func (s *Store) expireStaleAlerts(now int64) {
 			os.Remove(filepath.Join(alertDir, f.Name()))
 			continue
 		}
-
 		if now-alert.LastSeen > int64(s.cfg.StaleAlertSec) {
 			os.Remove(filepath.Join(alertDir, f.Name()))
 		}
@@ -500,18 +408,11 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 	histDir := filepath.Join(s.cfg.StateDir, "history")
 	files, _ := os.ReadDir(histDir)
 
-	if len(files) == 0 {
-		return []json.RawMessage{}, nil
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name() > files[j].Name()
-	})
+	sort.Slice(files, func(i, j int) bool { return files[i].Name() > files[j].Name() }) // newest first
 
 	if n > len(files) {
 		n = len(files)
 	}
-
 	result := make([]json.RawMessage, 0, n)
 	for i := 0; i < n; i++ {
 		data, err := os.ReadFile(filepath.Join(histDir, files[i].Name()))
@@ -519,7 +420,6 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 			result = append(result, json.RawMessage(data))
 		}
 	}
-
 	return result, nil
 }
 
@@ -530,23 +430,13 @@ func (s *Store) Health() error {
 		return err
 	}
 
-	mtime := info.ModTime()
 	now := time.Now()
-	if s.cfg.Now != (time.Time{}) {
-		now = time.Unix(s.cfg.Now.Unix(), 0)
+	if !s.cfg.Now.IsZero() {
+		now = s.cfg.Now
 	}
 
-	threshold := 3 * s.cfg.TickInterval
-	if now.Sub(mtime) > threshold {
+	if now.Sub(info.ModTime()) > 3*s.cfg.TickInterval {
 		return errors.New("heartbeat stale")
 	}
-
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

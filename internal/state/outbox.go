@@ -24,6 +24,13 @@ type OutboxItem struct {
 }
 
 func (s *Store) OutboxAdd(payload []byte) (string, error) {
+	// S.2: "outbox-add stdin — an opaque JSON object; state validates only
+	// that" -> not a JSON object is exit 65.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return "", ErrBadInput
+	}
+
 	now := s.now()
 
 	// Generate ID: <epoch>-<rand3>
