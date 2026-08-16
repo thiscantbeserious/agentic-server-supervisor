@@ -76,17 +76,26 @@ func validateStage2(raw []byte) (*stage2Response, error) {
 // dangerTokenRe is now word-bounded, and a bareDomainRe match is only
 // dangerous when its TLD-shaped suffix isn't a known-safe one (systemd
 // unit suffixes and common non-executable file extensions).
+// t4-review round 6 (main's own live-gate finding, main's error): "sh" was
+// in safeSuffix so "backup.sh" would read as a filename, but .sh is a live
+// TLD (Saint Helena) widely used to host payloads — "evil.sh" or
+// "sh evil.sh" sailed through the domain check untouched. Removed.
+// Blocking fetch verbs while allowing an interpreter name to run the
+// fetched file closes only half the path, so the token list also gained
+// the interpreters (sh, bash, zsh, python, python3, perl, ruby, node,
+// eval) and output redirection (>, >>) — a fetch-then-write-then-run chain
+// no longer has a gap at either end.
 var (
 	uriSchemeRe   = regexp.MustCompile(`://`)
 	bareDomainRe  = regexp.MustCompile(`(?i)\b[a-z0-9-]+\.([a-z]{2,})\b`)
-	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs)\b|\brm\s+-rf\b`)
+	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs|sh|bash|zsh|python|python3|perl|ruby|node|eval)\b|\brm\s+-rf\b`)
 	// The operational-suffix set, verbatim from contracts/analyze.md §6
 	// step 11b: a systemd unit is not a domain, and every unit on bam is
-	// "<name>.service".
+	// "<name>.service". "sh" is deliberately NOT in this set (see above).
 	safeSuffix = map[string]bool{
 		"service": true, "target": true, "socket": true, "timer": true,
 		"mount": true, "device": true, "scope": true, "slice": true,
-		"path": true, "conf": true, "json": true, "log": true, "db": true, "sh": true,
+		"path": true, "conf": true, "json": true, "log": true, "db": true,
 	}
 )
 
@@ -94,7 +103,8 @@ func containsDangerousContent(s string) bool {
 	if uriSchemeRe.MatchString(s) || dangerTokenRe.MatchString(s) {
 		return true
 	}
-	if strings.ContainsRune(s, '|') || strings.Contains(s, "`") || strings.Contains(s, "$(") {
+	if strings.ContainsRune(s, '|') || strings.Contains(s, "`") || strings.Contains(s, "$(") ||
+		strings.Contains(s, ">") {
 		return true
 	}
 	for _, m := range bareDomainRe.FindAllStringSubmatch(s, -1) {

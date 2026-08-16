@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,9 +101,11 @@ func queuedKeysByAge(stateDir string) []string {
 // manageDeepQueue implements the queueing/eviction bookkeeping of §6 step
 // 8: every other NEW deep-dive-capable finding is queued; the consumed
 // candidate's queue file is removed; queue files whose key is absent from
-// the current report are removed as stale. Any error here is logged and
-// ignored — deep-queue bookkeeping is never fatal (§5).
-func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey string) {
+// the current report are removed as stale. Any error here is non-fatal —
+// deep-queue bookkeeping never gates analysis (§5) — but it is `slog`
+// noted, not silently swallowed (§5 row 10: "$STATE_DIR unwritable or
+// absent ... skipped with an slog note").
+func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey string, logger *slog.Logger) {
 	dir := filepath.Join(stateDir, "deep-queue")
 	reportKeys := map[string]bool{}
 	for _, f := range findings {
@@ -118,16 +121,26 @@ func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey st
 		if !isNewFinding(stateDir, f) || !deepDiveCapable[f.Component] {
 			continue
 		}
-		_ = os.MkdirAll(dir, 0o700)
-		_ = atomicWriteFile(dir, f.Key, []byte(f.Component+"\n"), 0o644)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			logger.Warn("deep-queue bookkeeping skipped", "reason", "mkdir failed")
+			return
+		}
+		if err := atomicWriteFile(dir, f.Key, []byte(f.Component+"\n"), 0o644); err != nil {
+			logger.Warn("deep-queue bookkeeping skipped", "reason", "write failed")
+		}
 	}
 
 	if candidateKey != "" {
-		_ = os.Remove(filepath.Join(dir, candidateKey))
+		if err := os.Remove(filepath.Join(dir, candidateKey)); err != nil && !os.IsNotExist(err) {
+			logger.Warn("deep-queue bookkeeping skipped", "reason", "remove candidate failed")
+		}
 	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn("deep-queue bookkeeping skipped", "reason", "read dir failed")
+		}
 		return
 	}
 	for _, e := range entries {
@@ -135,7 +148,9 @@ func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey st
 			continue
 		}
 		if !reportKeys[e.Name()] {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				logger.Warn("deep-queue bookkeeping skipped", "reason", "remove stale failed")
+			}
 		}
 	}
 }

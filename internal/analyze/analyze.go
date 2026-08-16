@@ -104,8 +104,11 @@ var (
 )
 
 // Run performs §6. It always returns a non-nil, valid report; a non-nil
-// error means the returned document is the fallback. It never panics and
-// never writes outside the paths in §8.
+// error means the returned document is the fallback — EXCEPT when ctx was
+// cancelled (SIGTERM during `tick --loop`), where Run returns (nil, err)
+// with errors.Is(err, context.Canceled): cancellation is not an analyzer
+// failure, so no fallback is fabricated and no report is authored (§6
+// step 4). It never panics and never writes outside the paths in §8.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cfg := o.Cfg
 	logger := newLogger()
@@ -160,6 +163,16 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 
 	rep, reason, err := runStage1(ctx, o, d, promptPath, schemaPath, stage1Prompt, logger)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// §6 step 4: "Cancellation is not an analyzer failure ...
+			// return the cancellation error, author no report." A SIGTERM
+			// during `tick --loop` must not fabricate an ALERT fallback,
+			// log spurious warnings, or drive state/outbox writes during
+			// shutdown — the one deliberate exception to "Run always
+			// returns a non-nil report" (§9), because there is nothing
+			// to report: the tick simply didn't happen.
+			return nil, err
+		}
 		return buildFallback(cfg, o.Seq, reason, o.Facts, logger), err
 	}
 
@@ -271,6 +284,12 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 
 	out, err := d.RunAgy(cctx, o, promptPath, schemaPath)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// Cancellation propagates as-is — no reason classification, no
+			// fallback, no retry (the caller, runStage1/Run, checks
+			// errors.Is(err, context.Canceled) and authors no report).
+			return nil, "", fmt.Errorf("analyze: agy attempt %d: %w", attempt, err)
+		}
 		reason := classifyAgyErr(err)
 		logger.Warn("stage1", "attempt", attempt, "rc", "error", "reason", reason)
 		return nil, reason, fmt.Errorf("analyze: agy attempt %d: %w", attempt, err)
@@ -355,7 +374,7 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	appendNoDeepDiveSuffix(rep.Findings, cfg.StateDir)
 
 	candidateKey, ok := selectCandidate(cfg.StateDir, rep.Findings)
-	manageDeepQueue(cfg.StateDir, rep.Findings, candidateKey)
+	manageDeepQueue(cfg.StateDir, rep.Findings, candidateKey, logger)
 	if !ok || d.CollectDeep == nil || d.RunAgy == nil {
 		return
 	}
@@ -388,11 +407,6 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		logger.Info("deep-dive failed, keeping stage1")
 		return
 	}
-	deepJSON, err := json.Marshal(deepFacts)
-	if err != nil {
-		logger.Info("deep-dive failed, keeping stage1")
-		return
-	}
 
 	// "component" is deliberately not used as an attr key here: the C7
 	// handler (internal/logging) special-cases any attr literally named
@@ -403,7 +417,11 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	// comment exists to prevent a future edit from reintroducing.
 	logger.Info("deep-dive", "target", candidate.Component, "key", candidateKey)
 
-	stage2Prompt, err := assembleStage2(cfg, string(findingJSON), string(deepJSON), histLines, nonce, candidate.Component)
+	// §6 step 10: PROMPT_MAX_BYTES applies to stage 2 exactly as it does to
+	// stage 1 — a deep collect can reach FACTS_MAX_BYTES (262144), and an
+	// unbudgeted argv string that large fails execve outright or hits
+	// agy's silent-empty-answer cliff. Reduce a COPY, never deepFacts itself.
+	stage2Prompt, err := buildStage2PromptWithinBudget(cfg, string(findingJSON), deepFacts, histLines, nonce, candidate.Component)
 	if err != nil {
 		logger.Info("deep-dive failed, keeping stage1")
 		return
@@ -506,6 +524,13 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 		return nil, fmt.Errorf("%w: %v", errAgyMissing, err)
 	}
 
+	// §6 step 4: "$AGY_HOME must exist before agy is spawned." The debug
+	// path (`sentinel analyze`) has no runtime preflight to seed it, and
+	// agy will not start at all without its $HOME existing.
+	if err := os.MkdirAll(cfg.AgyHome, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: create AGY_HOME: %v", errAgyFailed, err)
+	}
+
 	promptBytes, err := os.ReadFile(promptPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read prompt: %v", errAgyFailed, err)
@@ -524,6 +549,15 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	cmd.WaitDelay = 2 * time.Second
 
 	runErr := cmd.Run()
+	// Cancellation is not an analyzer failure (§6 step 4, live-gate round
+	// 6): on SIGTERM during `tick --loop` the parent context is cancelled,
+	// and classifying that as agy_failed fabricates an ALERT fallback for
+	// a shutdown that has nothing wrong with it. Checked BEFORE
+	// DeadlineExceeded and BEFORE the non-zero-exit branch, since a
+	// cancelled context can also make cmd.Run() return a non-nil error.
+	if ctx.Err() == context.Canceled {
+		return nil, fmt.Errorf("%w", context.Canceled)
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w", errAgyTimeout)
 	}

@@ -212,7 +212,18 @@ func computeResolved(newest *report.Report, current []report.Finding) []string {
 		if f.Key == "" || currentKeys[f.Key] {
 			continue
 		}
-		out = append(out, truncRunes(f.Evidence, 120))
+		// report.schema.json's resolved[] maxLength is 80, not 120 (main's
+		// own error, corrected live-gate round 6): 120 makes
+		// report.Validate reject the WHOLE report the first time a
+		// resolved finding carries a typical kernel/ZED line. Truncating
+		// to 80 can also produce "" for already-degenerate evidence, and
+		// minLength:1 forbids that — skip empty results rather than emit
+		// an invalid entry.
+		ev := truncRunes(f.Evidence, 80)
+		if ev == "" {
+			continue
+		}
+		out = append(out, ev)
 	}
 	sort.Strings(out)
 	if len(out) > 20 {
@@ -352,4 +363,52 @@ func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLin
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// buildStage2PromptWithinBudget is §6 step 10's PROMPT_MAX_BYTES
+// enforcement, applying the exact same exact-arithmetic technique as
+// buildStage1PromptWithinBudget, to the deep collect document instead of
+// the tick facts. This is critical, not cosmetic (main's own live-gate
+// finding, round 6): a deep collect can reach FACTS_MAX_BYTES (262144) —
+// on Linux a single argv string past MAX_ARG_STRLEN (128 KiB) fails
+// execve with E2BIG, and anything past ~30KB is agy's silent empty-answer
+// cliff (§6 step 3). Unbudgeted, stage 2 fails systematically for every
+// realistic deep collect — a 24h ZED window, exactly the case A9 exists
+// to analyze.
+func buildStage2PromptWithinBudget(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
+	deepJSON, err := json.Marshal(deepFacts)
+	if err != nil {
+		return "", err
+	}
+	prompt, err := assembleStage2(cfg, findingJSON, string(deepJSON), historyLines, nonce, component)
+	if err != nil {
+		return "", err
+	}
+	if len(prompt) <= cfg.PromptMaxBytes {
+		return prompt, nil
+	}
+
+	shellLen := len(prompt) - len(deepJSON)
+	budget := cfg.PromptMaxBytes - shellLen
+	if budget < 1 {
+		budget = 1
+	}
+
+	reduced, err := deepCopyFacts(deepFacts)
+	if err != nil {
+		return prompt, nil // ship the oversized prompt rather than fail the whole deep-dive
+	}
+	budgetCfg := *cfg
+	budgetCfg.FactsMaxBytes = budget
+	collect.Truncate(reduced, &budgetCfg)
+
+	reducedDeepJSON, err := json.Marshal(reduced)
+	if err != nil {
+		return prompt, nil
+	}
+	reducedPrompt, err := assembleStage2(cfg, findingJSON, string(reducedDeepJSON), historyLines, nonce, component)
+	if err != nil {
+		return prompt, nil
+	}
+	return reducedPrompt, nil
 }
