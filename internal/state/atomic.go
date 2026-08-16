@@ -12,7 +12,7 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 	dir := filepath.Dir(fullPath)
 
 	// Ensure directory exists
-	os.MkdirAll(dir, 0755)
+	os.MkdirAll(dir, 0700)
 
 	// Create temp file in the same directory for atomic rename
 	tmpFile, err := os.CreateTemp(dir, ".tmp-")
@@ -36,6 +36,9 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 		os.Remove(tmpPath)
 		return err
 	}
+
+	// Set permissions before rename (temp files created at 0600)
+	os.Chmod(tmpPath, mode)
 
 	// Atomic rename
 	return os.Rename(tmpPath, fullPath)

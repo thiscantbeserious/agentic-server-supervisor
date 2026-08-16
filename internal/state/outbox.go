@@ -33,7 +33,7 @@ func (s *Store) OutboxAdd(payload []byte) (string, error) {
 	entry := OutboxEntry{
 		ID:       id,
 		Payload:  json.RawMessage(payload),
-		Attempts: 1,
+		Attempts: 0,
 		Created:  now,
 	}
 

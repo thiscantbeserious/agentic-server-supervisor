@@ -161,14 +161,14 @@ func TestProcess_RenotifyWatch(t *testing.T) {
 	}
 
 	// +5h 59 min (just before renotify window)
-	cfg.Now = time.Unix(1000 + 5*3600 + 59*60, 0)
+	cfg.Now = time.Unix(1000+5*3600+59*60, 0)
 	d2, _ := s.Process(b1)
 	if d2.Notify || d2.Reason != "suppressed" {
 		t.Errorf("At 5h59m: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
 	}
 
 	// +6h 1 min (after renotify window, watch is 6h)
-	cfg.Now = time.Unix(1000 + 6*3600 + 60, 0)
+	cfg.Now = time.Unix(1000+6*3600+60, 0)
 	d3, _ := s.Process(b1)
 	if !d3.Notify || d3.Reason != "renotify" {
 		t.Errorf("At 6h1m: notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
@@ -205,14 +205,14 @@ func TestProcess_RenotifyAlert(t *testing.T) {
 	}
 
 	// +59 min (just before renotify window)
-	cfg.Now = time.Unix(1000 + 59*60, 0)
+	cfg.Now = time.Unix(1000+59*60, 0)
 	d2, _ := s.Process(b1)
 	if d2.Notify || d2.Reason != "suppressed" {
 		t.Errorf("At 59m: notify=%v reason=%s, want suppressed", d2.Notify, d2.Reason)
 	}
 
 	// +1h 1 min (after renotify window, alert is 1h)
-	cfg.Now = time.Unix(1000 + 3600 + 60, 0)
+	cfg.Now = time.Unix(1000+3600+60, 0)
 	d3, _ := s.Process(b1)
 	if !d3.Notify || d3.Reason != "renotify" {
 		t.Errorf("At 1h1m: notify=%v reason=%s, want notify=true reason=renotify", d3.Notify, d3.Reason)
@@ -707,7 +707,7 @@ func TestStaleExpiry(t *testing.T) {
 	}
 
 	// Process empty report 25 hours later
-	cfg.Now = time.Unix(1000 + 25*3600, 0)
+	cfg.Now = time.Unix(1000+25*3600, 0)
 	report2 := &report.Report{
 		Status:   "OK",
 		Headline: "",

@@ -22,13 +22,13 @@ var (
 )
 
 type Decision struct {
-	Notify          bool           `json:"notify"`
-	Reason          string         `json:"reason"`
-	TickSeq         int64          `json:"tick_seq"`
-	SuppressedCount int            `json:"suppressed_count"`
-	ActiveCount     int            `json:"active_count"`
-	Heartbeat       bool           `json:"heartbeat"`
-	Report          report.Report  `json:"report"`
+	Notify          bool          `json:"notify"`
+	Reason          string        `json:"reason"`
+	TickSeq         int64         `json:"tick_seq"`
+	SuppressedCount int           `json:"suppressed_count"`
+	ActiveCount     int           `json:"active_count"`
+	Heartbeat       bool          `json:"heartbeat"`
+	Report          report.Report `json:"report"`
 }
 
 type Store struct {
@@ -47,7 +47,7 @@ func New(cfg *config.Config) (*Store, error) {
 	// Create required directories
 	for _, dir := range []string{"active-alerts", "history", "outbox"} {
 		p := filepath.Join(cfg.StateDir, dir)
-		os.MkdirAll(p, 0755)
+		os.MkdirAll(p, 0700)
 	}
 
 	// Initialize heartbeat file
@@ -104,7 +104,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	for _, f := range rep.Findings {
 		key := f.Key
 		if key == "" {
-			key = dedup.Key(f.Component, dedup.EvidenceCore(f.Evidence))
+			key = dedup.Key(f.Component, f.Evidence)
 		}
 
 		alert, exists := s.loadAlert(key)
@@ -148,7 +148,11 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				decision.Reason = "escalation"
 				notified = append(notified, f)
 			} else {
-				// Check renotify window
+				// De-escalation or same: update severity, check window
+				alert.Severity = f.Severity
+				s.saveAlert(alert)
+
+				// Check renotify window based on current severity
 				window := s.cfg.RenotifyAlertSec
 				if alert.Severity != "alert" {
 					window = s.cfg.RenotifyWatchSec
@@ -241,19 +245,37 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	case len(notified) > 0:
 		// Rule 1: notified non-empty
 		decision.Notify = true
+		if decision.Reason == "" {
+			decision.Reason = "new_finding"
+		}
 
 		highest := 0
 		severityRank := map[string]int{"info": 0, "watch": 1, "alert": 2}
-		for _, f := range notified {
+		firstNotifiedReason := ""
+		for i, f := range notified {
 			if severityRank[f.Severity] > highest {
 				highest = severityRank[f.Severity]
 			}
+			// Capture reason of first notified finding
+			if i == 0 {
+				if _, exists := s.loadAlert(f.Key); exists {
+					// This was escalation or renotify; reason set earlier
+				} else {
+					firstNotifiedReason = "new_finding"
+				}
+			}
+		}
+		if firstNotifiedReason != "" {
+			decision.Reason = firstNotifiedReason
 		}
 
 		statusMap := []string{"OK", "WATCH", "ALERT"}
 		rep.Status = statusMap[highest]
 		rep.Findings = notified
-		rep.Resolved = []string{}
+		rep.Resolved = allClear
+
+		// Update heartbeat on notification
+		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
 
 	case len(allClear) > 0:
 		// Rule 2: all_clear non-empty
@@ -262,6 +284,9 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		rep.Status = "OK"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = allClear
+
+		// Update heartbeat on notification
+		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
 
 		headline := allClear[0]
 		if len(allClear) > 1 {
@@ -339,8 +364,13 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	alertFiles, _ := os.ReadDir(filepath.Join(s.cfg.StateDir, "active-alerts"))
 	decision.ActiveCount = len(alertFiles)
 
-	// Always update heartbeat mtime
-	os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+	// Always update heartbeat mtime (but preserve content from any prior notification this tick)
+	// ponytail: read current content to preserve it if already advanced by a notification
+	if data, err := os.ReadFile(hbPath); err == nil && len(data) > 0 {
+		os.Chtimes(hbPath, time.Unix(now, 0), time.Unix(now, 0))
+	} else {
+		os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
+	}
 
 	// b) History write - AFTER step (d), with annotations
 	s.writeAnnotatedHistory(now, histTickSeq, rep, suppressedFinding)
@@ -356,7 +386,7 @@ func (s *Store) writeAnnotatedHistory(now int64, tickSeq int64, rep *report.Repo
 	for _, f := range rep.Findings {
 		key := f.Key
 		if key == "" {
-			key = dedup.Key(f.Component, dedup.EvidenceCore(f.Evidence))
+			key = dedup.Key(f.Component, f.Evidence)
 		}
 		// Note: this won't duplicate notified findings since they're already in allFindings
 	}
