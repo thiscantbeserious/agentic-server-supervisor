@@ -26,7 +26,7 @@ chmod 600 .env
 $EDITOR .env                      # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAILRISE_SMTP_*
 
 cp mailrise/mailrise.conf.example mailrise/mailrise.conf
-chmod 600 mailrise/mailrise.conf
+chmod 644 mailrise/mailrise.conf  # NOT 600 — see below
 $EDITOR mailrise/mailrise.conf    # same token and chat id, same SMTP user/pass
 
 docker compose up -d
@@ -36,6 +36,17 @@ docker compose ps                 # apprise must reach (healthy)
 Both `.env` and `mailrise/mailrise.conf` are gitignored. The `.example` files
 are tracked and must never contain a real token.
 
+**`mailrise.conf` must be world-readable (0644), not 0600.** mailrise runs as
+uid 999 inside its container and cannot read a file owned by your host user
+with 0600 — it exits immediately with `Permission denied: '/etc/mailrise.conf'`.
+`restart: unless-stopped` then hides it: the container crash-loops while
+`docker compose ps` keeps reporting `Up`, and the SMTP port simply never
+answers. Verified locally 2026-08-17.
+
+The tradeoff is real — the file holds the bot token, so 0644 exposes it to any
+local user on the host. Do not chown it to 999 instead: on `bam` gid 999 is
+`systemd-journal`, which would hand the token to every journal reader.
+
 **mailrise does not expand environment variables** — it loads the file as plain
 YAML, so a literal `$TELEGRAM_BOT_TOKEN` would be accepted as part of the URL
 and produce an invalid Telegram target. You would discover that the first time
@@ -44,22 +55,34 @@ interpolated.
 
 ## Seed the apprise config key
 
-`apprise/sentinel.cfg` is a template. The real one lives in the `apprise-config`
-volume and carries the token:
+`apprise/sentinel.cfg` is a template. The real configuration lives in the
+`apprise-config` volume and carries the token. **Register it through the API —
+do not drop a file into `/config`:**
 
 ```bash
-docker compose exec apprise sh -c \
-  'printf "tgram://%s/%s\n" "$BOT" "$CHAT" > /config/sentinel.cfg' \
-  BOT=... CHAT=...
+curl -fsS -X POST -d 'urls=tgram://<BOT_TOKEN>/<CHAT_ID>' \
+  http://127.0.0.1:8000/add/sentinel
+# -> Successfully saved configuration
 ```
 
-`sentinel notify --seed-config` writes the same content; it is an ops one-shot
-the runtime never invokes.
+Writing `/config/sentinel.cfg` directly does **not** register the key. This
+image keeps configurations under `/config/store/<key>/`, so a hand-written
+`<key>.cfg` is ignored — and the failure is silent in the worst way: a
+subsequent `POST /notify/sentinel` returns **HTTP 204**, which looks like
+success, while nothing is sent anywhere. A correctly registered key returns 200
+on delivery, or 424 with the reason when delivery fails. Verified locally
+2026-08-17.
+
+`sentinel notify --seed-config` performs the same registration; it is an ops
+one-shot the runtime never invokes.
 
 ## Verify (PLAN §3, T1)
 
 Both must land in Telegram. Until they do, T1 is not done — the supervisor can
 compute a perfect report and still never reach you.
+
+A 2xx is not proof on its own: **204 means the key was never registered and
+nothing was sent.** Success is 200 plus the message actually arriving.
 
 ```bash
 # 1. The path sentinel uses.
@@ -72,6 +95,18 @@ swaks --to omv@mailrise.xyz --server 127.0.0.1:8025 \
   --auth-user "$MAILRISE_SMTP_USER" --auth-password "$MAILRISE_SMTP_PASS" \
   --header 'Subject: smartd test' --body 'mailrise path works'
 ```
+
+## Local development on macOS (podman)
+
+The compose shim cannot reach podman over the `ssh://` connections
+`podman system connection list` advertises. Point it at the machine's unix
+socket instead:
+
+```bash
+export DOCKER_HOST="unix://$(podman machine inspect podman-machine-default --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+```
+
+Not needed on `bam`, which runs real Docker.
 
 ## Binding
 
