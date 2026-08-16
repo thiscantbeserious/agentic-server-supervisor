@@ -1,3 +1,10 @@
+// deepdive.go: the second model call. Selecting which new finding earns the
+// deep dive, the deferred-candidate queue, the focused second prompt, and
+// merging the returned analysis into the triage report. Every failure on
+// this path is non-fatal: the triage report is already valid and enrichment
+// never becomes a gate.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -14,17 +21,16 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// deepDiveCapable is §6 step 8's component set.
+// deepDiveCapable lists the components that have a deep collector.
 var deepDiveCapable = map[string]bool{"zfs": true, "smart": true, "kernel": true, "ras": true}
 
-// noDeepDiveSuffix is appended verbatim (§6 step 8) to a NEW finding whose
-// component has no deep collector.
+// noDeepDiveSuffix is appended verbatim to a NEW finding whose component
+// has no deep collector.
 const noDeepDiveSuffix = " (no deep-dive available for this component)"
 
-// isNewFinding implements §6 step 8's NEW predicate: severity != "info" and
-// ${STATE_DIR}/active-alerts/<key>.json does not exist. Any stat error
-// (including a missing active-alerts/ directory) counts as "does not
-// exist" — a fresh STATE_DIR makes every finding NEW.
+// isNewFinding reports whether a finding has not been seen as an active
+// alert before. Any stat error counts as "new" — a fresh state directory
+// makes every finding new, which is the safe direction.
 func isNewFinding(stateDir string, f report.Finding) bool {
 	if f.Severity == "info" || f.Key == "" {
 		return false
@@ -33,10 +39,11 @@ func isNewFinding(stateDir string, f report.Finding) bool {
 	return err != nil
 }
 
-// selectCandidate implements the §6 step 8 candidate order: a deferred
-// deep-queue entry outranks a fresh finding; otherwise the first NEW
-// deep-dive-capable finding in severity order (alert before watch), ties
-// broken by report order.
+// selectCandidate picks the one finding that gets this tick's deep dive:
+// a previously deferred finding from the queue outranks a fresh one
+// (oldest first, so deferrals cannot starve), otherwise the first new
+// deep-dive-capable finding, alerts before watches, ties broken by report
+// order.
 func selectCandidate(stateDir string, findings []report.Finding) (string, bool) {
 	newDeepCapable := map[string]bool{}
 	for _, f := range findings {
@@ -103,13 +110,12 @@ func queuedKeysByAge(stateDir string) []string {
 	return names
 }
 
-// manageDeepQueue implements the queueing/eviction bookkeeping of §6 step
-// 8: every other NEW deep-dive-capable finding is queued; the consumed
-// candidate's queue file is removed; queue files whose key is absent from
-// the current report are removed as stale. Any error here is non-fatal —
-// deep-queue bookkeeping never gates analysis (§5) — but it is `slog`
-// noted, not silently swallowed (§5 row 10: "$STATE_DIR unwritable or
-// absent ... skipped with an slog note").
+// manageDeepQueue keeps the deferred-candidate queue honest: every new
+// deep-dive-capable finding that was not chosen is queued, the consumed
+// candidate's entry is removed, and entries for findings no longer in the
+// report are dropped as stale. Errors here never fail the tick — queue
+// bookkeeping must not gate analysis — but each one leaves a log line
+// rather than vanishing.
 func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey string, logger *slog.Logger) {
 	dir := filepath.Join(stateDir, "deep-queue")
 	reportKeys := map[string]bool{}
@@ -160,9 +166,16 @@ func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey st
 	}
 }
 
-// runDeepDive performs §6 steps 8-11. Any failure along this path is
-// non-fatal (§5): the caller already holds the validated triage report
-// and this function only ever enriches it in place or leaves it untouched.
+// runDeepDive performs the second model call and merges the result into the
+// triage report. Every failure path returns with the report untouched: the
+// caller already holds a valid report and enrichment is never a gate.
+//
+// The merge trusts only our own pointer to the candidate finding, never a
+// key echoed back by the model. The returned headline, when present,
+// replaces the triage headline: the headline becomes the notification
+// title, and triage wrote it knowing only the shallow tick facts — if the
+// deep collection reveals something worse, a stale headline misleads the
+// operator at exactly the wrong moment.
 func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep *report.Report, nonce string, histLines []string, pid int, cleanup *[]string, logger *slog.Logger) {
 	appendNoDeepDiveSuffix(rep.Findings, cfg.StateDir)
 
@@ -191,29 +204,18 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		return
 	}
 
-	// The candidate is sent to deep dive as-is (its dedup key included, for
-	// the operator's own reference in the prompt) but the MERGE below
-	// never trusts a key the model echoes back — this is the finding we
-	// sent, identified by our own pointer (§6 step 11).
 	findingJSON, err := json.Marshal(candidate)
 	if err != nil {
 		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 
-	// "component" is deliberately not used as an attr key here: the C7
-	// handler (internal/logging) special-cases any attr literally named
-	// "component" and diverts it into the line's own component SLOT
-	// instead of printing it as k=v (that slot is already "analyze" for
-	// this whole package) — using it here would silently overwrite the
-	// line's component with "zfs"/"kernel"/etc, exactly the bug this
-	// comment exists to prevent a future edit from reintroducing.
+	// Deliberately not using "component" as the attr key: the log handler
+	// diverts any attr with that exact name into the line's component slot
+	// (already "analyze" for this package), which would silently replace
+	// it with "zfs"/"kernel"/etc. "target" avoids the collision.
 	logger.Info("deep-dive", "target", candidate.Component, "key", candidateKey)
 
-	// §6 step 10: PROMPT_MAX_BYTES applies to deep dive exactly as it does to
-	// triage — a deep collect can reach FACTS_MAX_BYTES (262144), and an
-	// unbudgeted argv string that large fails execve outright or hits
-	// agy's silent-empty-answer cliff. Reduce a COPY, never deepFacts itself.
 	deepDivePrompt, err := buildDeepDivePrompt(cfg, string(findingJSON), deepFacts, histLines, nonce, candidate.Component)
 	if err != nil {
 		logger.Info("deep-dive failed, keeping triage report")
@@ -226,9 +228,6 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	}
 	*cleanup = append(*cleanup, deepPromptPath)
 
-	// §6 step 10: deep dive gets its OWN schema, not report.schema.json —
-	// requiring the full report shape let the model copy a 16-hex key
-	// wrong and silently lose the enrichment (key mismatch).
 	deepDiveSchemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("deepdive.schema-%d.json", pid))
 	if err := os.WriteFile(deepDiveSchemaPath, deepDiveSchemaJSON, 0o600); err != nil {
 		logger.Info("deep-dive failed, keeping triage report")
@@ -243,9 +242,8 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
-	// No retry at deep dive (§6 step 10) — an envelope failure here is just
-	// another non-fatal enrichment failure, same as any other deep dive
-	// problem (§5: "deep dive fails in any way ... non-fatal").
+	// No retry at deep dive — an envelope failure is just another
+	// non-fatal enrichment failure.
 	response, everr := decodeAgyEnvelope(out)
 	if everr != nil {
 		logger.Info("deep-dive failed, keeping triage report")
@@ -262,9 +260,6 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	candidate.Analysis = deepDiveRep.Analysis
 	candidate.Recommendation = deepDiveRep.Recommendation
 	if deepDiveRep.Headline != "" {
-		// §6 step 11: the optional headline REPLACES triage's — the
-		// notification title must not stay frozen on the shallow tick
-		// view once the deep collect reveals something worse.
 		rep.Headline = deepDiveRep.Headline
 	}
 
@@ -280,29 +275,25 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	}
 }
 
-// deepDiveSchemaJSON is the deep dive RPC payload schema (§6 step 10): this
-// document is never emitted to a user, so D3's "one schema, normative for
-// everything the system emits" does not apply to it — it exists only so
-// the model cannot copy/fabricate the full report shape (key, status,
-// headline, ...) the way the old full-report deep dive schema let it.
-//
 //go:embed prompt/deepdive.schema.json
 var deepDiveSchemaJSON []byte
 
-// deepDiveResponse is the deep dive RPC payload (§6 step 10): analysis and
-// recommendation for the one candidate finding, identified by the candidate
-// analyze itself sent — never by a key the model echoes back — plus an
-// optional headline that, when present, replaces triage's (§6 step 11).
+// deepDiveResponse is the deep-dive call's answer: analysis and
+// recommendation for the one candidate finding, plus an optional
+// replacement headline. It is deliberately not a full report: an earlier
+// version required the report shape, and the model would copy the 16-hex
+// finding key with one digit wrong, silently losing the enrichment to a
+// key mismatch. The response now contains nothing worth copying.
 type deepDiveResponse struct {
 	Analysis       string `json:"analysis"`
 	Recommendation string `json:"recommendation"`
 	Headline       string `json:"headline,omitempty"`
 }
 
-// validateDeepDiveResponse is the hand-written bounds check for prompt/deepdive.schema.json
-// (same D3 pattern as report.Validate: the schema file is what's handed to
-// agy --json-schema, Go enforces it at runtime). No DisallowUnknownFields,
-// consistent with report.Validate's own convention.
+// validateDeepDiveResponse enforces the same bounds as
+// prompt/deepdive.schema.json. The schema file is what agy receives; Go
+// enforces it at runtime because model output is unvalidated input either
+// way. Keep the two in lockstep.
 func validateDeepDiveResponse(raw []byte) (*deepDiveResponse, error) {
 	var r deepDiveResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -322,12 +313,12 @@ func validateDeepDiveResponse(raw []byte) (*deepDiveResponse, error) {
 	return &r, nil
 }
 
-// appendNoDeepDiveSuffix implements §6 step 8's last bullet: a NEW finding
-// whose component has no deep collector gets the fixed suffix appended to
-// its explanation (truncated first so the result stays <= 800 runes), and
-// no analysis. Called only when DEEP_ENABLED=1 and status != OK (the
-// caller gates this — "no suffix at all" when deep dives are switched off
-// deliberately, per the contract's step-8 clarification).
+// appendNoDeepDiveSuffix marks new findings whose component has no deep
+// collector, so the operator knows the missing analysis is a capability
+// gap, not an omission. The explanation is truncated first so the result
+// stays within the schema's length bound. Callers skip this entirely when
+// deep dives are disabled: the operator switched the feature off and does
+// not need every finding annotated with that fact.
 func appendNoDeepDiveSuffix(findings []report.Finding, stateDir string) {
 	for i, f := range findings {
 		if !isNewFinding(stateDir, f) || deepDiveCapable[f.Component] {
@@ -342,8 +333,9 @@ func appendNoDeepDiveSuffix(findings []report.Finding, stateDir string) {
 	}
 }
 
-// atomicWriteFile implements C4's write pattern: create-temp, write, sync,
-// close, rename, matching internal/collect's atomicWrite.
+// atomicWriteFile writes via create-temp, write, sync, close, rename, so a
+// crash mid-write can never leave a torn or partial file for a later tick
+// to read.
 func atomicWriteFile(dir, name string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {

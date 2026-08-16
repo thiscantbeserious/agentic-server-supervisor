@@ -1,15 +1,27 @@
-// Package analyze implements `sentinel analyze` (contracts/analyze.md):
-// the LLM stage. It runs agy against the embedded sentinel.md prompt, with
-// history windowing, in-process schema validation with one retry, a
-// deterministic fallback, and the two-stage (A9) deep-dive analysis.
+// Package analyze turns one tick's collected facts into a human-readable
+// report by calling an LLM, and survives every way that call can fail.
+//
+// The pipeline makes at most two model calls per tick. The triage call
+// receives all facts plus a window of recent reports and returns the full
+// report: findings with severities, a status, a headline. If triage surfaces
+// a new finding for a component that has a deep collector, the deep-dive
+// call receives that one finding plus a focused deep collection and returns
+// a grounded analysis and a conditional recommendation for it. If the model
+// is unreachable or keeps returning garbage, a deterministic fallback report
+// surfaces the raw high-priority kernel lines instead, so no hardware event
+// is ever lost to an LLM outage.
 //
 // This package is the security boundary between attacker-controlled log
-// text and an LLM prompt: the FACTS/HISTORY/RESOLVED/FINDING/DEEP fences
-// and the per-run nonce (§6, §7) are load-bearing, not decoration. The
-// model has no tools and executes nothing; the worst case of a successful
-// prompt injection here is wrong text in a report (ARCHITECTURE design
-// principle 4) — and even that is bounded by the deterministic
-// recommendation guard (§6 step 11b, deepdive.go).
+// text and an LLM prompt. Anything an attacker can write to a log on the
+// monitored host ends up inside these prompts, so every payload is wrapped
+// in fences marked with a fresh random nonce per run: injected text cannot
+// forge a fence end it cannot predict, and the prompt instructs the model
+// to treat everything inside the fences as data. The model has no tools and
+// executes nothing; a successful injection is limited to wrong text in a
+// report, and the recommendation field — the one field an operator might
+// paste into a shell — additionally passes a deterministic deny-list guard.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -29,41 +41,40 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// Options is the in-process seam (C8).
+// Options is Run's per-tick input: configuration, the facts collected this
+// tick, and the tick sequence number stamped into the report.
 type Options struct {
 	Cfg   *config.Config
 	Facts *facts.Facts
 	Seq   int64
 }
 
-// Deps are the two seams the tests replace (§9). Not interfaces — one
-// implementation each.
+// Deps holds the two operations tests replace: running agy and collecting
+// deep facts. Plain function fields, not interfaces — there is exactly one
+// real implementation of each.
 type Deps struct {
 	RunAgy      func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error)
 	CollectDeep func(ctx context.Context, component string) (*facts.Facts, error)
 }
 
 // DefaultDeps wires the real agy subprocess and the in-process deep
-// collect (§6 step 9).
+// collector.
 func DefaultDeps(cfg *config.Config) Deps {
 	return Deps{
 		RunAgy: func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 			return runAgy(ctx, o.Cfg, promptPath, schemaPath)
 		},
 		CollectDeep: func(ctx context.Context, component string) (*facts.Facts, error) {
-			// Seq is not threaded through here: DefaultDeps is built once
-			// from cfg alone (§9 signature) and deep facts' meta.tick_seq is
-			// informational only — it never gates or identifies anything
-			// (the finding's dedup key already does that job).
+			// Seq is deliberately not threaded through: deep facts' tick number is
+			// informational and nothing keys on it.
 			return collect.Run(ctx, collect.Options{Cfg: cfg, DeepComponent: component})
 		},
 	}
 }
 
-// logWriter is where the package's slog output goes; tests redirect it to
-// capture the C7-format lines the contract requires (e.g.
-// "fallback report built reason=agy_timeout"). Production leaves it at the
-// zero value, which defaults to os.Stderr in newLogger.
+// logWriter is where this package's log output goes. Tests point it at a
+// buffer to assert on the exact lines the spec fixes; the zero value means
+// stderr.
 var logWriter io.Writer
 
 func newLogger(level slog.Level) *slog.Logger {
@@ -74,15 +85,15 @@ func newLogger(level slog.Level) *slog.Logger {
 	return slog.New(logging.New(w, level)).With("component", "analyze")
 }
 
-// Run performs §6. It returns a non-nil, valid report in every case EXCEPT
-// a cancelled context (§1, §6 step 4): on errors.Is(err, context.Canceled)
-// it returns (nil, err) and authors nothing, because a shutdown is not an
-// analyzer failure and must not fabricate an ALERT. This is now a
-// contract-level guarantee (§1), not just a code comment — callers
-// (`tick`) MUST nil-check before marshaling; the SIGTERM path this
-// exception exists to clean up is exactly where a nil-panic would land.
-// Every other non-nil error means the returned document is the fallback.
-// Run never panics and never writes outside the paths in §8.
+// Run executes one analysis tick: triage call, optional deep dive, guard,
+// and returns a validated report.
+//
+// Run returns a non-nil, valid report in every case except one: when ctx
+// was cancelled it returns (nil, err) and authors nothing, because a
+// shutdown is not an analyzer failure and must not fabricate an ALERT.
+// Callers must nil-check before using the report. Any other non-nil error
+// means the returned report is the deterministic fallback. Run never panics
+// and writes only under TmpDir and the deep-dive queue in StateDir.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cfg := o.Cfg
 	logger := newLogger(logging.ParseLevel(cfg.LogLevel))
@@ -95,8 +106,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 		}
 	}()
 
-	// §9: "It never panics and never writes outside the paths in §8." A
-	// nil RunAgy (misconstructed Deps) is not a documented failure mode,
+	// A nil RunAgy (misconstructed Deps) is not a documented failure mode,
 	// but the alternative is a nil-pointer panic on the first call below —
 	// treat it the same as agy being missing rather than crashing.
 	if d.RunAgy == nil {
@@ -111,10 +121,10 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: nonce: %w", err)
 	}
 
-	// resolved is output-only (commit ba631ca): historyKeys \ this tick's
-	// findings needs findings that do not exist until AFTER the triage
-	// call below, so it is never part of the prompt — only newest (kept
-	// for computeResolved post-call) is needed here.
+	// The resolved set is output-only: it needs this tick's findings, which
+	// do not exist until after the triage call below, so it is never part
+	// of the prompt — only the newest history report (kept for
+	// computeResolved) is needed here.
 	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryN)
 	histLines := historyProjectionLines(hist)
 	newest := newestHistory(hist)
@@ -138,19 +148,13 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	rep, reason, err := runTriage(ctx, o, d, promptPath, schemaPath, triagePrompt, logger)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			// §6 step 4: "Cancellation is not an analyzer failure ...
-			// return the cancellation error, author no report." A SIGTERM
-			// during `tick --loop` must not fabricate an ALERT fallback,
-			// log spurious warnings, or drive state/outbox writes during
-			// shutdown — the one deliberate exception to "Run always
-			// returns a non-nil report" (§9), because there is nothing
-			// to report: the tick simply didn't happen.
+			// A shutdown is not an analyzer failure: author no report.
 			return nil, err
 		}
 		return buildFallback(cfg, o.Seq, reason, o.Facts, logger), err
 	}
 
-	// §6 step 7: inject keys, meta and resolved; drop any model-supplied
+	// Inject keys, meta and resolved; drop any model-supplied
 	// key/first_seen/occurrences/meta/resolved.
 	for i := range rep.Findings {
 		rep.Findings[i].Key = dedup.Key(rep.Findings[i].Component, rep.Findings[i].Evidence)

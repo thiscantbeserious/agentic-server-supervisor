@@ -1,3 +1,8 @@
+// agy.go: the agy subprocess. Spawning, minimal environment, output capture,
+// the JSON envelope check, and the error classes that decide whether a
+// failure is worth retrying. Nothing else in the package execs anything.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -14,37 +19,35 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 )
 
-// agy error classes (D7): distinguished so the fallback names the right
-// reason and so a dead binary/timeout/non-zero exit never retries.
+// agy failure classes. The split exists because retrying is only ever
+// useful when the model answered badly: a missing binary, a hard timeout,
+// a non-zero exit, or an unauthenticated agy will fail identically on the
+// second attempt, and retrying those only doubles the outage window.
 var (
 	errAgyMissing = errors.New("agy: binary not found")
 	errAgyTimeout = errors.New("agy: killed by hard timeout")
 	errAgyFailed  = errors.New("agy: exited non-zero or unusable")
-	// errAgyUnauth is agy's stderr containing an OAuth prompt (§6 step 4).
-	// Headless mode cannot complete an OAuth flow, so this persists until a
-	// human re-authenticates — reason agy_unauth, never retried (same as
-	// agy_missing/agy_failed/agy_timeout: a retry cannot fix an
-	// unauthenticated binary any more than it can fix a dead one, D7).
+
+	// errAgyUnauth: agy's stderr shows an OAuth prompt. Headless mode
+	// cannot complete an OAuth flow, so this persists until a human
+	// re-authenticates; the fallback names that fix instead of sending a
+	// 3am reader to check a healthy binary.
 	errAgyUnauth = errors.New("agy: not authenticated")
-	// errAgyEmptySystemic marks the two agy_empty sub-cases that are NOT
-	// retry-eligible (t4-review round 4, routed to main and implemented on
-	// their reasoning pending main's ruling): status != "SUCCESS" or
-	// input_tokens == 0 both mean the prompt never reached a model that
-	// actually answered — a retry re-runs the identical broken invocation
-	// and doubles the outage window, exactly what D7 forbids for a dead
-	// binary. An empty `response` WITH status SUCCESS and non-zero tokens
-	// is the one agy_empty sub-case that's plausibly transient and stays
-	// retry-eligible.
+
+	// errAgyEmptySystemic: the envelope reports a failed call or zero
+	// input tokens — the prompt never reached a model that answered, so a
+	// retry would re-run the identical broken invocation. An empty response
+	// from a call that did spend tokens is the one empty-output case that
+	// is plausibly transient and stays retry-eligible.
 	errAgyEmptySystemic = errors.New("agy: envelope reports failure or zero input tokens")
 )
 
-// agyEnvelope is agy's --output-format json wrapper (§6 step 4, mandatory
-// since t4's live-validation round). agy has an open upstream defect
-// (antigravity-cli#76): --print silently drops stdout in non-TTY contexts
-// — exactly how sentinel spawns it — returning exit 0 with nothing, so a
-// caller cannot otherwise tell "no response" from "response lost". The
-// envelope makes that distinguishable: a dropped prompt reports
-// status="SUCCESS" with an empty response and zero tokens.
+// agyEnvelope is agy's --output-format json wrapper. agy has an open
+// upstream defect (antigravity-cli#76): --print silently drops stdout in
+// non-TTY contexts — exactly how sentinel spawns it — returning exit 0
+// with nothing, so a caller cannot otherwise tell "no response" from
+// "response lost". The envelope makes that distinguishable: a dropped
+// prompt reports status="SUCCESS" with an empty response and zero tokens.
 type agyEnvelope struct {
 	Status   string `json:"status"`
 	Response string `json:"response"`
@@ -53,30 +56,31 @@ type agyEnvelope struct {
 	} `json:"usage"`
 }
 
-// decodeAgyEnvelope implements §6 step 4's envelope check, shared by both
-// triage (agyAttempt) and deep dive (runDeepDive) — every real agy
-// invocation now goes through --output-format json, deep dive included, so
-// both call sites face the same antigravity-cli#76 empty-stdout risk.
+// decodeAgyEnvelope unwraps agy's --output-format json envelope and rejects
+// answers that never happened. agy has an upstream defect where print mode
+// silently drops stdout in non-TTY contexts — exactly how this package
+// spawns it — returning exit 0 with nothing, so a bare read cannot tell
+// "no response" from "response lost". The envelope makes it distinguishable:
+// a failed status or zero input tokens means the prompt never reached the
+// model (not retryable); a successful, token-spending call with an empty
+// response is plausibly a transient drop (retryable).
 func decodeAgyEnvelope(out []byte) (string, error) {
 	var env agyEnvelope
 	if err := json.Unmarshal(out, &env); err != nil {
 		return "", fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
 	}
-	// status != "SUCCESS" or input_tokens == 0 both mean the prompt never
-	// reached a model that answered — systemic, not retry-eligible.
 	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
 		return "", fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
 	}
-	// SUCCESS with tokens spent but nothing came back: plausibly a
-	// transient antigravity-cli#76 drop, retry-eligible.
 	if strings.TrimSpace(env.Response) == "" {
 		return "", fmt.Errorf("empty response (status=%q input_tokens=%d)", env.Status, env.Usage.InputTokens)
 	}
 	return env.Response, nil
 }
 
-// normalizeAgyOutput implements §6 step 4's normalisation: trim space,
-// strip a leading ```json or ``` fence line and a trailing fence line.
+// normalizeAgyOutput trims whitespace and strips a single leading ```json
+// (or ```) fence line and trailing fence line — the two decorations models
+// habitually add around JSON they were told to return bare.
 func normalizeAgyOutput(out []byte) []byte {
 	s := strings.TrimSpace(string(out))
 	if s == "" {
@@ -98,11 +102,8 @@ func normalizeAgyOutput(out []byte) []byte {
 	return []byte(strings.TrimSpace(strings.Join(lines, "\n")))
 }
 
-// --- agy subprocess (DefaultDeps.RunAgy) ---
-
-// limitedBuffer caps captured stdout at maxBytes (§6 step 4), silently
-// discarding anything beyond the cap rather than growing unbounded on a
-// misbehaving or malicious agy invocation.
+// limitedBuffer caps captured stdout, silently discarding the excess, so a
+// misbehaving or malicious agy cannot grow the buffer without bound.
 type limitedBuffer struct {
 	buf *bytes.Buffer
 	max int
@@ -121,23 +122,24 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// runAgy is DefaultDeps' RunAgy: exec agy --print under AgyHardTimeout,
-// stdin from promptPath, a minimal env (§6 step 4).
-// runAgy is DefaultDeps' RunAgy. The prompt is passed as an ARGV argument,
-// never on stdin (§6 step 4, t4's live-validation defect): agy 1.1.13's
-// print mode ignores stdin entirely — a piped-in prompt produces a
-// hallucinated answer to an empty question, while the same text as an
-// argument answers correctly. The prompt file at promptPath is still
-// written (for debugging and the attempt-2 CORRECTION append) but is read
-// here and passed by value.
+// runAgy executes one agy call. The prompt travels as an argv argument, not
+// stdin: agy's print mode ignores stdin entirely, and a piped-in prompt
+// produces a hallucinated answer to an empty question. The prompt file is
+// still written for debugging and the retry append, but it is passed by
+// value. The environment is reduced to PATH, HOME, TMPDIR, TZ, LANG and
+// AGY_* — never the full process environment, which carries notification
+// secrets that must not leak into a subprocess.
+//
+// A cancelled context is reported as cancellation, checked before the
+// timeout and exit-code branches, because a SIGTERM mid-call also makes
+// cmd.Run return an error and must not be misread as an agy failure.
 func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath string) ([]byte, error) {
 	if _, err := exec.LookPath(cfg.AgyBin); err != nil {
 		return nil, fmt.Errorf("%w: %v", errAgyMissing, err)
 	}
 
-	// §6 step 4: "$AGY_HOME must exist before agy is spawned." The debug
-	// path (`sentinel analyze`) has no runtime preflight to seed it, and
-	// agy will not start at all without its $HOME existing.
+	// agy will not start at all without its $HOME existing, and the debug
+	// path (`sentinel analyze`) has no runtime preflight to seed it.
 	if err := os.MkdirAll(cfg.AgyHome, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create AGY_HOME: %v", errAgyFailed, err)
 	}
@@ -160,12 +162,7 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	cmd.WaitDelay = 2 * time.Second
 
 	runErr := cmd.Run()
-	// Cancellation is not an analyzer failure (§6 step 4, live-gate round
-	// 6): on SIGTERM during `tick --loop` the parent context is cancelled,
-	// and classifying that as agy_failed fabricates an ALERT fallback for
-	// a shutdown that has nothing wrong with it. Checked BEFORE
-	// DeadlineExceeded and BEFORE the non-zero-exit branch, since a
-	// cancelled context can also make cmd.Run() return a non-nil error.
+	// SIGTERM also surfaces as a non-nil cmd.Run error; check cancellation first.
 	if ctx.Err() == context.Canceled {
 		return nil, fmt.Errorf("%w", context.Canceled)
 	}
@@ -174,10 +171,6 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	}
 	if runErr != nil {
 		if isAgyAuthFailure(agyErr.String()) {
-			// Headless mode cannot complete an OAuth flow, so this state
-			// persists until a human re-authenticates — "analyzer exited
-			// non-zero" would send the 3am reader to check a healthy
-			// binary instead of naming the actual fix (§6 step 4).
 			return nil, fmt.Errorf("%w: stderr %d bytes", errAgyUnauth, agyErr.Len())
 		}
 		return nil, fmt.Errorf("%w: %v (stderr %d bytes)", errAgyFailed, runErr, agyErr.Len())
@@ -185,17 +178,18 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	return out.Bytes(), nil
 }
 
-// isAgyAuthFailure checks agy's stderr for the OAuth prompt headless mode
-// cannot complete (§6 step 4). Never logged (C7: agy stdout/stderr content
-// stays out of every log line) — only checked in-process for classification.
+// isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
+// text itself is never logged — log lines must not carry subprocess output —
+// only this in-process check reads it.
 func isAgyAuthFailure(stderr string) bool {
 	return strings.Contains(stderr, "Authentication required") ||
 		strings.Contains(stderr, "accounts.google.com/o/oauth2")
 }
 
-// minimalAgyEnv is the §6 step 4 minimal env: PATH, HOME(=AGY_HOME),
+// minimalAgyEnv builds the minimal env passed to agy: PATH, HOME(=AGY_HOME),
 // TMPDIR, TZ, LANG, AGY_* only — never the process's full environment,
-// which could carry the notify/mailrise secrets C7 forbids logging.
+// which could carry notification secrets that must not leak into a
+// subprocess.
 func minimalAgyEnv(cfg *config.Config) []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),

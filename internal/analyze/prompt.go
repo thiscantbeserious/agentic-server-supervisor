@@ -1,3 +1,8 @@
+// prompt.go: prompt construction. Embeds the prompt/ directory, renders the
+// templates, generates the fence nonce, and keeps every prompt under the
+// size at which agy silently stops answering.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -58,9 +63,10 @@ type promptData struct {
 	ValidationError string
 }
 
-// newNonce returns 16 lowercase hex chars from 8 bytes of crypto/rand (§6
-// step 1) — a fresh, unguessable fence token per Run so injected data
-// cannot pre-empt the fence markers.
+// newNonce returns 16 hex chars from crypto/rand — the per-run fence
+// token. The fences are only a boundary if injected log text cannot
+// predict them; a fresh random nonce per run is what makes a forged
+// "end of fence" line inert.
 func newNonce() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -102,20 +108,15 @@ func renderTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []strin
 	return b.String(), nil
 }
 
-// buildTriagePrompt is §6 step 3's prompt-budget enforcement:
-// agy silently returns an empty response past a measured ~30KB prompt
-// (contracts/analyze.md §6 step 3 — 35KB reproduced SUCCESS with an empty
-// response and zero tokens), an order of magnitude under FACTS_MAX_BYTES
-// (262144). The facts document itself is never touched — only the prompt
-// rendered from a REDUCED COPY is, via collect.Truncate (reused, D2: never
-// invents a second truncation algorithm) — so the raw-alert path and
-// everything else that reads collect's own output is unaffected.
-//
-// Because the "shell" (sentinel.md + boundary + HISTORY + TASK) has a
-// fixed size independent of the facts payload, one render is enough to
-// compute it exactly (shellLen = fullLen - factsJSONLen) — no guessing,
-// no iteration: reduce once against the exact remaining budget and
-// re-render.
+// buildTriagePrompt renders the triage prompt and, if it exceeds the size
+// budget, re-renders it from a reduced copy of the facts. agy silently
+// returns an empty answer past a measured ~30 KB prompt, an order of
+// magnitude below the facts size cap, so an unbudgeted prompt fails in the
+// worst way: successfully, with nothing. The non-facts shell has a fixed
+// size, so one render yields the exact remaining budget — no iteration.
+// The reduction uses the collector's own truncation on a copy; the
+// original facts are never touched, because the fallback and raw-alert
+// paths read them and must see exactly what the collector emitted.
 func buildTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
 	prompt, err := renderTriagePrompt(cfg, f, historyLines, nonce)
 	if err != nil {
@@ -154,11 +155,9 @@ func buildTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string
 	return reducedPrompt, nil
 }
 
-// deepCopyFacts returns an independent copy of f: facts.Section[T] fields
-// are pointers, so a shallow struct copy would still alias the original's
-// slices — collect.Truncate mutates in place, and the ORIGINAL facts must
-// stay exactly what collect emitted (the raw-alert path and the §5
-// fallback both read Options.Facts directly).
+// deepCopyFacts returns a fully independent copy. The facts sections are
+// pointers, so a struct copy would still alias the slices the budget
+// reduction mutates.
 func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
 	b, err := json.Marshal(f)
 	if err != nil {
@@ -192,16 +191,12 @@ func renderDeepDivePrompt(cfg *config.Config, findingJSON, deepJSON string, hist
 	return b.String(), nil
 }
 
-// buildDeepDivePrompt is §6 step 10's PROMPT_MAX_BYTES
-// enforcement, applying the exact same exact-arithmetic technique as
-// buildTriagePrompt, to the deep collect document instead of
-// the tick facts. This is critical, not cosmetic (main's own live-gate
-// finding, round 6): a deep collect can reach FACTS_MAX_BYTES (262144) —
-// on Linux a single argv string past MAX_ARG_STRLEN (128 KiB) fails
-// execve with E2BIG, and anything past ~30KB is agy's silent empty-answer
-// cliff (§6 step 3). Unbudgeted, deep dive fails systematically for every
-// realistic deep collect — a 24h ZED window, exactly the case A9 exists
-// to analyze.
+// buildDeepDivePrompt applies the same budget technique to the deep-dive
+// prompt. Not cosmetic: a deep collection can reach the full facts size
+// cap, a single argv string that large fails exec outright on Linux, and
+// anything past ~30 KB hits agy's silent-empty cliff — unbudgeted, the
+// deep dive would fail systematically for exactly the large collections it
+// exists to analyze.
 func buildDeepDivePrompt(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
 	deepJSON, err := json.Marshal(deepFacts)
 	if err != nil {
