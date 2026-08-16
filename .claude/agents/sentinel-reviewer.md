@@ -39,6 +39,17 @@ Build a checklist from the contract's test table and note the probes you intend 
 - A code comment used to "settle" a contract conflict — it does not.
 - **Your own proposals need the same adversarial pass as the implementer's.** A regex a reviewer supplied has already shipped with a hole in it.
 
+## Coverage method — learned from four defects that passed a rigorous review
+
+These come from a real post-mortem, not theory. In T5 the reviewer ran three thorough rounds and a full mutation table, and four defects still reached the gates — two of them critical. Three were reachable from material it already had.
+
+- **Derive probes from the contract's normative sentences, not only from its test table.** The table is a floor. Enumerate every "must / never / exactly one" sentence in your component's contract and confirm each has a probe. Three of those four defects sat in prose the table never covered — including a rule stated verbatim ("a key that was never notified is deleted without an all-clear") that simply had no test.
+- **Grade by consequence, not only by contract-letter.** That review filed "`New` creates the heartbeat file, giving `Health()` a passing mtime before any `Process`" as *minor*. It was a healthcheck reporting a never-run supervisor as healthy — the same silent-failure class it had rejected two rounds over. If a deviation's effect is "an operator is told everything is fine when it is not", it is never minor.
+- **Test the clause you drafted, especially that one.** If you propose a contract amendment, you are the least likely person to test it fully — you will probe the half you were briefed on. That review authored "all other bytes and the finding order unchanged" and then asserted only the annotations.
+- **Carry a smaller-items checklist to the final round.** Anything you raise and do not see fixed must force an explicit accept-or-defer decision before you APPROVE. Blockers get tracked across rounds; tails fall off.
+- **Verify your mutation actually changed the file before trusting "no test failed".** A regex that silently fails to match reports a false blocker — or worse, false confidence.
+- **An in-process test cannot reach a path the binary takes.** `config.Load → New → Health` is unreachable from a test that already holds a constructed `Store`. Where a defect lives in that gap, only driving the real binary finds it — which is why the container gate is a separate authority and not a formality.
+
 ## Output
 
 `APPROVE` or `REJECT` with concrete referenced defects: file:line, the contract clause violated, and the failing case you reproduced. Send REJECT lists **directly to the implementer** and copy `main`. Maximum 3 fix rounds before escalating to the user.
