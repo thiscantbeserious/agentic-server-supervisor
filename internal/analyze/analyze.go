@@ -85,6 +85,12 @@ var (
 	errAgyMissing = errors.New("agy: binary not found")
 	errAgyTimeout = errors.New("agy: killed by hard timeout")
 	errAgyFailed  = errors.New("agy: exited non-zero or unusable")
+	// errAgyUnauth is agy's stderr containing an OAuth prompt (§6 step 4).
+	// Headless mode cannot complete an OAuth flow, so this persists until a
+	// human re-authenticates — reason agy_unauth, never retried (same as
+	// agy_missing/agy_failed/agy_timeout: a retry cannot fix an
+	// unauthenticated binary any more than it can fix a dead one, D7).
+	errAgyUnauth = errors.New("agy: not authenticated")
 	// errAgyEmptySystemic marks the two agy_empty sub-cases that are NOT
 	// retry-eligible (t4-review round 4, routed to main and implemented on
 	// their reasoning pending main's ruling): status != "SUCCESS" or
@@ -298,6 +304,8 @@ func classifyAgyErr(err error) string {
 		return "agy_missing"
 	case errors.Is(err, errAgyTimeout):
 		return "agy_timeout"
+	case errors.Is(err, errAgyUnauth):
+		return "agy_unauth"
 	default:
 		return "agy_failed"
 	}
@@ -520,9 +528,24 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 		return nil, fmt.Errorf("%w", errAgyTimeout)
 	}
 	if runErr != nil {
+		if isAgyAuthFailure(agyErr.String()) {
+			// Headless mode cannot complete an OAuth flow, so this state
+			// persists until a human re-authenticates — "analyzer exited
+			// non-zero" would send the 3am reader to check a healthy
+			// binary instead of naming the actual fix (§6 step 4).
+			return nil, fmt.Errorf("%w: stderr %d bytes", errAgyUnauth, agyErr.Len())
+		}
 		return nil, fmt.Errorf("%w: %v (stderr %d bytes)", errAgyFailed, runErr, agyErr.Len())
 	}
 	return out.Bytes(), nil
+}
+
+// isAgyAuthFailure checks agy's stderr for the OAuth prompt headless mode
+// cannot complete (§6 step 4). Never logged (C7: agy stdout/stderr content
+// stays out of every log line) — only checked in-process for classification.
+func isAgyAuthFailure(stderr string) bool {
+	return strings.Contains(stderr, "Authentication required") ||
+		strings.Contains(stderr, "accounts.google.com/o/oauth2")
 }
 
 // minimalAgyEnv is the §6 step 4 minimal env: PATH, HOME(=AGY_HOME),

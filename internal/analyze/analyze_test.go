@@ -1893,6 +1893,63 @@ func TestRun_AgyEmpty_StatusFailed_DoesNotRetry(t *testing.T) {
 	}
 }
 
+// TestIsAgyAuthFailure covers §6 step 4's OAuth-prompt detection: agy's
+// stderr containing an OAuth marker means headless mode cannot complete
+// authentication, and the reason must be agy_unauth, not agy_failed.
+func TestIsAgyAuthFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"authentication required marker", "Authentication required. Visit the URL to continue.", true},
+		{"oauth url marker", "Please visit https://accounts.google.com/o/oauth2/auth?...", true},
+		{"ordinary failure", "panic: connection refused", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAgyAuthFailure(tc.stderr); got != tc.want {
+				t.Fatalf("isAgyAuthFailure(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRun_DefaultDeps_AgyUnauth_ProducesAgyUnauthReason is a hermetic
+// reproduction of the OAuth failure via a stub `agy` on PATH that exits
+// non-zero and writes an OAuth prompt to stderr — the real signature agy
+// produces when its headless session token has expired and cannot be
+// refreshed (contracts/runtime.md, live-gate finding).
+func TestRun_DefaultDeps_AgyUnauth_ProducesAgyUnauthReason(t *testing.T) {
+	cfg := newTestConfig(t)
+	binDir := t.TempDir()
+	stub := `#!/bin/sh
+echo "Authentication required: visit https://accounts.google.com/o/oauth2/auth to continue" 1>&2
+exit 1
+`
+	stubPath := filepath.Join(binDir, "agy")
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgyBin = stubPath
+	buf := captureLog(t)
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, DefaultDeps(cfg))
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	if !strings.Contains(rep.Body, "analyzer not authenticated") {
+		t.Fatalf("fallback body does not carry the agy_unauth phrase: %q", rep.Body)
+	}
+	if !strings.Contains(buf.String(), "reason=agy_unauth") {
+		t.Fatalf("stderr does not contain reason=agy_unauth: %s", buf.String())
+	}
+	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
+		t.Fatalf("Validate() error: %v", verr)
+	}
+}
+
 // TestGuardRecommendations_BodyNeverChecked is the explicit negative case
 // for the design-review correction: body is NOT checked by the guard, on
 // purpose (contracts/analyze.md §6 step 11b). Dangerous-looking but

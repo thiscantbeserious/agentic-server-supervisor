@@ -147,7 +147,11 @@ func Load() (*Config, error) {
 	cfg.Hostname = resolveHostname(cfg.HostRoot, cfg.HostProc)
 
 	cfg.AgyBin = loadString("AGY_BIN", "agy")
-	cfg.AgyHome = loadString("AGY_HOME", "/tmp/agy-home")
+	// /state/agy-home, NOT tmpfs: agy refreshes its OAuth token as it runs,
+	// and headless mode cannot re-authenticate once that refresh is lost —
+	// a tmpfs HOME would leave the analyzer permanently down after the
+	// first container restart (contracts/runtime.md, live-gate finding).
+	cfg.AgyHome = loadString("AGY_HOME", "/state/agy-home")
 	cfg.AgySecretDir = loadString("AGY_SECRET_DIR", "/run/secrets/agy")
 	if cfg.AgyPrintTimeout, err = loadDuration("AGY_PRINT_TIMEOUT", "120s"); err != nil {
 		return nil, err

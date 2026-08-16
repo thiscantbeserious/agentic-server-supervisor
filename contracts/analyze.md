@@ -588,7 +588,7 @@ Not defined here. `analyze` calls `dedup.Key(component, evidence)` (C6) and ship
 | `${STATE_DIR}/active-alerts/` | read | volume — never written here (that is `state`'s) |
 | `${STATE_DIR}/deep-queue/` | **write** (mkdir 0700, create/remove key files 0644, atomic per C4) | volume, on the C4 whitelist |
 
-No other path is written. Nothing under `/host/**` is opened.
+No other path is written **by analyze itself**. The agy subprocess writes inside its own `$HOME` (`$STATE_DIR/agy-home`, C4) — token refreshes and its own state — which is outside analyze's control and must not be read, parsed or logged. Nothing under `/host/**` is opened.
 
 ### 9. Package layout & exported types
 

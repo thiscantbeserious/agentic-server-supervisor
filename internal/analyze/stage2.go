@@ -80,10 +80,13 @@ var (
 	uriSchemeRe   = regexp.MustCompile(`://`)
 	bareDomainRe  = regexp.MustCompile(`(?i)\b[a-z0-9-]+\.([a-z]{2,})\b`)
 	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs)\b|\brm\s+-rf\b`)
-	safeSuffix    = map[string]bool{
-		"service": true, "target": true, "timer": true, "socket": true,
+	// The operational-suffix set, verbatim from contracts/analyze.md §6
+	// step 11b: a systemd unit is not a domain, and every unit on bam is
+	// "<name>.service".
+	safeSuffix = map[string]bool{
+		"service": true, "target": true, "socket": true, "timer": true,
 		"mount": true, "device": true, "scope": true, "slice": true,
-		"conf": true, "log": true, "json": true, "md": true, "go": true, "txt": true,
+		"path": true, "conf": true, "json": true, "log": true, "db": true, "sh": true,
 	}
 )
 

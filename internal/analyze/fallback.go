@@ -27,6 +27,7 @@ var reasonPhrase = map[string]string{
 	"schema_invalid": "analyzer output failed schema validation",
 	"internal_error": "analyzer internal failure",
 	"agy_empty":      "analyzer returned no answer",
+	"agy_unauth":     "analyzer not authenticated",
 }
 
 // Fallback builds the exact §5 fallback document: the analyzer stage
