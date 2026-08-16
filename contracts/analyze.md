@@ -665,7 +665,9 @@ type Deps struct {
 
 func DefaultDeps(cfg *config.Config) Deps
 
-// Run performs §6. It always returns a non-nil, valid report; a non-nil error
+// Run performs §6. It returns a non-nil, valid report in every case EXCEPT a
+// cancelled context, where it returns (nil, err) and authors nothing — tick
+// must nil-check before marshaling (§1). Otherwise a non-nil error
 // means the returned document is the fallback. It never panics and never writes
 // outside the paths in §8.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error)
