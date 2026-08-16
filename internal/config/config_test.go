@@ -280,6 +280,17 @@ func TestLoad_C3Ranges(t *testing.T) {
 		{"AGY_HARD_TIMEOUT negative duration", map[string]string{"AGY_HARD_TIMEOUT": "-5s"}, "AGY_HARD_TIMEOUT"},
 		{"DEEP_TIMEOUT zero duration", map[string]string{"DEEP_TIMEOUT": "0s"}, "DEEP_TIMEOUT"},
 		{"TICK_WINDOW zero duration", map[string]string{"TICK_WINDOW": "0s"}, "TICK_WINDOW"},
+		{"RAW_ALERT_MARKER_TTL_HOURS above range", map[string]string{"RAW_ALERT_MARKER_TTL_HOURS": "8761"}, "RAW_ALERT_MARKER_TTL_HOURS"},
+		// The overflow value that motivated the <=24h post-conversion bound
+		// (C3): a seconds-valued var is multiplied by time.Second, so a huge
+		// value overflows int64 nanoseconds into a NEGATIVE duration — a
+		// timeout would fire instantly instead of erroring at Load().
+		{"SECTION_TIMEOUT overflows int64 ns when converted", map[string]string{"SECTION_TIMEOUT": "99999999999"}, "SECTION_TIMEOUT"},
+		{"NOTIFY_TIMEOUT overflows int64 ns when converted", map[string]string{"NOTIFY_TIMEOUT": "99999999999"}, "NOTIFY_TIMEOUT"},
+		{"TICK_WINDOW duration above 24h", map[string]string{"TICK_WINDOW": "25h"}, "TICK_WINDOW"},
+		{"DEEP_WINDOW duration above 24h", map[string]string{"DEEP_WINDOW": "25h"}, "DEEP_WINDOW"},
+		{"AGY_PRINT_TIMEOUT duration above 24h", map[string]string{"AGY_PRINT_TIMEOUT": "25h"}, "AGY_PRINT_TIMEOUT"},
+		{"DEEP_TIMEOUT duration above 24h", map[string]string{"DEEP_TIMEOUT": "25h"}, "DEEP_TIMEOUT"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

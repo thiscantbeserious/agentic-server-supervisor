@@ -13,6 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	// A slim runtime image ships no system zoneinfo; without this the
+	// time.LoadLocation(cfg.TZ) call below (and any future binary that
+	// links config without cmd/sentinel/main.go, which already imports
+	// this) would fail on a fresh container.
+	_ "time/tzdata"
 )
 
 // Error is a configuration error naming the offending variable (C3: "exit
@@ -36,6 +42,17 @@ func errf(name, format string, args ...any) *Error {
 // forces every call site to state its bounds instead of leaving one out
 // by accident.
 const noMax = math.MaxInt
+
+// maxConvertedDuration is C3's post-conversion ceiling: every value that
+// becomes a time.Duration must be <= 24h. Without it a seconds-valued var
+// multiplied by time.Second can overflow int64 nanoseconds into a
+// NEGATIVE duration, making a timeout fire instantly instead of erroring.
+const maxConvertedDuration = 24 * time.Hour
+
+// maxSecondsBeforeOverflow is the largest second count that stays inside
+// maxConvertedDuration once multiplied by time.Second — checked before the
+// multiplication so the comparison itself never overflows.
+const maxSecondsBeforeOverflow = int(maxConvertedDuration / time.Second)
 
 type Config struct {
 	TickInterval           time.Duration
@@ -157,7 +174,7 @@ func Load() (*Config, error) {
 	if cfg.RawAlertRepeatSeconds, err = loadIntRange("RAW_ALERT_REPEAT_SECONDS", 3600, 1, noMax); err != nil {
 		return nil, err
 	}
-	if cfg.RawAlertMarkerTTLHours, err = loadIntRange("RAW_ALERT_MARKER_TTL_HOURS", 168, 1, noMax); err != nil {
+	if cfg.RawAlertMarkerTTLHours, err = loadIntRange("RAW_ALERT_MARKER_TTL_HOURS", 168, 1, 8760); err != nil {
 		return nil, err
 	}
 	if cfg.RenotifyAlertSec, err = loadIntRange("RENOTIFY_ALERT_SEC", 3600, 1, noMax); err != nil {
@@ -259,6 +276,9 @@ func loadSecondsRange(name string, def, min, max int) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	if n > maxSecondsBeforeOverflow {
+		return 0, errf(name, "must be <= 24h once converted to a duration")
+	}
 	return time.Duration(n) * time.Second, nil
 }
 
@@ -276,6 +296,9 @@ func loadDuration(name, def string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, errf(name, "must be > 0s")
+	}
+	if d > maxConvertedDuration {
+		return 0, errf(name, "must be <= 24h once converted to a duration")
 	}
 	return d, nil
 }
