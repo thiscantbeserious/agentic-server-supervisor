@@ -1385,6 +1385,79 @@ func TestKeyReuse(t *testing.T) {
 	}
 }
 
+// TestProcess_RejectsCraftedKeyPathEscape is the sibling of the
+// OutboxAck path-traversal fix: here the attacker-shaped identifier
+// arrives inside the report document (findings[].key) rather than as a
+// CLI argument. Step (d) must never join an unvalidated key into a
+// filesystem path — a supplied key is honoured only if it already
+// matches dedup.Key's ^[0-9a-f]{16}$ shape (S.3d), otherwise it is
+// recomputed. Covers: an escape straight out of $STATE_DIR, an escape
+// that stays inside $STATE_DIR but into the wrong subdirectory, and a
+// genuinely valid key that must still be honoured unchanged.
+func TestProcess_RejectsCraftedKeyPathEscape(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"escapes state dir", "../../pwned"},
+		{"escapes into history dir", "../history/x"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Nest StateDir under a parent this test owns exclusively, so
+			// snapshotting the parent directory actually proves nothing
+			// escaped it (S.2: "nothing outside it is ever written").
+			parent := t.TempDir()
+			stateDir := filepath.Join(parent, "state")
+			if err := os.MkdirAll(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := testConfig(t, time.Unix(1000, 0))
+			cfg.StateDir = stateDir
+			s := newStore(t, cfg)
+
+			before, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(before) != 1 {
+				t.Fatalf("setup guard: expected exactly the state dir under parent, got %d entries", len(before))
+			}
+
+			f := finding("alert", "crafted-key-evidence")
+			f.Key = tc.key
+			b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f}})
+			d := mustProcess(t, s, b)
+
+			after, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after) != 1 || after[0].Name() != "state" {
+				t.Fatalf("crafted key %q wrote outside $STATE_DIR: parent dir now contains %v", tc.key, after)
+			}
+
+			// (b) the finding must still be processed, under its
+			// recomputed key — never silently dropped.
+			wantKey := literalDedupKey("kernel", "crafted-key-evidence")
+			if len(d.Report.Findings) != 1 {
+				t.Fatalf("finding was dropped instead of processed under a recomputed key: %+v", d.Report)
+			}
+			if d.Report.Findings[0].Key != wantKey {
+				t.Errorf("key: got %q, want recomputed %q (crafted key must never be honoured)", d.Report.Findings[0].Key, wantKey)
+			}
+
+			if _, ok := s.loadAlert(tc.key); ok {
+				t.Errorf("crafted key %q was accepted as an active-alerts filename", tc.key)
+			}
+			if _, ok := s.loadAlert(wantKey); !ok {
+				t.Errorf("recomputed key %q was not saved as the active alert", wantKey)
+			}
+		})
+	}
+}
+
 // literalDedupKey reimplements C6's algorithm from CONTRACTS.md directly —
 // deliberately not calling dedup.Key/EvidenceCore — so a break in either is
 // caught rather than tracked. "evidence2" has no timestamps, digits, or

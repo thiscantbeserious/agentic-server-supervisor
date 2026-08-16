@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,11 @@ var (
 // severityRank orders info < watch < alert (S.3d) — the single ranking
 // used both to detect escalation and to pick the outgoing status (g).
 var severityRank = map[string]int{"info": 0, "watch": 1, "alert": 2}
+
+// validKeyRe is dedup.Key's own output shape (C6, report.schema.json). A
+// finding's supplied key is honoured only when it matches; anything else
+// is recomputed rather than joined into a path (S.3d write containment).
+var validKeyRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 type Decision struct {
 	Notify          bool          `json:"notify"`
@@ -133,8 +139,15 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	reason := ""
 
 	for i, f := range rep.Findings {
+		// A supplied key is trusted only if it already matches dedup.Key's
+		// own output shape. `key` is joined straight into a filesystem path
+		// below (loadAlert/saveAlert), so an attacker-shaped value such as
+		// "../../pwned" or "../history/x" must never reach that join — it
+		// escapes $STATE_DIR (S.2, A1) or drops a non-conforming file into
+		// a sibling directory analyze/history readers trust. Recomputing
+		// is free: dedup.Key always conforms.
 		key := f.Key
-		if key == "" {
+		if !validKeyRe.MatchString(key) {
 			key = dedup.Key(f.Component, f.Evidence) // C6: Key normalizes internally; never double-normalize
 		}
 		touchedKeys[key] = true
