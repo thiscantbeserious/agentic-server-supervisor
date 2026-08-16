@@ -155,26 +155,7 @@ func runTick(args []string) (int, error) {
 
 // --- collect --- (cmd/sentinel/collect.go)
 
-// --- analyze ---
-
-func runAnalyze(args []string) (int, error) {
-	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
-		return 64, err
-	}
-	if fs.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "sentinel analyze: unexpected positional argument")
-		return 64, nil
-	}
-
-	if _, err := config.Load(); err != nil {
-		return exitCodeForConfigErr(err)
-	}
-
-	fmt.Fprintln(os.Stderr, "sentinel analyze: not yet implemented (internal/analyze, T4)")
-	return 1, errNotImplemented
-}
+// --- analyze --- (cmd/sentinel/analyze.go)
 
 // --- state ---
 

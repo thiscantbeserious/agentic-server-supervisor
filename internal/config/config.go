@@ -77,6 +77,7 @@ type Config struct {
 	AgyPrintTimeout        time.Duration
 	AgyHardTimeout         time.Duration
 	HistoryN               int
+	PromptMaxBytes         int
 	HistoryKeep            int
 	DeepEnabled            bool
 	DeepTimeout            time.Duration
@@ -146,7 +147,11 @@ func Load() (*Config, error) {
 	cfg.Hostname = resolveHostname(cfg.HostRoot, cfg.HostProc)
 
 	cfg.AgyBin = loadString("AGY_BIN", "agy")
-	cfg.AgyHome = loadString("AGY_HOME", "/tmp/agy-home")
+	// /state/agy-home, NOT tmpfs: agy refreshes its OAuth token as it runs,
+	// and headless mode cannot re-authenticate once that refresh is lost —
+	// a tmpfs HOME would leave the analyzer permanently down after the
+	// first container restart (contracts/runtime.md, live-gate finding).
+	cfg.AgyHome = loadString("AGY_HOME", "/state/agy-home")
 	cfg.AgySecretDir = loadString("AGY_SECRET_DIR", "/run/secrets/agy")
 	if cfg.AgyPrintTimeout, err = loadDuration("AGY_PRINT_TIMEOUT", "120s"); err != nil {
 		return nil, err
@@ -159,6 +164,9 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.HistoryN, err = loadIntRange("HISTORY_N", 5, 1, noMax); err != nil {
+		return nil, err
+	}
+	if cfg.PromptMaxBytes, err = loadIntRange("PROMPT_MAX_BYTES", 20000, 1, noMax); err != nil {
 		return nil, err
 	}
 	if cfg.HistoryKeep, err = loadIntRange("HISTORY_KEEP", 50, 1, noMax); err != nil {

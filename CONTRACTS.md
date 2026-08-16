@@ -111,11 +111,12 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `HOST_RASDAEMON` | `/host/rasdaemon` | collect |
 | `SENTINEL_HOSTNAME` | resolved, see C5 | all |
 | `AGY_BIN` | `agy` | analyze |
-| `AGY_HOME` | `/tmp/agy-home` | runtime |
+| `AGY_HOME` | `/state/agy-home` (persistent; NEVER tmpfs — a lost token refresh cannot be re-authenticated headlessly) | runtime |
 | `AGY_SECRET_DIR` | `/run/secrets/agy` | runtime |
 | `AGY_PRINT_TIMEOUT` | `120s` | analyze |
 | `AGY_HARD_TIMEOUT` | `150s` (raised to print+30s if lower) | analyze |
 | `HISTORY_N` | `5` | analyze |
+| `PROMPT_MAX_BYTES` | `20000` (whole assembled prompt; agy drops larger prompts silently) | analyze |
 | `HISTORY_KEEP` | `50` | state |
 | `DEEP_ENABLED` | `1` | analyze |
 | `DEEP_TIMEOUT` | `30s` (overrides `SECTION_TIMEOUT` for deep collects) | analyze |
@@ -152,12 +153,12 @@ Container mounts (all `:ro` except where noted): `/host/journal`, `/host/journal
 
 ```
 tick-seq  heartbeat  baseline-ports
-history/  active-alerts/  outbox/  raw-alerts/  deep-queue/
+history/  active-alerts/  outbox/  raw-alerts/  deep-queue/  agy-home/
 ```
 
-`deep-queue/` is in (analyze needs it); `heartbeat-date` and `tmp/` are out. `heartbeat` is a single file, content `YYYY-MM-DD\n` (last heartbeat day), rewritten by `state.Process` on every tick so its mtime is the liveness marker; `sentinel health` exits 0 iff its mtime is younger than `3 × TICK_INTERVAL`.
+`deep-queue/` is in (analyze needs it); `heartbeat-date` and `tmp/` are out. `agy-home/` is in because `$AGY_HOME` lives there: it is the **only** entry not written by sentinel itself — the agy subprocess owns its contents, and sentinel only creates the directory (`0700`) and seeds it from `$AGY_SECRET_DIR`. It must persist, because agy refreshes its OAuth token as it runs and headless mode cannot re-authenticate a lost one. Nothing in sentinel may read, parse or log anything inside it (C7: credentials). `heartbeat` is a single file, content `YYYY-MM-DD\n` (last heartbeat day), rewritten by `state.Process` on every tick so its mtime is the liveness marker; `sentinel health` exits 0 iff its mtime is younger than `3 × TICK_INTERVAL`.
 
-Every persistent write is `os.CreateTemp(<destination dir>, ".tmp-*")` → write → `Sync` → `Close` → `os.Rename`. Dirs `0o700`, files `0o600` under `outbox/`, `0o644` elsewhere. No `/tmp` staging for state files; `/tmp` is only agy's `$HOME` and analyze's prompt scratch (removed by `defer`).
+Every persistent write is `os.CreateTemp(<destination dir>, ".tmp-*")` → write → `Sync` → `Close` → `os.Rename`. Dirs `0o700`, files `0o600` under `outbox/`, `0o644` elsewhere. No `/tmp` staging for state files. `/tmp` holds only analyze's prompt scratch and the materialised schema, both removed by `defer`; agy's `$HOME` is `$STATE_DIR/agy-home` (see the whitelist above), not `/tmp`.
 
 ### C5. Shared types and JSON rules
 

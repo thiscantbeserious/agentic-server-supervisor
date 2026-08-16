@@ -33,13 +33,15 @@ No flags, no positional arguments, no `--facts`/`--out`. The production path is 
 analyze.Run(ctx, analyze.Options{Cfg, Facts, Seq}, analyze.Deps) (*report.Report, error)
 ```
 
-`Run` **always** returns a non-nil, valid `*report.Report`. A non-nil error means the returned document is the analyzer fallback — `tick` sends it through `state` unchanged and exits **3**. `tick` never authors an analyzer fallback (it authors only the collector fallback), because the fallback built here carries the stable `key` that `state` deduplicates on.
+`Run` returns a non-nil, valid `*report.Report` in **every case except a cancelled context** (§6 step 4): on `context.Canceled` it returns `(nil, err)` and authors nothing, because a shutdown is not an analyzer failure and must not fabricate an ALERT. **`tick` must nil-check before marshaling** (C8) — the SIGTERM path this exception exists to clean up is exactly where a nil-panic would land. A non-nil error means the returned document is the analyzer fallback — `tick` sends it through `state` unchanged and exits **3**. `tick` never authors an analyzer fallback (it authors only the collector fallback), because the fallback built here carries the stable `key` that `state` deduplicates on.
 
 ### 2. Inputs
 
 #### 2.1 Configuration
 
-From `*config.Config` (C3), never from `os.Getenv` inside this package: `STATE_DIR`, `AGY_BIN`, `AGY_PRINT_TIMEOUT`, `AGY_HARD_TIMEOUT` (raised to print+30s when lower, with an `slog` note), `HISTORY_N`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, `TMPDIR`, `SENTINEL_HOSTNAME`, `LOG_LEVEL`, `TZ`.
+From `*config.Config` (C3), never from `os.Getenv` inside this package: `STATE_DIR`, `AGY_BIN`, `AGY_PRINT_TIMEOUT`, `AGY_HARD_TIMEOUT` (raised to print+30s when lower, with an `slog` note), `HISTORY_N`, `PROMPT_MAX_BYTES`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, `TMPDIR`, `SENTINEL_HOSTNAME`, `LOG_LEVEL`, `TZ`, **`RAW_ALERT_MAX_PRIORITY`** and **`RAW_ALERT_MAX_LINES`** (both used by the §5 fallback, which renders the raw crit lines when the analyzer is unavailable; C3's owner column reads "runtime, collect" and analyze is a third reader).
+
+`AGY_PRINT_TIMEOUT` is passed to agy as the Go `time.Duration` value. Verified against agy 1.1.13 on 2026-08-16: both `120s` and the `Duration.String()` rendering `2m0s` are accepted, so no raw-string field is needed here (unlike `meta.window`, where the rendered form reaches a human).
 
 #### 2.2 Files read
 
@@ -187,7 +189,22 @@ Per C2:
 | facts document oversized | already truncated by `collect`; injected verbatim, no second truncation |
 | `${STATE_DIR}` unwritable or absent | deep-queue bookkeeping skipped with an `slog` note; analysis proceeds. Never fatal. |
 
-**Fallback report — exact document.** `<REASON>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`}:
+**Fallback report — exact document.** The machine-readable reason code `<CODE>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`} is what `slog` records on stderr (C7). The document itself carries `<REASON>`, the human phrase this fixed table maps the code to:
+
+| `<CODE>` (stderr) | `<REASON>` (report text) |
+|---|---|
+| `agy_missing` | analyzer binary not found |
+| `agy_failed` | analyzer exited non-zero |
+| `agy_timeout` | analyzer timed out |
+| `invalid_json` | analyzer output was not valid JSON |
+| `schema_invalid` | analyzer output failed schema validation |
+| `internal_error` | analyzer internal failure |
+| `agy_empty` | analyzer returned no answer |
+| `agy_unauth` | analyzer not authenticated |
+
+`internal_error` covers the paths where agy never ran at all — nonce generation, template rendering, or writing the prompt file failed. Labelling those `agy_failed` tells the 3am reader "analyzer exited non-zero" about a binary that was never invoked, sending them to check agy's health when the fault is ours.
+
+The codes must not reach report text, because `notify` strips `_` from every report-derived string (C8): `reason: agy_missing` would be delivered as `reason: agymissing` — mangled wording in the one alert a human reads precisely when the analyzer is down. **D10 therefore has no exception for the fallback**: test-table row 17 covers case 4 like every other case, and no test may exclude it.
 
 ```json
 {
@@ -218,7 +235,14 @@ case f.Kernel == nil:
 case f.Kernel.Err != "":
     lines = append(lines, "kernel section unavailable: "+f.Kernel.Err)
 default:
-    for _, e := range f.Kernel.Data.Entries {
+    // Walk from the NEWEST entry backwards, keeping at most RawAlertMaxLines
+    // protected lines, then restore chronological order for the reader.
+    // Never iterate forwards and break at the limit: entries are ordered
+    // oldest-first, so that would fill the fallback with the oldest crit
+    // lines and drop the incident that is happening right now — the same
+    // inversion that had to be corrected in the journal record cap.
+    for i := len(f.Kernel.Data.Entries) - 1; i >= 0; i-- {
+        e := f.Kernel.Data.Entries[i]
         if e.Priority > cfg.RawAlertMaxPriority {
             continue
         }
@@ -227,6 +251,7 @@ default:
             break
         }
     }
+    slices.Reverse(lines)
 }
 raw := strings.Join(lines, "\n")
 if raw == "" {
@@ -257,42 +282,107 @@ flowchart TD
 ```
 
 1. **Nonce.** 8 bytes from `crypto/rand` → 16 lowercase hex chars.
-2. **History window.** Newest `HISTORY_N` files from `${STATE_DIR}/history` by `sort.Strings` of names, oldest first. Each projected to keep the prompt small: `{status, headline, findings:[{severity,component,key}], resolved}`, one compact JSON object per line. Unreadable or unparseable files are skipped silently.
-3. **Assemble the stage-1 prompt** into `${TMPDIR}/sentinel-prompt-<pid>.txt`; materialise the embedded schema to `${TMPDIR}/report.schema-<pid>.json` (0600). Template §7.1.
+2. **History window.** Newest `HISTORY_N` files matching `*.json` in `${STATE_DIR}/history` by `sort.Strings` of names, oldest first (the `*.json` filter matters: `state` writes atomically via `.tmp-*` files, and letting one into the window evicts a real report). Each projected to `{status, headline, findings:[{severity, component, key, evidence, occurrences, first_seen}], resolved}`, one compact JSON object per line. Unreadable or unparseable files are skipped silently.
+
+`evidence` is `truncRunes(f.Evidence, 160)`; `occurrences` and `first_seen` are copied from the history document and omitted when absent. **These three fields are what make the trend rule executable at all.** `dedup.EvidenceCore` deliberately masks digits (C6), so `cksum_errors=1` and `cksum_errors=7` share a key — the key proves recurrence and can never prove growth. Without the evidence line the model is asked "has the counter grown?" while holding nothing but a hash, and it will answer from imagination. `state` already annotates `occurrences` and `first_seen` into these files (D1) and `historyLines` already unmarshals them; the projection was simply dropping them.
+3. **Reduce the facts for the prompt, then assemble it** into `${TMPDIR}/sentinel-prompt-<pid>.txt`; materialise the embedded schema to `${TMPDIR}/report.schema-<pid>.json` (0600). Template §7.1.
+
+   **Prompt budget: `$PROMPT_MAX_BYTES` (default 20000).** The facts document may be up to `FACTS_MAX_BYTES` (262144) — an order of magnitude more than agy accepts. Measured against agy 1.1.13 on 2026-08-16: a 12KB and a 25KB prompt answer correctly (18k input tokens, ~2s); a **35KB prompt returns `SUCCESS` with an empty response and zero input tokens**; 300KB times out. The failure is silent and size-dependent, so the budget is enforced by us, not discovered in production.
+
+   `analyze` therefore renders the prompt against a **reduced copy** of the facts: `collect.Truncate(factsCopy, PROMPT_MAX_BYTES - assembledOverhead)`, reusing the §5 algorithm from `contracts/collect.md` rather than inventing a second one. That keeps D2 intact — entries with `priority <= RAW_ALERT_MAX_PRIORITY` are never the ones dropped, so the lines the analyzer most needs survive the reduction. The **unreduced** facts remain what `collect` emits and what the raw-alert path reads; only the model's copy is shrunk. When reduction occurs, `meta.truncated` is already true on that copy, so the model can see its picture is partial.
+
+   The 20000 default leaves ~5KB of headroom under the measured 25KB ceiling for `sentinel.md`, the boundary paragraphs, the history window and the TASK block, all of which are counted in the assembled size — the budget is on the **whole prompt**, not on the facts alone.
 4. **agy attempt 1.**
    ```go
    ctx, cancel := context.WithTimeout(parent, cfg.AgyHardTimeout)
-   cmd := exec.CommandContext(ctx, cfg.AgyBin, "--print",
+   cmd := exec.CommandContext(ctx, cfg.AgyBin, "--print", prompt,   // ARGV, never stdin
        "--json-schema", schemaPath,
+       "--output-format", "json",
        "--print-timeout", cfg.AgyPrintTimeout)
-   cmd.Stdin  = promptFile
+   cmd.Stdin  = nil        // agy's print mode does not read stdin at all
    cmd.Stdout = &out       // bytes.Buffer, capped at 1 MiB
    cmd.Stderr = &agyErr    // discarded except for the byte count in the log line
    cmd.Env    = minimal    // PATH, HOME (=AGY_HOME), TMPDIR, TZ, LANG, AGY_* only
    cmd.WaitDelay = 2 * time.Second
    ```
-   Normalise stdout before decoding: trim space, strip a leading ```` ```json ```` or ```` ``` ```` fence line and a trailing fence line. Then `json.Unmarshal` into `report.Report`, then `report.Validate`.
+
+   **Cancellation is not an analyzer failure.** Check `ctx.Err()` for `context.Canceled` **before** classifying a non-zero exit: on SIGTERM during `tick --loop` the parent context is cancelled, and treating that as `agy_failed` fabricates an `ALERT` fallback ("analyzer exited non-zero"), logs spurious warnings and drives state/outbox writes during shutdown. Cancelled ⇒ return the cancellation error, author no report. Only `DeadlineExceeded` is a timeout.
+
+   **`$AGY_HOME` must exist before agy is spawned.** `analyze` creates it (`MkdirAll`, `0700`) if absent rather than assuming `runtime` seeded it — the debug path (`sentinel analyze`) has no runtime preflight, and agy fails to start when its `$HOME` does not exist.
+
+   **Trade-off, accepted and recorded:** an argv prompt is visible in `/proc/<pid>/cmdline`, which is world-readable, and container processes appear in the host process table — so attacker-controlled journal text is briefly exposed to any local user, which C7's "facts content never leaves the process" would otherwise forbid. agy offers no stdin, file, or environment channel for the prompt (checked against 1.1.13 and the headless docs), so there is no alternative that keeps it private; `/proc/<pid>/environ` would be `0400` owner-only if agy ever gains an env-var input. `bam` is a single-admin host and `PROMPT_MAX_BYTES` keeps the argument far below `ARG_MAX` (2 MiB on Linux). Accepted; revisit if agy adds another input channel.
+
+   **The prompt is an argv argument.** Verified against agy 1.1.13 on 2026-08-16 and confirmed by the official headless documentation: print mode ignores stdin entirely — piping a prompt in produces a hallucinated answer to an empty question, while the same text as an argument answers correctly. A prompt file is still written to `${TMPDIR}` for debugging and for the attempt-2 append, but it is passed by value, not by handle.
+
+   **`--output-format json` is mandatory, and its envelope must be validated.** agy has an open upstream defect ([antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76)) where `--print` silently drops stdout in non-TTY contexts — pipes and subprocesses, which is exactly how `sentinel` invokes it — returning exit 0 with nothing on stdout, so a caller cannot distinguish "no response" from "response lost". The JSON envelope makes that distinguishable:
+
+   ```json
+   {"status":"SUCCESS","response":"…","duration_seconds":2.0,"num_turns":1,
+    "usage":{"input_tokens":18266,"output_tokens":98,"total_tokens":18364}}
+   ```
+
+   Decode the envelope first. Treat as a **failed attempt** (reason `agy_empty`): `status != "SUCCESS"`, an empty or whitespace-only `response`, or `usage.input_tokens == 0`.
+
+   **Retry only the transient shape.** `usage.input_tokens == 0` means the prompt never reached the model at all — a systematic fault (too large, malformed invocation, dropped stdout), so retrying doubles the outage window for a call that will fail identically; that is exactly what D7 forbids, and it makes an argv-class bug take twice as long to surface. `SUCCESS` with non-zero tokens but an empty `response` is plausibly the transient #76 drop and **is** retry-eligible. `status != "SUCCESS"` follows the D7 rule for the underlying cause: no retry.
+
+   **Authentication failures get their own reason.** When agy's stderr contains an OAuth prompt (`Authentication required`, `accounts.google.com/o/oauth2`), the reason is `agy_unauth` → "analyzer not authenticated", not `agy_failed`. Headless mode cannot complete an OAuth flow, so this state persists until a human re-authenticates and is worth naming precisely: "analyzer exited non-zero" sends the 3am reader to check a healthy binary, while "analyzer not authenticated" names the actual fix. A dropped prompt reports `SUCCESS` with `response: ""` and zero tokens, which is otherwise indistinguishable from a model that chose to say nothing. Only then normalise `response`: trim space, strip a leading ```` ```json ```` or ```` ``` ```` fence line and a trailing fence line. Then `json.Unmarshal` into `report.Report`, then `report.Validate`.
 5. **Attempt 2**, only on parse/validate failure (D7). Same prompt file with this block appended verbatim, then repeat step 4 exactly once:
    ```
    ===== CORRECTION =====
-   Your previous answer was not a valid report document. Output ONE JSON object
-   only - no prose, no markdown fence, no explanation before or after it. It must
-   match the schema exactly: required keys status, headline, body, findings,
-   resolved; no additional keys; status must equal the highest finding severity
-   (alert -> ALERT, watch -> WATCH, otherwise OK). Do not emit "key", "meta",
-   "first_seen" or "occurrences".
+   Your previous answer failed validation: ${VALIDATION_ERROR}
+   Output ONE JSON object only - no prose, no markdown fence, no explanation
+   before or after it. It must match the schema exactly: required keys status,
+   headline, body, findings, resolved; no additional keys; status must equal the
+   highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
+   not emit "key", "meta", "first_seen" or "occurrences".
    ```
+   `${VALIDATION_ERROR}` is the concrete error the first attempt produced — `err.Error()` from the failed `json.Unmarshal` or `report.Validate` (e.g. `report: headline: 94 runes exceeds maximum 80`), truncated to 300 runes. `--print` mode is stateless, so the model has no memory of its previous answer: without the actual error, "your previous answer was not valid" carries no information and the retry is a re-roll rather than a correction. The error text is generated by our own validator and contains no facts content, so C7 is not at risk.
 6. **Failure ⇒ fallback** per §5; return it with a non-nil error.
-7. **Inject keys and meta.** Drop any model-supplied `key`, `first_seen`, `occurrences` and `meta`; set `f.Key = dedup.Key(f.Component, f.Evidence)` for every finding (D5) and `rep.Meta = &report.Meta{Hostname: cfg.Hostname, TickSeq: o.Seq}` (D9).
+7. **Inject keys, meta and resolved.** Drop any model-supplied `key`, `first_seen`, `occurrences` and `meta`; set `f.Key = dedup.Key(f.Component, f.Evidence)` for every finding (D5) and `rep.Meta = &report.Meta{Hostname: cfg.Hostname, TickSeq: o.Seq}` (D9).
+
+   **`resolved` is computed in Go and overwrites whatever the model emitted.** It is the set difference `historyKeys \ currentKeys`: every key present in the newest history document but absent from this tick's findings, rendered as the past finding's `evidence` truncated to **80 runes** (findings have no headline of their own — the old instruction "list its headline" pointed at a field that does not exist). Entries whose evidence is empty are skipped. Sorted for determinism, capped at the schema's 20 items.
+
+   The 80 is the schema's own `resolved[]` `maxLength`, not a stylistic choice: an earlier draft of this section said 120, which makes `report.Validate` **reject the whole report** as soon as a resolved finding carries a typical kernel or ZED line. `minLength: 1` likewise forbids the empty string, so empty evidence must be skipped rather than emitted.
+
+   Resolution detection is pure set arithmetic over data `analyze` already holds — it injects the current keys in this very step and parses the history keys in step 2. Asking a probabilistic component to compute a set difference invites both hallucinated resolutions and missed ones, and the old contract had to add a policing rule ("do not list anything you did not see in HISTORY") to compensate.
+
+   **The model is not shown the resolved set and does not narrate it.** An earlier draft of this section had the prompt carry a RESOLVED block, which is circular: this tick's resolved set is `historyKeys \ ` *this tick's findings*, and those findings do not exist until the stage-1 call that block would have been part of. Feeding the previous tick's set instead would make the model narrate resolutions that the previous report already announced. `resolved` is therefore an output-only field: computed here, rendered by `notify`, never in a prompt.
 8. **Deep-dive selection (stage 2).** Skipped entirely when `DEEP_ENABLED=0`, `status == "OK"`, or no candidate exists.
    - A finding is **NEW** iff `severity != "info"` **and** `${STATE_DIR}/active-alerts/<key>.json` does not exist.
    - **Deep-dive-capable** iff `component ∈ {zfs, smart, kernel, ras}`.
    - **Candidate order:** first, any file in `${STATE_DIR}/deep-queue/` (oldest mtime first) whose name still matches a NEW deep-dive-capable finding in this report — a deferred finding outranks a fresh one. Otherwise the first NEW deep-dive-capable finding in severity order (`alert` before `watch`), ties broken by report order.
    - **Max one per tick.** Every other NEW deep-dive-capable finding is queued: write `${STATE_DIR}/deep-queue/<key>` containing its component plus `\n` (atomic per C4, dirs 0700, files 0644). The consumed candidate's queue file is removed. Queue files whose key is absent from the current report are removed as stale. Any error here is logged and ignored.
-   - NEW findings with a component outside the set get no `analysis`; append exactly ` (no deep-dive available for this component)` to `explanation`, truncating the explanation first so the result stays ≤ 800 runes.
+   - NEW findings with a component outside the set get no `analysis`; append exactly ` (no deep-dive available for this component)` to `explanation`, truncating the explanation first so the result stays ≤ 800 runes. **This suffix is about the component, not about the feature being switched off:** it is appended whenever stage 2 ran (or would have run) and the component has no deep collector. When `DEEP_ENABLED=0` no suffix is added to anything — the operator disabled deep dives deliberately and does not need every finding annotated with it.
 9. **Deep context.** `deps.CollectDeep(ctx, component)` under `DEEP_TIMEOUT`; the default implementation calls `collect.Run(ctx, collect.Options{Cfg, Seq, DeepComponent: component})` in-process and the result is marshaled for the prompt. Error or empty ⇒ skip stage 2 (§5).
-10. **Second agy call** with the stage-2 prompt (§7.2), same flags and schema. Validated identically; **no retry** at stage 2.
-11. **Merge.** From the stage-2 document take only `analysis` and `recommendation` of the finding whose `key` matches the candidate, into the stage-1 finding. `status`, `headline`, `body`, `meta`, the other findings and `resolved` come from stage 1 — stage 2 may not change severity or status. Key mismatch, missing finding, or both fields empty ⇒ keep stage 1 unchanged. Re-run `report.Validate` after the merge; failure ⇒ keep stage 1.
+10. **Second agy call** with the stage-2 prompt (§7.2). **`PROMPT_MAX_BYTES` applies here exactly as it does to stage 1** — reduce the deep document with `collect.Truncate` before rendering. A deep collect may be up to `FACTS_MAX_BYTES` (262144): on Linux a single argv string above `MAX_ARG_STRLEN` (128 KiB) fails `execve` with `E2BIG`, and anything above ~30 KB is silently dropped by agy. Unbudgeted, stage 2 therefore fails **systematically** for every real deep collect — a 24h ZED window is exactly the case it exists for. Same flags as stage 1, but its **own schema** — `stage2.schema.json`, embedded beside `report.schema.json`:
+    ```json
+    { "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object", "additionalProperties": false,
+      "required": ["analysis", "recommendation"],
+      "properties": {
+        "analysis":       { "type": "string", "minLength": 1, "maxLength": 1200 },
+        "recommendation": { "type": "string", "minLength": 1, "maxLength": 800 },
+        "headline":       { "type": "string", "minLength": 1, "maxLength": 80 }
+      } }
+    ```
+    **No retry** at stage 2. This document is never emitted, so D3's "one schema, normative for everything the system emits" does not apply — it is an internal RPC payload. Requiring a full report here made the model copy the 16-hex `key` verbatim and fabricate a consistent `status`/`headline`/`body` that Go then discarded: every copied field was a way for enrichment to fail silently (one wrong hex digit ⇒ key mismatch ⇒ "deep-dive failed, keeping stage1" ⇒ the operator loses the analysis for a finding that will never be NEW again, visible only in stderr).
+11. **Merge.** Take `analysis` and `recommendation` from the stage-2 document into the candidate finding — identified by the candidate we sent, not by a key the model echoed back. `status`, `body`, `meta`, the other findings and `resolved` come from stage 1, and stage 2 may not change severity or status.
+
+    `headline` is optional and **replaces** the stage-1 headline when present, valid and non-empty. This closes a real incoherence: the headline is what lands in the notification title, and stage 1 wrote it knowing only the shallow tick facts. If the deep collect reveals that 400 blocks were repaired or that a SMART self-test failed two hours ago, a headline that still reflects the shallow view misleads the operator at exactly the wrong moment.
+
+    Both fields empty ⇒ keep stage 1 unchanged. Re-run `report.Validate` after the merge; failure ⇒ keep stage 1.
+11b. **Recommendation guard (deterministic, Go).** After the merge, **`recommendation` only** is checked. A match blanks that field and appends one `watch` finding with component `meta`, evidence `recommendation withheld`, explaining that the analyzer proposed an unsafe action and it was suppressed.
+
+    Patterns, all matched with **word boundaries** (`\b`) and case-insensitively: any URI scheme (`://`); a bare domain-shaped token `\b[a-z0-9-]+\.[a-z]{2,}\b` **except** when the suffix is one of the operational set `{service, target, socket, timer, mount, device, scope, slice, path, conf, json, log, db}` — **`sh` is deliberately NOT in this set**: `.sh` is a live TLD (Saint Helena) widely used to host payloads, so treating `evil.sh` as a filename would wave through the exact thing this guard exists to stop — a systemd unit is not a domain, and every unit on `bam` is `<name>.service`; any pipe character; command substitution (`` ` ``, `$(`); output redirection **only when it targets a path** (`>` or `>>` followed by optional space and a token containing `/`, or a bare filename with an extension) — a naked `>` must NOT match, because it is the comparison operator in exactly this domain: `If cksum_errors > 1 on the next scrub, plan replacement` and `when the reallocated sector count is > 0 and still rising` are the *shape* A9 asks recommendations to take, and an earlier draft blanked both; and the whole-word tokens `curl`, `wget`, `nc`, `netcat`, `ncat`, `scp`, `ssh`, `iwr`, `invoke-webrequest`, `base64`, `chmod`, `dd`, `mkfs`, `rm -rf`, plus the interpreters `sh`, `bash`, `zsh`, `python`, `python3`, `perl`, `ruby`, `eval`. (`node` is deliberately excluded: it is ordinary storage vocabulary and is not present on the target host, so it carries the weakest attack value of the set and the highest false-positive risk.) An interpreter name is what turns a fetched file into a running one, so blocking fetch verbs while allowing `sh payload` closes only half the path.
+
+    **Every revision of this guard must be tested against BOTH tables.** The attack table above, and an operational-prose table containing at minimum: `restart smartd.service`, `check systemctl status zfs-zed.service`, `add a replacement disk`, `since the last scrub the imbalance persisted`, `if cksum_errors > 1 on the next scrub, plan replacement`, `when the reallocated sector count is > 0 and still rising`, `inspect /dev/sdb with smartctl -a`, `state.mount`, `scrub.timer`. This guard has produced a false-positive class in three consecutive review rounds — narrative bodies, then token substrings, then comparison operators — always from matching a deny-pattern against natural language without anchoring it to the shape of an actual command. Testing only the attack side reproduces thatevery time.
+
+    **The word boundaries are load-bearing, not tidiness.** Without them the previous draft blanked `restart smartd.service` (unit read as a domain), `add a replacement disk` (`add ` matched `dd `), and `since the last scrub` / `imbalance` / `instance` (all containing `nc`). Five of eight realistic recommendations were destroyed — and the two showcase recommendations in this contract survived, which is precisely why the tests passed. **Validate this filter against ordinary operational prose, never against the contract's own examples.** A supervisor that cannot say "restart smartd.service" has lost the A9 deliverable it exists to produce.
+
+    **`body` is NOT checked, and that is deliberate.** An earlier draft applied the same patterns to `body`, which is narrative prose: "the ssh daemon logged three failed password attempts", "the curl package was upgraded", or a unit fetching its index from a Debian URL are all *factual reports of what happened*, and blanking the body over them destroys a legitimate report. On `bam` — Debian, sshd running — that would have fired on real production reports immediately. `recommendation` is different in kind: it is a command proposal a tired operator may paste into a root shell, so a false positive there costs one suppressed suggestion and a visible meta finding, while a false negative costs a compromised host.
+
+    The pattern set is deliberately broad *for this field only*. It will not catch every phrasing — "fetch the script from evil.example.com and run it with sh" is prose, and no substring list closes that — so it is a mitigation, not a proof. What makes the residual risk acceptable is that the recommendation is explicitly conditional advice a human evaluates, and the supervisor executes nothing (ARCHITECTURE §4).
+
 12. **Return** the report. `tick` marshals it once and hands the bytes to `state.Process` (C8). In debug mode `main` writes the compact document + `\n` to stdout.
 13. **Cleanup.** `defer os.Remove(...)` for every `${TMPDIR}/sentinel-*-<pid>.*` file.
 
@@ -358,16 +448,18 @@ ${DEEP_JSON}
 <<<END_DEEP_${NONCE}>>>
 
 ===== TASK =====
-Classify this single finding, then output ONE JSON object matching the report
-schema containing exactly this one finding, with "analysis" and "recommendation"
-filled in and every other field copied unchanged from the finding above,
-including "key". Do not change "severity". Set "status", "headline" and "body"
-consistently with that one finding; they will be discarded.
+Classify the single finding above, then output ONE JSON object with exactly the
+keys "analysis" and "recommendation", plus "headline" only if the deep context
+changes what the operator most needs to know. Nothing else - no finding object,
+no "key", no "status", no "severity".
 "analysis": transient event vs. developing trend, state of redundancy, blast
 radius - grounded only in the evidence and deep context above.
 "recommendation": one concrete, CONDITIONAL proposal ("if X still holds after Y,
 then Z; if the counter rises, then W"). Name the command you would propose, and
 state that this supervisor executes nothing. Never recommend a blind action.
+"headline" (optional): at most 80 characters, replacing the summary line written
+before this deep context existed. Supply it only when the deep context changes
+the picture materially.
 No prose outside the JSON object, and no markdown anywhere in the text fields.
 ```
 
@@ -413,12 +505,62 @@ otherwise any `watch` -> WATCH, otherwise OK.
 
 ## Trend
 
-HISTORY contains the previous reports, oldest first, with the stable `key` of
-each finding. A key you see again is a repeat: say how many ticks it has been
-present and whether it is worsening, and escalate `watch` to `alert` when the
-underlying counter has grown. A key from HISTORY that has no counterpart in the
-current FACTS is resolved: list its headline in `resolved`. Do not list anything
-in `resolved` that you did not see in HISTORY.
+HISTORY contains the previous reports, oldest first. Each past finding carries
+its stable `key`, its `evidence` line, `occurrences` (how many ticks it has been
+seen) and `first_seen` (epoch seconds).
+
+A key you see again is a repeat. Use `occurrences` and `first_seen` to say how
+long it has been present - do not count HISTORY lines. To decide whether it is
+worsening, compare the counters inside the past `evidence` against the matching
+line in the current FACTS: `cksum_errors=1` last tick and `cksum_errors=7` now
+is growth. Escalate `watch` to `alert` only when a counter has actually grown,
+not merely because the finding repeated.
+
+Do not emit `resolved` yourself beyond an empty list. Which findings have gone
+away is computed deterministically after your answer and filled in for you.
+
+## Consistency
+
+Be conservative and stable. A value inside its normal operating range - disk
+below 90 percent, a temperature inside the sensor's own limits, load below the
+core count, memory with free headroom - is not a finding. If HISTORY shows you
+did not report a value last tick and it has not changed materially, do not
+start reporting it now. A finding appears because something changed, not
+because you looked harder this time. Every flip between reporting and not
+reporting produces a resolved-then-reappearing alert, which is exactly the
+spam this supervisor exists to avoid.
+
+## Example
+
+Illustration only - never treat it as FACTS.
+
+FACTS contained one ZED event on a mirrored pool during a scrub:
+
+    eid=1841 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1
+
+HISTORY had no matching key, SMART was clean, no kernel errors.
+
+The right finding:
+
+    severity: watch
+    component: zfs
+    evidence: eid=1841 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1
+    explanation: One checksum error was detected and corrected on a single
+      mirror member during a scrub. The mirror partner is clean, so redundancy
+      is intact and no data was lost.
+    analysis: Single event, not a trend: counter at 1, first occurrence, no
+      read or write errors, no SMART attribute movement, no kernel I/O errors
+      on that device. A scrub is when latent bit flips surface, so one
+      corrected error here is expected behaviour rather than a failing disk.
+    recommendation: Wait for the scrub to finish. If the counter is still 1 and
+      SMART reallocated and pending sectors stay at 0, clearing the counter
+      with zpool clear hotstore is reasonable and the next scrub confirms it.
+      If the counter rises, or SMART sectors move, plan replacement of that
+      member instead. This supervisor executes nothing.
+
+Note the shape: name the redundancy state, ground every claim in a value that
+is actually in FACTS, and make the recommendation conditional with a named
+command. That is the standard for every finding, not only ZFS.
 
 ## Components
 
@@ -454,7 +596,7 @@ Not defined here. `analyze` calls `dedup.Key(component, evidence)` (C6) and ship
 | `${STATE_DIR}/active-alerts/` | read | volume — never written here (that is `state`'s) |
 | `${STATE_DIR}/deep-queue/` | **write** (mkdir 0700, create/remove key files 0644, atomic per C4) | volume, on the C4 whitelist |
 
-No other path is written. Nothing under `/host/**` is opened.
+No other path is written **by analyze itself**. The agy subprocess writes inside its own `$HOME` (`$STATE_DIR/agy-home`, C4) — token refreshes and its own state — which is outside analyze's control and must not be read, parsed or logged. Nothing under `/host/**` is opened.
 
 ### 9. Package layout & exported types
 
@@ -523,7 +665,9 @@ type Deps struct {
 
 func DefaultDeps(cfg *config.Config) Deps
 
-// Run performs §6. It always returns a non-nil, valid report; a non-nil error
+// Run performs §6. It returns a non-nil, valid report in every case EXCEPT a
+// cancelled context, where it returns (nil, err) and authors nothing — tick
+// must nil-check before marshaling (§1). Otherwise a non-nil error
 // means the returned document is the fallback. It never panics and never writes
 // outside the paths in §8.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error)
@@ -551,11 +695,11 @@ Table-driven, hermetic, offline. `RunAgy` is replaced by a table-supplied func r
 | 11 | read-only guarantee | snapshot `STATE_DIR` and the process CWD before/after the whole table | the only created or modified paths under `STATE_DIR` are inside `deep-queue/`; nothing outside `STATE_DIR` and `TMPDIR` changed |
 | 12 | validator negatives | `report.Validate` against: 81-rune headline, `status:"OK"` with an `alert` finding, unknown component, unknown severity, missing `resolved`, 21 findings, empty evidence, 1001-rune evidence, `key` not matching the pattern | each returns a non-nil error naming the offending field |
 | 12b | validator ↔ schema agree | the **same** `acceptCases`/`rejectCases` tables that drive case 12 are run through both `Validate` and `jsonschema/v6` against the embedded schema — one shared source of fixtures, not a parallel `testdata/` copy, so the two can never drift apart | the two verdicts match for every fixture (the only place jsonschema is linked). Where they legitimately differ, the case name is listed in a `schemaDivergesFromValidate` map with a comment; the test fails in **both** directions, so an entry that stops diverging is also an error. Today's only entry class: `status` = highest severity, which JSON Schema cannot express |
-| 12c | every emitted document validates | the reports produced by cases 1–5b, plus the raw-alert and collector fallbacks from `runtime` | all validate against `report.schema.json` (C9 cross-package assertion) |
+| 12c | every emitted document validates | the reports produced by cases 1–5b **(the analyze-owned half, runnable in T4)**. The raw-alert and collector fallbacks come from `internal/runtime`, which does not exist until T6: that half is **deferred to T6** and must be listed in T6's test table, not stubbed here. Deferring is fine; a row that silently cannot run is not — that is how a contract row died unnoticed in T3 | all validate against `report.schema.json` (C9 cross-package assertion) |
 | 13 | stage-2 failure is non-fatal | case 3 with `CollectDeep` returning an error | **no error**; the report is the stage-1 document; no `Analysis`; stderr contains `deep-dive failed` |
 | 14 | debug-mode input errors | empty stdin; non-JSON stdin; a flag; a positional argument | exit **65**, **65**, **64**, **64**; nothing on stdout |
 | 15 | collector_errors surfaced | facts with two distinct `.meta.collector_errors` **objects** | the stage-1 prompt contains both `reason` strings inside the FACTS fence, and the `meta` rule from sentinel.md is present in the prompt |
-| 16 | every emerg/crit line survives the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing | the fallback `Evidence` contains the first `RAW_ALERT_MAX_LINES` rendered lines, is ≤ 900 runes, and `Validate` passes |
+| 16 | the NEWEST emerg/crit lines survive the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing. Run it twice: once with short synthetic messages and once with **realistic ~80-rune kernel lines**, so the rune budget actually binds in one of the two | `Evidence` holds at most `RAW_ALERT_MAX_LINES` lines, is ≤ 900 runes, `Validate` passes, and — the assertion that matters — the **newest** protected line is always present while the dropped ones are the oldest. When the 900-rune budget binds before the line count does, lines are dropped from the **oldest** end and the newest is still there. Asserting only the count would pass while carrying exactly the wrong 20 lines |
 | 17 | no markdown authored (D10) | the reports from cases 1–4 | no `` ` ``, `_`, `*`, `[`, `]` in `headline`, `body`, `explanation`, `analysis`, `recommendation` or `resolved[]` — `notify`'s sanitizer is a no-op on analyzer output |
 
 ---
