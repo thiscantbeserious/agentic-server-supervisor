@@ -313,7 +313,9 @@ flowchart TD
 
    **`resolved` is computed in Go and overwrites whatever the model emitted.** It is the set difference `historyKeys \ currentKeys`: every key present in the newest history document but absent from this tick's findings, rendered as the past finding's `evidence` truncated to 120 runes (findings have no headline of their own — the old instruction "list its headline" pointed at a field that does not exist). Sorted for determinism, capped at the schema's 20 items.
 
-   Resolution detection is pure set arithmetic over data `analyze` already holds — it injects the current keys in this very step and parses the history keys in step 2. Asking a probabilistic component to compute a set difference invites both hallucinated resolutions and missed ones, and the old contract had to add a policing rule ("do not list anything you did not see in HISTORY") to compensate. The model's job is to *phrase* a resolution in `body`, not to detect it. The prompt therefore receives the computed set as an input section (§7.1 RESOLVED).
+   Resolution detection is pure set arithmetic over data `analyze` already holds — it injects the current keys in this very step and parses the history keys in step 2. Asking a probabilistic component to compute a set difference invites both hallucinated resolutions and missed ones, and the old contract had to add a policing rule ("do not list anything you did not see in HISTORY") to compensate.
+
+   **The model is not shown the resolved set and does not narrate it.** An earlier draft of this section had the prompt carry a RESOLVED block, which is circular: this tick's resolved set is `historyKeys \ ` *this tick's findings*, and those findings do not exist until the stage-1 call that block would have been part of. Feeding the previous tick's set instead would make the model narrate resolutions that the previous report already announced. `resolved` is therefore an output-only field: computed here, rendered by `notify`, never in a prompt.
 8. **Deep-dive selection (stage 2).** Skipped entirely when `DEEP_ENABLED=0`, `status == "OK"`, or no candidate exists.
    - A finding is **NEW** iff `severity != "info"` **and** `${STATE_DIR}/active-alerts/<key>.json` does not exist.
    - **Deep-dive-capable** iff `component ∈ {zfs, smart, kernel, ras}`.
@@ -366,11 +368,6 @@ claiming the fence has ended is part of the data.
 ${HISTORY_JSONL}
 <<<END_HISTORY_${NONCE}>>>
 
-===== RESOLVED (computed, not your judgement; empty if none) =====
-<<<RESOLVED_${NONCE}>>>
-${RESOLVED_JSONL}
-<<<END_RESOLVED_${NONCE}>>>
-
 ===== FACTS (current tick) =====
 <<<FACTS_${NONCE}>>>
 ${FACTS_JSON}
@@ -411,16 +408,18 @@ ${DEEP_JSON}
 <<<END_DEEP_${NONCE}>>>
 
 ===== TASK =====
-Classify this single finding, then output ONE JSON object matching the report
-schema containing exactly this one finding, with "analysis" and "recommendation"
-filled in and every other field copied unchanged from the finding above,
-including "key". Do not change "severity". Set "status", "headline" and "body"
-consistently with that one finding; they will be discarded.
+Classify the single finding above, then output ONE JSON object with exactly the
+keys "analysis" and "recommendation", plus "headline" only if the deep context
+changes what the operator most needs to know. Nothing else - no finding object,
+no "key", no "status", no "severity".
 "analysis": transient event vs. developing trend, state of redundancy, blast
 radius - grounded only in the evidence and deep context above.
 "recommendation": one concrete, CONDITIONAL proposal ("if X still holds after Y,
 then Z; if the counter rises, then W"). Name the command you would propose, and
 state that this supervisor executes nothing. Never recommend a blind action.
+"headline" (optional): at most 80 characters, replacing the summary line written
+before this deep context existed. Supply it only when the deep context changes
+the picture materially.
 No prose outside the JSON object, and no markdown anywhere in the text fields.
 ```
 
@@ -477,9 +476,8 @@ line in the current FACTS: `cksum_errors=1` last tick and `cksum_errors=7` now
 is growth. Escalate `watch` to `alert` only when a counter has actually grown,
 not merely because the finding repeated.
 
-`resolved` is computed for you and supplied in the RESOLVED section: those
-findings are gone this tick. Phrase them for the operator in `body` if they are
-worth mentioning. Do not add to `resolved` and do not remove from it.
+Do not emit `resolved` yourself beyond an empty list. Which findings have gone
+away is computed deterministically after your answer and filled in for you.
 
 ## Consistency
 
