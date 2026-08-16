@@ -83,7 +83,13 @@ sequenceDiagram
 
 **c) stale expiry** (first) — every active alert with `now - last_seen > STALE_ALERT_SEC` is deleted silently, no all-clear.
 
-**d) per finding**, in input order. Key = `finding.Key` when non-empty, else `dedup.Key(component, evidence)`; the computed key is written back into the outgoing finding so every emitted document carries one.
+**d) per finding**, in input order. Key = `finding.Key` when non-empty **and matching `^[0-9a-f]{16}$`**, else `dedup.Key(component, evidence)`; the computed key is written back into the outgoing finding so every emitted document carries one.
+
+**The shape check is a containment guard, not a validation nicety, and it must run before any path is built.** The key is joined into `active-alerts/<key>.json`, so a supplied `../../pwned` writes **outside `$STATE_DIR`** — reproduced against the built binary. The exit-5 output validation does not save us: it fires after step (d) has already written the file, so the report is rejected while the write stands, breaking S.2 ("nothing outside it is ever written"), A1 and the C4 whitelist. Recomputing is free because `dedup.Key` output always conforms, and it closes the whole class rather than the reported instance — including `../history/x`, which stays inside `$STATE_DIR` but drops a non-conforming filename into the directory `analyze` sorts and filters, and `..%2f`, which is not decoded and lands as junk.
+
+Reachability is defense in depth rather than a live exploit: `analyze` overwrites `f.Key` on every finding, so today's `tick` pipeline cannot deliver a crafted key. But S-D5 makes `state` contract-bound to *trust* an injected key, `sentinel state process` reads arbitrary stdin as a documented ops path (S.1), and ARCHITECTURE §4 promises that prompt injection's worst case is "wrong text in a report" — a write outside the state volume is strictly worse than the guarantee this system makes.
+
+**A containment test must snapshot the PARENT of `$STATE_DIR`.** One rooted at the state dir cannot observe an escape by construction — the tautology trap this project has already hit twice.
 
 | State of `active-alerts/<key>.json` | Decision | `reason` |
 |---|---|---|
