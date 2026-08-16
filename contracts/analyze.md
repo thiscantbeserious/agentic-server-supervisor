@@ -189,7 +189,17 @@ Per C2:
 | facts document oversized | already truncated by `collect`; injected verbatim, no second truncation |
 | `${STATE_DIR}` unwritable or absent | deep-queue bookkeeping skipped with an `slog` note; analysis proceeds. Never fatal. |
 
-**Fallback report — exact document.** `<REASON>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`}:
+**Fallback report — exact document.** The machine-readable reason code `<CODE>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`} is what `slog` records on stderr (C7). The document itself carries `<REASON>`, the human phrase this fixed table maps the code to:
+
+| `<CODE>` (stderr) | `<REASON>` (report text) |
+|---|---|
+| `agy_missing` | analyzer binary not found |
+| `agy_failed` | analyzer exited non-zero |
+| `agy_timeout` | analyzer timed out |
+| `invalid_json` | analyzer output was not valid JSON |
+| `schema_invalid` | analyzer output failed schema validation |
+
+The codes must not reach report text, because `notify` strips `_` from every report-derived string (C8): `reason: agy_missing` would be delivered as `reason: agymissing` — mangled wording in the one alert a human reads precisely when the analyzer is down. **D10 therefore has no exception for the fallback**: test-table row 17 covers case 4 like every other case, and no test may exclude it.
 
 ```json
 {

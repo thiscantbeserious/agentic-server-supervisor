@@ -1,0 +1,10 @@
+{{define "header"}}{{.SentinelMD}}
+
+===== SECURITY BOUNDARY =====
+{{if .Stage2}}{{template "boundary_stage2" .}}{{else}}{{template "boundary_stage1" .}}{{end}}
+
+===== HISTORY (last {{.HistoryN}} reports, oldest first; empty if none) =====
+<<<HISTORY_{{.Nonce}}>>>
+{{.History}}
+<<<END_HISTORY_{{.Nonce}}>>>
+{{end}}
