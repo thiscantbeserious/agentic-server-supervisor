@@ -1,0 +1,66 @@
+# Sentinel notification stack (T1).
+#
+# This file currently defines the two notification services. The `sentinel`
+# service itself is added in T7 exactly as specified in contracts/runtime.md
+# §R3 — it is referenced there, not redefined here, so the two must not drift.
+#
+# Bring up:   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up -d
+# Verify:     see the two V commands in PLAN.md §3 (T1).
+#
+# The Telegram bot token lives ONLY in this stack. The sentinel container gets
+# no /config mount and no TELEGRAM_* variables (contracts/runtime.md): the token
+# stays out of the process that parses attacker-controlled log text.
+
+services:
+  apprise:
+    image: lscr.io/linuxserver/apprise-api:latest
+    container_name: sentinel-apprise
+    restart: unless-stopped
+    environment:
+      PUID: "${APPRISE_PUID:-1000}"
+      PGID: "${APPRISE_PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - apprise-config:/config
+    ports:
+      # LAN-bound, never 0.0.0.0: this endpoint can send messages as you.
+      - "${APPRISE_BIND:-127.0.0.1}:8000:8000"
+    networks: [sentinel-net]
+    healthcheck:
+      # /status is served by apprise-api itself; no shell, no $$ interpolation.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  mailrise:
+    image: yoryan/mailrise:latest
+    container_name: sentinel-mailrise
+    restart: unless-stopped
+    environment:
+      TZ: "${TZ:-UTC}"
+    volumes:
+      # Copy mailrise.conf.example -> mailrise.conf and fill it in first.
+      - ./mailrise/mailrise.conf:/etc/mailrise.conf:ro
+    ports:
+      # OMV, smartd and ZED deliver here over SMTP. LAN-bound by default;
+      # widen deliberately in .env if other hosts must reach it.
+      - "${MAILRISE_BIND:-127.0.0.1}:8025:8025"
+    networks: [sentinel-net]
+    depends_on:
+      apprise:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  sentinel-state:
+  apprise-config:
+
+networks:
+  sentinel-net:

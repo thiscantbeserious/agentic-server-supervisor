@@ -1,0 +1,43 @@
+# mailrise: SMTP -> Apprise bridge (T1).
+#
+# OpenMediaVault, smartd and zfs-zed can only send mail. They deliver here and
+# mailrise forwards to Telegram through the same apprise instance the supervisor
+# posts to, so both notification paths end in the same place.
+#
+# Copy to mailrise.conf and fill in the real values:
+#
+#   cp mailrise/mailrise.conf.example mailrise/mailrise.conf
+#   chmod 600 mailrise/mailrise.conf && $EDITOR mailrise/mailrise.conf
+#
+# mailrise.conf is gitignored. This .example is tracked and must never contain a
+# real token.
+#
+# Why not interpolate from the environment: mailrise loads this file as plain
+# YAML and does no variable expansion, so a literal "$TELEGRAM_BOT_TOKEN" would
+# be accepted as part of the URL and silently produce an invalid Telegram target
+# — a failure you would discover the first time an alert did not arrive. Values
+# are written in, the same way .env holds the compose-side secrets.
+
+configs:
+  # Anything addressed to sentinel@mailrise.xyz — the supervisor's own SMTP
+  # fallback path, used when Apprise has been unreachable for OUTBOX_SMTP_AFTER
+  # ticks (contracts/state.md S.5).
+  sentinel:
+    urls:
+      - tgram://REPLACE_BOT_TOKEN/REPLACE_CHAT_ID
+
+  # Anything addressed to omv@mailrise.xyz — OMV's own notifications, smartd's
+  # -m mail, and ZED's ZED_EMAIL_ADDR. These are the LLM-free hardware paths
+  # from ARCHITECTURE 2.5/2.8: they must work even when the supervisor is down.
+  omv:
+    urls:
+      - tgram://REPLACE_BOT_TOKEN/REPLACE_CHAT_ID
+
+# mailrise enforces SMTP AUTH unconditionally. Use the same pair you put in
+# .env as MAILRISE_SMTP_USER / MAILRISE_SMTP_PASS — OMV, smartd and ZED will
+# authenticate with it, and the supervisor's SMTP fallback path must not fail at
+# the moment it is needed.
+smtp:
+  auth:
+    basic:
+      REPLACE_SMTP_USER: REPLACE_SMTP_PASS

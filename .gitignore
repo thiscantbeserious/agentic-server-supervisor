@@ -1,1 +1,4 @@
 .env
+deploy/.env
+deploy/mailrise/mailrise.conf
+deploy/apprise/sentinel.cfg.filled
