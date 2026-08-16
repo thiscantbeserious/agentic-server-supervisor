@@ -38,8 +38,18 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 	}
 
 	// Set permissions before rename (temp files created at 0600)
-	os.Chmod(tmpPath, mode)
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
 
-	// Atomic rename
-	return os.Rename(tmpPath, fullPath)
+	// Atomic rename — on failure the temp file must not be left behind: a
+	// stray .tmp-* in history/ evicts a real report from analyze's window
+	// (S.9 case 2), and one anywhere else is a write outside the C4
+	// whitelist that outlives this call.
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

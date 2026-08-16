@@ -129,6 +129,24 @@ func TestStateCLIStateDirUnwritableExits69(t *testing.T) {
 
 // `sentinel health`: exit 0 with a fresh heartbeat, exit 1 with a stale one
 // (S.6 pins the "stale or missing" case to exit 1, C2).
+// A completely fresh $STATE_DIR — `sentinel health` as the very first
+// command ever run against it, before any `state process` — must exit
+// non-zero. This is the case an in-process test structurally cannot
+// observe if `health` internally calls state.New first: it has to run the
+// real binary against a genuinely empty volume, matching main's container
+// reproduction of the "never-ticked reports HEALTHY" defect.
+func TestHealthCLI_NeverTickedExits1(t *testing.T) {
+	bin := buildSentinel(t)
+	stateDir := t.TempDir()
+	_, stderr, code := runBin(t, bin, baseEnv(t, stateDir), "health")
+	if code != 1 {
+		t.Fatalf("health on a fresh $STATE_DIR (no process ever run): exit %d, want 1, stderr=%s", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "heartbeat")); err == nil {
+		t.Error("health must not create a heartbeat file on a fresh volume")
+	}
+}
+
 func TestHealthCLI(t *testing.T) {
 	bin := buildSentinel(t)
 	stateDir := t.TempDir()

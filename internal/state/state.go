@@ -57,13 +57,12 @@ func New(cfg *config.Config) (*Store, error) {
 		}
 	}
 
-	// Seed the heartbeat file so its mtime exists from the first Process
-	// call; empty content is "absent" for the S.3(f) due-check.
-	hbPath := filepath.Join(cfg.StateDir, "heartbeat")
-	if _, err := os.Stat(hbPath); err != nil {
-		writeAtomic(cfg.StateDir, "heartbeat", []byte("\n"), 0o644)
-	}
-
+	// New deliberately does NOT seed the heartbeat file. A supervisor that
+	// has never run must read as unhealthy — seeding it here (even with
+	// "empty" content) gives it a fresh mtime the moment `sentinel health`
+	// happens to call New(), which makes health report HEALTHY on a
+	// container that never ticked. Only Process ever creates or rewrites
+	// heartbeat; Health() is naturally "missing file -> error" until then.
 	return &Store{cfg: cfg}, nil
 }
 
@@ -111,6 +110,14 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	if rep.Resolved == nil {
 		rep.Resolved = []string{}
 	}
+
+	// S.3(b): history stores the INPUT document (status/headline/body/
+	// resolved), not whatever step (g) below mutates rep into — snapshot
+	// it now, before any of c/d/e/f/g touch rep. Findings are annotated
+	// separately below (into `annotated`, in original order); Status/
+	// Headline/Body/Resolved must survive byte-for-byte.
+	origStatus, origHeadline, origBody := rep.Status, rep.Headline, rep.Body
+	origResolved := rep.Resolved
 
 	tickSeq := resolveTickSeq(s.cfg, &rep)
 	decision := &Decision{TickSeq: tickSeq}
@@ -186,7 +193,9 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		} else {
 			suppressedCount++
 		}
-		s.saveAlert(alert)
+		if err := s.saveAlert(alert); err != nil {
+			return nil, fmt.Errorf("state: save active alert: %w", err)
+		}
 
 		f.Key = alert.Key
 		f.FirstSeen = alert.FirstSeen
@@ -213,15 +222,20 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			if strings.TrimSpace(strings.ToLower(alert.Headline)) != res {
 				continue
 			}
-			found := false
-			for _, existing := range allClear {
-				if existing == alert.Headline {
-					found = true
-					break
+			// S.3(e): "A key that was never notified is deleted without an
+			// all-clear." — always delete on a match, but only surface it
+			// as an all-clear when the operator was actually told about it.
+			if alert.NotifyCount > 0 {
+				found := false
+				for _, existing := range allClear {
+					if existing == alert.Headline {
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				allClear = append(allClear, alert.Headline)
+				if !found {
+					allClear = append(allClear, alert.Headline)
+				}
 			}
 			os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
 		}
@@ -229,7 +243,11 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 
 	// f) heartbeat due-check.
 	hbPath := filepath.Join(s.cfg.StateDir, "heartbeat")
-	hbTime := time.Unix(now, 0).In(s.cfg.Loc)
+	loc := s.cfg.Loc
+	if loc == nil {
+		loc = time.UTC // defensive: config.Load always resolves this, but Process must not panic if a caller skips it
+	}
+	hbTime := time.Unix(now, 0).In(loc)
 	hbStr := hbTime.Format("2006-01-02")
 	hbData, _ := os.ReadFile(hbPath)
 	hbCurrent := strings.TrimSpace(string(hbData))
@@ -295,7 +313,9 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	if decision.Notify {
 		hbContent = hbStr
 	}
-	writeAtomic(s.cfg.StateDir, "heartbeat", []byte(hbContent+"\n"), 0o644)
+	if err := writeAtomic(s.cfg.StateDir, "heartbeat", []byte(hbContent+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("state: write heartbeat: %w", err)
+	}
 
 	decision.Report = rep
 	decision.SuppressedCount = suppressedCount
@@ -304,9 +324,13 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	decision.ActiveCount = len(alertFiles)
 
 	// b) history write — after (d), because it needs the post-update
-	// annotations; every finding (notified AND suppressed), original
-	// input order, never verbatim and never decision.report (S.3b).
-	s.writeAnnotatedHistory(now, tickSeq, &rep, annotated)
+	// annotations; every finding (notified AND suppressed), ORIGINAL INPUT
+	// status/headline/body/resolved and finding order, never verbatim
+	// (findings are annotated) and never decision.report — decision.report
+	// is what step (g) mutated rep into, not the input (S.3b).
+	if err := s.writeAnnotatedHistory(now, tickSeq, origStatus, origHeadline, origBody, origResolved, rep.Meta, annotated); err != nil {
+		return nil, fmt.Errorf("state: write history: %w", err)
+	}
 
 	// S-D6: the outgoing document must validate against report.schema.json.
 	outBytes, err := json.Marshal(decision.Report)
@@ -356,14 +380,14 @@ func heartbeatBody(stateDir string, now int64) string {
 	return fmt.Sprintf("No open findings. %d ticks since %s.", k, since.Format(time.RFC3339))
 }
 
-func (s *Store) writeAnnotatedHistory(now, tickSeq int64, rep *report.Report, annotated []report.Finding) {
+func (s *Store) writeAnnotatedHistory(now, tickSeq int64, status, headline, body string, resolved []string, meta *report.Meta, annotated []report.Finding) error {
 	histRep := report.Report{
-		Status:   rep.Status,
-		Headline: rep.Headline,
-		Body:     rep.Body,
+		Status:   status,
+		Headline: headline,
+		Body:     body,
 		Findings: annotated,
-		Resolved: rep.Resolved,
-		Meta:     rep.Meta,
+		Resolved: resolved,
+		Meta:     meta,
 	}
 	if histRep.Findings == nil {
 		histRep.Findings = []report.Finding{}
@@ -373,10 +397,16 @@ func (s *Store) writeAnnotatedHistory(now, tickSeq int64, rep *report.Report, an
 	}
 
 	name := fmt.Sprintf("%010d-%06d.json", now, tickSeq)
-	data, _ := json.Marshal(histRep)
-	writeAtomic(s.cfg.StateDir, filepath.Join("history", name), data, 0o644)
+	data, err := json.Marshal(histRep)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := writeAtomic(s.cfg.StateDir, filepath.Join("history", name), data, 0o644); err != nil {
+		return err
+	}
 
 	s.rotateHistory()
+	return nil
 }
 
 func (s *Store) rotateHistory() {
@@ -414,12 +444,17 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Name() > files[j].Name() }) // newest first
 
-	if n > len(files) {
-		n = len(files)
-	}
+	// Unparsable files are skipped and DON'T count toward n (S.7): stop
+	// only once n valid entries are collected or the directory is
+	// exhausted, not after scanning the first n directory positions —
+	// otherwise a single corrupt file among the newest N silently shrinks
+	// the trend window analyze reads.
 	result := make([]json.RawMessage, 0, n)
-	for i := 0; i < n; i++ {
-		data, err := os.ReadFile(filepath.Join(histDir, files[i].Name()))
+	for _, f := range files {
+		if len(result) >= n {
+			break
+		}
+		data, err := os.ReadFile(filepath.Join(histDir, f.Name()))
 		if err == nil && json.Valid(data) {
 			result = append(result, json.RawMessage(data))
 		}

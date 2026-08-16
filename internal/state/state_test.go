@@ -161,6 +161,65 @@ func TestS1_HistoryAnnotatesBothNotifiedAndSuppressed(t *testing.T) {
 	}
 }
 
+// S.3(b): "the input document ... all other bytes ... unchanged." History
+// must store status/headline/body/resolved as INPUT, never as whatever
+// step (g) mutates rep into for the outgoing decision.report (main's
+// container repro: a suppressed tick's history showed status:"OK" next to
+// severity:"alert" findings — exactly the corruption analyze's trend
+// window must never see).
+func TestS1b_HistoryStoresInputNotMutatedOutput(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	inputHeadline := "Disk errors rising"
+	inputBody := "Input body, must survive into history untouched"
+	f := finding("alert", "same evidence both ticks")
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: inputHeadline, Body: inputBody, Findings: []report.Finding{f}})
+
+	d1 := mustProcess(t, s, b)
+	if !d1.Notify {
+		t.Fatal("tick 1: expected a new-finding notification")
+	}
+
+	// Tick 2, small delta: same finding, inside the renotify window ->
+	// decision.report becomes rule 4 (status="OK", findings=[]) even
+	// though the INPUT was still an ALERT with one finding.
+	cfg.Now = time.Unix(1010, 0)
+	d2 := mustProcess(t, s, b)
+	if d2.Notify || d2.Report.Status != "OK" {
+		t.Fatalf("tick 2 setup: notify=%v status=%s, want the tick suppressed with an OK outgoing report (rule 4)", d2.Notify, d2.Report.Status)
+	}
+
+	entries := readHistoryFiles(t, cfg.StateDir)
+	var newest os.DirEntry
+	for _, e := range entries {
+		if newest == nil || e.Name() > newest.Name() {
+			newest = e
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.StateDir, "history", newest.Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var histRep report.Report
+	if err := json.Unmarshal(data, &histRep); err != nil {
+		t.Fatal(err)
+	}
+
+	if histRep.Status != "ALERT" {
+		t.Errorf("tick 2 history status = %q, want ALERT (the input's status, not the suppressed OUTGOING OK)", histRep.Status)
+	}
+	if histRep.Headline != inputHeadline {
+		t.Errorf("tick 2 history headline = %q, want %q (the input's headline)", histRep.Headline, inputHeadline)
+	}
+	if histRep.Body != inputBody {
+		t.Errorf("tick 2 history body = %q, want %q (the input's body)", histRep.Body, inputBody)
+	}
+	if len(histRep.Findings) != 1 || histRep.Findings[0].Severity != "alert" {
+		t.Fatalf("tick 2 history findings = %+v, want the one alert finding annotated, not dropped", histRep.Findings)
+	}
+}
+
 // --- S2: no stray files in history/ ---
 
 func TestS2_NoStrayFilesInHistoryDir(t *testing.T) {
@@ -181,6 +240,21 @@ func TestS2_NoStrayFilesInHistoryDir(t *testing.T) {
 }
 
 // --- S3: Health() ---
+
+// A supervisor that has never ticked must read as UNHEALTHY, not healthy
+// (main's gate finding, container-reproduced): New() must not seed the
+// heartbeat file just because `sentinel health` happens to construct a
+// Store — the absence of a signal is not good news.
+func TestS3_Health_NeverProcessedIsUnhealthy(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg) // no Process call — a fresh $STATE_DIR, exactly what New() alone produces
+	if err := s.Health(); err == nil {
+		t.Error("Health() on a Store that has never Process'd = nil, want non-nil — this must read as down, not up")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "heartbeat")); err == nil {
+		t.Error("New() must not create a heartbeat file — only Process may")
+	}
+}
 
 func TestS3_Health(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -440,6 +514,43 @@ func TestProcess_ResolvedUnknownHeadline(t *testing.T) {
 	}
 }
 
+// S.3(e): "A key that was never notified is deleted without an all-clear."
+// The normal Process path always notifies on creation (new_finding), so a
+// NotifyCount==0 record can only arise from something outside that path —
+// still a real state the file format allows, and the contract is explicit
+// about it, so seed one directly (same technique as the corrupt-file
+// tests) and prove resolving it stays silent while still cleaning up.
+func TestProcess_NeverNotifiedAlertResolvesWithoutAllClear(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
+	if err := os.MkdirAll(alertDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unnotified := ActiveAlert{
+		Key: dedup.Key("kernel", "never-notified evidence"), Component: "kernel",
+		Headline: "Never told the operator", Severity: "watch",
+		FirstSeen: 900, LastSeen: 900, NotifyCount: 0, Occurrences: 1,
+	}
+	raw, err := json.Marshal(unnotified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alertDir, unnotified.Key+".json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b", Resolved: []string{"Never told the operator"}})
+	d := mustProcess(t, s, b)
+	if d.Notify || len(d.Report.Resolved) != 0 {
+		t.Errorf("resolving a never-notified alert: notify=%v resolved=%v, want false [] (no all-clear for something never surfaced)", d.Notify, d.Report.Resolved)
+	}
+	if _, err := os.Stat(filepath.Join(alertDir, unnotified.Key+".json")); err == nil {
+		t.Error("the never-notified alert's key file must still be deleted on a matching resolved[] entry")
+	}
+}
+
 // --- case 7 ---
 
 func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
@@ -585,6 +696,22 @@ func TestOutbox(t *testing.T) {
 		t.Errorf("payload did not round-trip byte-identically: got %s, want %s", items[0].Payload, payload)
 	}
 
+	// C4: files under outbox/ are 0o600, including after OutboxTake rewrites
+	// the persisted attempts count (not just on the initial OutboxAdd write).
+	outboxEntries, err := os.ReadDir(filepath.Join(cfg.StateDir, "outbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range outboxEntries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("outbox/%s mode = %o, want 0600 (C4)", e.Name(), perm)
+		}
+	}
+
 	// Two more takes -> attempts 2, then 3 -> fallback_smtp flips at OutboxSMTPAfter=3.
 	if _, err := s.OutboxTake(); err != nil {
 		t.Fatal(err)
@@ -639,6 +766,28 @@ func TestOutbox(t *testing.T) {
 	}
 	if _, err := s.OutboxAdd([]byte(`not json`)); err != ErrBadInput {
 		t.Errorf("OutboxAdd(non-JSON) = %v, want ErrBadInput", err)
+	}
+}
+
+// S.4/C5: an empty outbox marshals to "[]" on stdout, never "null" — a bare
+// `var items []OutboxItem` marshals to null when it never gets appended to.
+func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	items, err := s.OutboxTake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items == nil {
+		t.Fatal("OutboxTake() on an empty outbox = nil, want a non-nil empty slice")
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "[]" {
+		t.Errorf("json.Marshal(empty OutboxTake()) = %q, want \"[]\"", b)
 	}
 }
 
@@ -795,6 +944,40 @@ func TestStaleExpiry(t *testing.T) {
 }
 
 // --- case 15: error paths ---
+
+// A full or read-only $STATE_DIR must surface as an error (mapped to exit
+// 5 by the CLI, S.6), not a silently-discarded writeAtomic failure that
+// reports success while nothing was actually persisted.
+func TestProcess_PropagatesWriteFailures(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
+	if err := os.Chmod(alertDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(alertDir, 0o700) }) // let t.TempDir() clean up
+
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "b", Findings: []report.Finding{finding("alert", "e")}})
+	if _, err := s.Process(b); err == nil {
+		t.Error("Process() with an unwritable active-alerts/ = nil error, want non-nil (saveAlert's writeAtomic failure must not be discarded)")
+	}
+}
+
+func TestOutboxAdd_PropagatesWriteFailures(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.Chmod(outboxDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(outboxDir, 0o700) })
+
+	if _, err := s.OutboxAdd([]byte(`{"a":1}`)); err == nil {
+		t.Error("OutboxAdd() with an unwritable outbox/ = nil error, want non-nil")
+	}
+}
 
 func TestErrorPaths(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -964,6 +1147,43 @@ func TestHistory(t *testing.T) {
 	}
 	if hist2 == nil || len(hist2) != 0 {
 		t.Errorf("empty history: got %v, want []", hist2)
+	}
+}
+
+// S.7: "corrupt history/*.json -> skipped by History, still counted for
+// rotation." A corrupt file among the newest n requested must not shrink
+// the result below n while an (n+1)-th valid, older file exists — History
+// must keep scanning past the corrupt one for a replacement, not just
+// read the first n directory positions and stop. 8 total files, corrupt
+// the single newest, request 5: a version that stops after n POSITIONS
+// returns 4; the fix must return 5 by reaching the 6th-newest file.
+func TestHistory_SkipsCorruptButStillFillsN(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	for i := 0; i < 8; i++ {
+		cfg.Now = time.Unix(int64(1000+i*100), 0)
+		mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body"}))
+	}
+	entries, err := os.ReadDir(filepath.Join(cfg.StateDir, "history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() }) // newest first
+	if len(entries) != 8 {
+		t.Fatalf("test setup: %d history files, want 8", len(entries))
+	}
+	newest := entries[0].Name()
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "history", newest), []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hist, err := s.History(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 5 {
+		t.Fatalf("History(5) with the newest of 8 files corrupt: %d entries, want 5 (must dig past the corrupt one into the 6th-newest)", len(hist))
 	}
 }
 

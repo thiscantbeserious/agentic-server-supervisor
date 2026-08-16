@@ -44,8 +44,13 @@ func (s *Store) OutboxAdd(payload []byte) (string, error) {
 		Created:  now,
 	}
 
-	data, _ := json.Marshal(entry)
-	writeAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0600)
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return "", fmt.Errorf("state: marshal outbox entry: %w", err)
+	}
+	if err := writeAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0o600); err != nil {
+		return "", fmt.Errorf("state: write outbox entry: %w", err)
+	}
 
 	// Enforce OUTBOX_MAX
 	s.trimOutbox()
@@ -57,7 +62,7 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 	outboxDir := filepath.Join(s.cfg.StateDir, "outbox")
 	files, _ := os.ReadDir(outboxDir)
 
-	var items []OutboxItem
+	items := []OutboxItem{} // S.4/C5: [] on stdout, never null
 
 	// Sort by name (oldest first)
 	sort.Slice(files, func(i, j int) bool {
@@ -79,9 +84,14 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 		// Increment attempts
 		entry.Attempts++
 
-		// Persist the incremented attempts
-		data, _ = json.Marshal(entry)
-		writeAtomic(s.cfg.StateDir, filepath.Join("outbox", f.Name()), data, 0644)
+		// Persist the incremented attempts (C4: 0o600 under outbox/).
+		data, err = json.Marshal(entry)
+		if err != nil {
+			return nil, fmt.Errorf("state: marshal outbox entry: %w", err)
+		}
+		if err := writeAtomic(s.cfg.StateDir, filepath.Join("outbox", f.Name()), data, 0o600); err != nil {
+			return nil, fmt.Errorf("state: persist outbox attempts: %w", err)
+		}
 
 		fallback := entry.Attempts >= s.cfg.OutboxSMTPAfter
 
