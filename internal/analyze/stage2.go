@@ -107,7 +107,13 @@ var (
 	uriSchemeRe   = regexp.MustCompile(`://`)
 	bareDomainRe  = regexp.MustCompile(`(?i)\b[a-z0-9-]+\.([a-z]{2,})\b`)
 	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs|sh|bash|zsh|python|python3|perl|ruby|eval)\b|\brm\s+-rf\b`)
-	redirectRe    = regexp.MustCompile(`(?i)>>?\s*[/~$]|>>?\s*[a-z0-9_.-]+\.(sh|conf|cfg|service|log|json|txt|py|pl|rb)\b`)
+	// t4-review round 7 (their own error, self-corrected): a quoted
+	// redirect target ("> \"/etc/cron.d/x\"" or "> '/etc/cron.d/x'")
+	// slipped past the original pattern because it jumped straight to
+	// [/~$] with no allowance for a quote in between. One optional quote
+	// character fixes it without affecting the "> 1"/"> 0" comparison
+	// cases, which still require a path character right after.
+	redirectRe = regexp.MustCompile(`(?i)>>?\s*["']?[/~$]|>>?\s*[a-z0-9_.-]+\.(sh|conf|cfg|service|log|json|txt|py|pl|rb)\b`)
 	// The operational-suffix set, verbatim from contracts/analyze.md §6
 	// step 11b: a systemd unit is not a domain, and every unit on bam is
 	// "<name>.service". "sh" is deliberately NOT in this set (see above).

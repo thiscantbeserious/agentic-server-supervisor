@@ -2210,6 +2210,12 @@ func TestGuardRecommendations_BroadenedPatterns(t *testing.T) {
 		{"bare python token, no domain", "Open a python REPL and inspect the queue depth."},
 		{"bare eval token, no domain", "Have the operator eval the expression by hand."},
 		{"redirection to a script file, no slash", "foo > payload.sh"},
+		// t4-review round 7 (their own error, self-corrected): the first
+		// redirectRe jumped straight from ">" to [/~$] with no allowance
+		// for a quote in between, so a quoted redirect target slipped
+		// through untouched.
+		{"redirection with double-quoted path", `redirect it with > "/etc/cron.d/x"`},
+		{"redirection with single-quoted path", `redirect it with > '/etc/cron.d/x'`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
