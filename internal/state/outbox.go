@@ -238,7 +238,7 @@ func (s *Store) trimOutbox() error {
 		trimmed := strings.TrimSuffix(f.Name(), ".json")
 		if !strings.HasSuffix(f.Name(), ".json") || !outboxIDRe.MatchString(trimmed) {
 			if err := os.Remove(filepath.Join(outboxDir, f.Name())); err != nil {
-				logger.Warn("failed to reclaim corrupt outbox filename", "file", f.Name(), "err", err.Error())
+				logger.Error("failed to reclaim corrupt outbox filename", "file", f.Name(), "err", err.Error())
 			}
 			continue
 		}
