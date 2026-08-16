@@ -76,11 +76,23 @@ func (s *Store) tickSeq() int64 {
 func (s *Store) Process(raw []byte) (*Decision, error) {
 	now := s.now()
 
-	// Parse and validate input
-	rep, err := report.Validate(raw)
-	if err != nil {
+	// Parse input: S.2 requires JSON with findings/resolved, unknown fields ignored
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, ErrBadInput
 	}
+
+	// Check required fields per S.2
+	if _, ok := probe["findings"]; !ok {
+		return nil, ErrBadInput
+	}
+	if _, ok := probe["resolved"]; !ok {
+		return nil, ErrBadInput
+	}
+
+	// Unmarshal into Report type (unknown fields ignored by json.Unmarshal)
+	rep := &report.Report{}
+	json.Unmarshal(raw, rep)
 
 	decision := &Decision{
 		TickSeq: s.tickSeq(),
@@ -374,6 +386,13 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 
 	// b) History write - AFTER step (d), with annotations
 	s.writeAnnotatedHistory(now, histTickSeq, rep, suppressedFinding)
+
+	// Validate output report against schema (S-D6)
+	outBytes, _ := json.Marshal(decision.Report)
+	if _, err := report.Validate(outBytes); err != nil {
+		// Output validation failure is a state bug, not input error
+		return nil, fmt.Errorf("state: output validation failed (bug): %w", err)
+	}
 
 	return decision, nil
 }
