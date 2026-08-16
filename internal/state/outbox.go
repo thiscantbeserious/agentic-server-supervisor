@@ -38,7 +38,7 @@ func (s *Store) OutboxAdd(payload []byte) (string, error) {
 	}
 
 	data, _ := json.Marshal(entry)
-	writeAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0644)
+	writeAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0600)
 
 	// Enforce OUTBOX_MAX
 	s.trimOutbox()
