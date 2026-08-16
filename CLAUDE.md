@@ -4,6 +4,7 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 
 ## Ground Rules
 - **No TODO starts without the user's explicit go.** Feedback is not a go.
+- **Every PR runs the CodeRabbit loop before the user reads it**: comment `@coderabbitai full review`, wait, triage the findings, fix what is real, push, then `@coderabbitai review` again — until it reports nothing actionable. Findings that contradict `CONTRACTS.md` are answered in the thread, not implemented; if the contract turns out to be wrong, that is my amendment to make.
 - **No TODO reaches `main` without the user's explicit approval on its PR.** The reviewer's APPROVE, green gates, and my own verification are all *inputs* to that decision, never a substitute for it. I open the PR and stop; the user reviews and merges. A merged PR is not a go for the next TODO either.
 - **Live validation before proposing a merge** (from T3 on): the code runs in a real Linux container under the production security flags, and its assumptions are checked read-only against `bam`. Fixtures only prove that the code agrees with whoever wrote the fixtures. Anything that cannot be validated without deploying is named as uncovered in the PR, never implied to be covered.
 - **Read-only towards the target server `bam`** (doh@192.168.1.151, key `~/.ssh/sentinel_ed25519`): strictly read commands only; every action there is announced first. Installs/deploys only in T8 after approval.
