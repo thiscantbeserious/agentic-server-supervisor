@@ -82,13 +82,32 @@ func validateStage2(raw []byte) (*stage2Response, error) {
 // "sh evil.sh" sailed through the domain check untouched. Removed.
 // Blocking fetch verbs while allowing an interpreter name to run the
 // fetched file closes only half the path, so the token list also gained
-// the interpreters (sh, bash, zsh, python, python3, perl, ruby, node,
-// eval) and output redirection (>, >>) — a fetch-then-write-then-run chain
-// no longer has a gap at either end.
+// the interpreters (sh, bash, zsh, python, python3, perl, ruby, eval) and
+// path-targeted output redirection — a fetch-then-write-then-run chain no
+// longer has a gap at either end. "node" is deliberately excluded from the
+// interpreter list (round 7): it is ordinary storage vocabulary ("the
+// failing node in the mirror"), not present on the target host, and
+// carries the weakest attack value of the set with the highest
+// false-positive risk.
+//
+// Round 7 (t4-review, main's ruling): a naked ">" is the comparison
+// operator in exactly this domain — "if cksum_errors > 1" and "the
+// reallocated sector count is > 0" are the conditional-threshold SHAPE
+// A9 recommendations are asked to take (§7.3's own sentinel.md example),
+// and a bare-substring "> " match blanked both. redirectRe now requires a
+// path-shaped target: ">"/">>" followed by optional space and either a
+// "/"-bearing token or a bare filename with a known extension. This guard
+// has produced a false-positive class in three consecutive rounds
+// (narrative bodies, then token substrings, then comparison operators),
+// always from matching a deny-pattern against natural language without
+// anchoring it to the shape of an actual command — every revision from
+// here on is tested against both the attack table and an operational-
+// prose table (see the test file), never the attack table alone.
 var (
 	uriSchemeRe   = regexp.MustCompile(`://`)
 	bareDomainRe  = regexp.MustCompile(`(?i)\b[a-z0-9-]+\.([a-z]{2,})\b`)
-	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs|sh|bash|zsh|python|python3|perl|ruby|node|eval)\b|\brm\s+-rf\b`)
+	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs|sh|bash|zsh|python|python3|perl|ruby|eval)\b|\brm\s+-rf\b`)
+	redirectRe    = regexp.MustCompile(`(?i)>>?\s*[/~$]|>>?\s*[a-z0-9_.-]+\.(sh|conf|cfg|service|log|json|txt|py|pl|rb)\b`)
 	// The operational-suffix set, verbatim from contracts/analyze.md §6
 	// step 11b: a systemd unit is not a domain, and every unit on bam is
 	// "<name>.service". "sh" is deliberately NOT in this set (see above).
@@ -100,11 +119,10 @@ var (
 )
 
 func containsDangerousContent(s string) bool {
-	if uriSchemeRe.MatchString(s) || dangerTokenRe.MatchString(s) {
+	if uriSchemeRe.MatchString(s) || dangerTokenRe.MatchString(s) || redirectRe.MatchString(s) {
 		return true
 	}
-	if strings.ContainsRune(s, '|') || strings.Contains(s, "`") || strings.Contains(s, "$(") ||
-		strings.Contains(s, ">") {
+	if strings.ContainsRune(s, '|') || strings.Contains(s, "`") || strings.Contains(s, "$(") {
 		return true
 	}
 	for _, m := range bareDomainRe.FindAllStringSubmatch(s, -1) {

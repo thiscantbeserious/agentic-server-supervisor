@@ -103,12 +103,15 @@ var (
 	errAgyEmptySystemic = errors.New("agy: envelope reports failure or zero input tokens")
 )
 
-// Run performs §6. It always returns a non-nil, valid report; a non-nil
-// error means the returned document is the fallback — EXCEPT when ctx was
-// cancelled (SIGTERM during `tick --loop`), where Run returns (nil, err)
-// with errors.Is(err, context.Canceled): cancellation is not an analyzer
-// failure, so no fallback is fabricated and no report is authored (§6
-// step 4). It never panics and never writes outside the paths in §8.
+// Run performs §6. It returns a non-nil, valid report in every case EXCEPT
+// a cancelled context (§1, §6 step 4): on errors.Is(err, context.Canceled)
+// it returns (nil, err) and authors nothing, because a shutdown is not an
+// analyzer failure and must not fabricate an ALERT. This is now a
+// contract-level guarantee (§1), not just a code comment — callers
+// (`tick`) MUST nil-check before marshaling; the SIGTERM path this
+// exception exists to clean up is exactly where a nil-panic would land.
+// Every other non-nil error means the returned document is the fallback.
+// Run never panics and never writes outside the paths in §8.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cfg := o.Cfg
 	logger := newLogger()

