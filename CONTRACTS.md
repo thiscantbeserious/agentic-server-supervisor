@@ -80,11 +80,15 @@ Ranges, binding for every numeric variable (a value outside its range is exit 78
 | `RAW_ALERT_MAX_PRIORITY` | 0–7 (a syslog priority, C5) |
 | `RAW_ALERT_MAX_LINES` | 1–20 |
 | `HEARTBEAT_HOUR` | 0–23 (hour of day) |
+| `RAW_ALERT_MARKER_TTL_HOURS` | 1–8760 (hours; 8760 = one year) |
 | every other numeric variable | `> 0`; durations `> 0s` |
+| every value converted to a `time.Duration` | additionally `<= 24h` after conversion |
 
 A variable's own row always wins over the catch-all row. `RAW_ALERT_MAX_PRIORITY=0` and `HEARTBEAT_HOUR=0` are therefore **legal** — priority 0 is `emerg`, the most important value in the raw-alert path, and hour 0 is midnight. Only variables falling under the catch-all row reject zero: a zero timeout, budget, history depth or outbox cap has no defined behaviour anywhere in this document. No numeric variable accepts a negative value.
 
 These range rules apply to numeric variables only. `DEEP_ENABLED` is the `0`|`1` boolean and is validated as such — `DEEP_ENABLED=0` means disabled, not out of range.
+
+The `<= 24h` post-conversion bound exists because a second-valued variable is multiplied by `time.Second`: without an upper bound, a large value overflows `int64` nanoseconds and becomes a **negative** duration, which would make a timeout fire instantly instead of erroring. `STALE_ALERT_SEC` defaults to exactly `86400` (24h), so 24h is the ceiling, not a value below it. `RAW_ALERT_MARKER_TTL_HOURS` is a marker lifetime rather than a timeout and keeps its own row.
 
 | Name | Default | Owner |
 |---|---|---|
