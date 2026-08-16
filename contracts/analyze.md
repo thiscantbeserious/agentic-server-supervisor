@@ -39,7 +39,9 @@ analyze.Run(ctx, analyze.Options{Cfg, Facts, Seq}, analyze.Deps) (*report.Report
 
 #### 2.1 Configuration
 
-From `*config.Config` (C3), never from `os.Getenv` inside this package: `STATE_DIR`, `AGY_BIN`, `AGY_PRINT_TIMEOUT`, `AGY_HARD_TIMEOUT` (raised to print+30s when lower, with an `slog` note), `HISTORY_N`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, `TMPDIR`, `SENTINEL_HOSTNAME`, `LOG_LEVEL`, `TZ`.
+From `*config.Config` (C3), never from `os.Getenv` inside this package: `STATE_DIR`, `AGY_BIN`, `AGY_PRINT_TIMEOUT`, `AGY_HARD_TIMEOUT` (raised to print+30s when lower, with an `slog` note), `HISTORY_N`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, `TMPDIR`, `SENTINEL_HOSTNAME`, `LOG_LEVEL`, `TZ`, **`RAW_ALERT_MAX_PRIORITY`** and **`RAW_ALERT_MAX_LINES`** (both used by the §5 fallback, which renders the raw crit lines when the analyzer is unavailable; C3's owner column reads "runtime, collect" and analyze is a third reader).
+
+`AGY_PRINT_TIMEOUT` is passed to agy as the Go `time.Duration` value. Verified against agy 1.1.13 on 2026-08-16: both `120s` and the `Duration.String()` rendering `2m0s` are accepted, so no raw-string field is needed here (unlike `meta.window`, where the rendered form reaches a human).
 
 #### 2.2 Files read
 
@@ -218,7 +220,14 @@ case f.Kernel == nil:
 case f.Kernel.Err != "":
     lines = append(lines, "kernel section unavailable: "+f.Kernel.Err)
 default:
-    for _, e := range f.Kernel.Data.Entries {
+    // Walk from the NEWEST entry backwards, keeping at most RawAlertMaxLines
+    // protected lines, then restore chronological order for the reader.
+    // Never iterate forwards and break at the limit: entries are ordered
+    // oldest-first, so that would fill the fallback with the oldest crit
+    // lines and drop the incident that is happening right now — the same
+    // inversion that had to be corrected in the journal record cap.
+    for i := len(f.Kernel.Data.Entries) - 1; i >= 0; i-- {
+        e := f.Kernel.Data.Entries[i]
         if e.Priority > cfg.RawAlertMaxPriority {
             continue
         }
@@ -227,6 +236,7 @@ default:
             break
         }
     }
+    slices.Reverse(lines)
 }
 raw := strings.Join(lines, "\n")
 if raw == "" {
@@ -289,7 +299,7 @@ flowchart TD
    - **Deep-dive-capable** iff `component ∈ {zfs, smart, kernel, ras}`.
    - **Candidate order:** first, any file in `${STATE_DIR}/deep-queue/` (oldest mtime first) whose name still matches a NEW deep-dive-capable finding in this report — a deferred finding outranks a fresh one. Otherwise the first NEW deep-dive-capable finding in severity order (`alert` before `watch`), ties broken by report order.
    - **Max one per tick.** Every other NEW deep-dive-capable finding is queued: write `${STATE_DIR}/deep-queue/<key>` containing its component plus `\n` (atomic per C4, dirs 0700, files 0644). The consumed candidate's queue file is removed. Queue files whose key is absent from the current report are removed as stale. Any error here is logged and ignored.
-   - NEW findings with a component outside the set get no `analysis`; append exactly ` (no deep-dive available for this component)` to `explanation`, truncating the explanation first so the result stays ≤ 800 runes.
+   - NEW findings with a component outside the set get no `analysis`; append exactly ` (no deep-dive available for this component)` to `explanation`, truncating the explanation first so the result stays ≤ 800 runes. **This suffix is about the component, not about the feature being switched off:** it is appended whenever stage 2 ran (or would have run) and the component has no deep collector. When `DEEP_ENABLED=0` no suffix is added to anything — the operator disabled deep dives deliberately and does not need every finding annotated with it.
 9. **Deep context.** `deps.CollectDeep(ctx, component)` under `DEEP_TIMEOUT`; the default implementation calls `collect.Run(ctx, collect.Options{Cfg, Seq, DeepComponent: component})` in-process and the result is marshaled for the prompt. Error or empty ⇒ skip stage 2 (§5).
 10. **Second agy call** with the stage-2 prompt (§7.2), same flags and schema. Validated identically; **no retry** at stage 2.
 11. **Merge.** From the stage-2 document take only `analysis` and `recommendation` of the finding whose `key` matches the candidate, into the stage-1 finding. `status`, `headline`, `body`, `meta`, the other findings and `resolved` come from stage 1 — stage 2 may not change severity or status. Key mismatch, missing finding, or both fields empty ⇒ keep stage 1 unchanged. Re-run `report.Validate` after the merge; failure ⇒ keep stage 1.
@@ -551,11 +561,11 @@ Table-driven, hermetic, offline. `RunAgy` is replaced by a table-supplied func r
 | 11 | read-only guarantee | snapshot `STATE_DIR` and the process CWD before/after the whole table | the only created or modified paths under `STATE_DIR` are inside `deep-queue/`; nothing outside `STATE_DIR` and `TMPDIR` changed |
 | 12 | validator negatives | `report.Validate` against: 81-rune headline, `status:"OK"` with an `alert` finding, unknown component, unknown severity, missing `resolved`, 21 findings, empty evidence, 1001-rune evidence, `key` not matching the pattern | each returns a non-nil error naming the offending field |
 | 12b | validator ↔ schema agree | the **same** `acceptCases`/`rejectCases` tables that drive case 12 are run through both `Validate` and `jsonschema/v6` against the embedded schema — one shared source of fixtures, not a parallel `testdata/` copy, so the two can never drift apart | the two verdicts match for every fixture (the only place jsonschema is linked). Where they legitimately differ, the case name is listed in a `schemaDivergesFromValidate` map with a comment; the test fails in **both** directions, so an entry that stops diverging is also an error. Today's only entry class: `status` = highest severity, which JSON Schema cannot express |
-| 12c | every emitted document validates | the reports produced by cases 1–5b, plus the raw-alert and collector fallbacks from `runtime` | all validate against `report.schema.json` (C9 cross-package assertion) |
+| 12c | every emitted document validates | the reports produced by cases 1–5b **(the analyze-owned half, runnable in T4)**. The raw-alert and collector fallbacks come from `internal/runtime`, which does not exist until T6: that half is **deferred to T6** and must be listed in T6's test table, not stubbed here. Deferring is fine; a row that silently cannot run is not — that is how a contract row died unnoticed in T3 | all validate against `report.schema.json` (C9 cross-package assertion) |
 | 13 | stage-2 failure is non-fatal | case 3 with `CollectDeep` returning an error | **no error**; the report is the stage-1 document; no `Analysis`; stderr contains `deep-dive failed` |
 | 14 | debug-mode input errors | empty stdin; non-JSON stdin; a flag; a positional argument | exit **65**, **65**, **64**, **64**; nothing on stdout |
 | 15 | collector_errors surfaced | facts with two distinct `.meta.collector_errors` **objects** | the stage-1 prompt contains both `reason` strings inside the FACTS fence, and the `meta` rule from sentinel.md is present in the prompt |
-| 16 | every emerg/crit line survives the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing | the fallback `Evidence` contains the first `RAW_ALERT_MAX_LINES` rendered lines, is ≤ 900 runes, and `Validate` passes |
+| 16 | the NEWEST emerg/crit lines survive the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing. Run it twice: once with short synthetic messages and once with **realistic ~80-rune kernel lines**, so the rune budget actually binds in one of the two | `Evidence` holds at most `RAW_ALERT_MAX_LINES` lines, is ≤ 900 runes, `Validate` passes, and — the assertion that matters — the **newest** protected line is always present while the dropped ones are the oldest. When the 900-rune budget binds before the line count does, lines are dropped from the **oldest** end and the newest is still there. Asserting only the count would pass while carrying exactly the wrong 20 lines |
 | 17 | no markdown authored (D10) | the reports from cases 1–4 | no `` ` ``, `_`, `*`, `[`, `]` in `headline`, `body`, `explanation`, `analysis`, `recommendation` or `resolved[]` — `notify`'s sanitizer is a no-op on analyzer output |
 
 ---
