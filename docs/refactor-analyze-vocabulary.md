@@ -81,8 +81,12 @@ Three things this asserts that the old tree did not:
   fragments become one `prompt.tmpl` with defines in render order, and the
   schema joins them because it is model-facing bytes.
 - **`buildCorrectionBlock`'s Go string literal moves into `prompt.tmpl`.** After
-  this, no prompt byte originates in Go source. The truncation of the validation
-  error stays in Go — that is logic, not text.
+  this, no *fixed* prompt text — no instruction, boundary paragraph or fence —
+  lives in a Go string literal. Variable payloads are still marshalled from Go
+  (the facts and finding JSON, the history projection's field names, the
+  validator message the correction quotes); the claim is about the skeleton, not
+  about every byte. The truncation of the validation error also stays in Go —
+  that is logic, not text.
 
 ## 3. Documentation rules
 
@@ -141,11 +145,23 @@ dedup key, no metric derives from them. No golden regeneration.
 ## 6. Contract amendments
 
 `contracts/analyze.md` — the `stage 1`/`stage 2` vocabulary throughout, the
-stderr example lines, the §7 template headings, the role document path, and the
-file-layout tree. `CONTRACTS.md` — the embedded-assets path in C1 and the
-package layout line. `contracts/runtime.md` — the role document filename.
-`PLAN.md` — "two-stage analysis" wording. `ARCHITECTURE.md` needs **nothing**;
-it already used the vocabulary being adopted.
+stderr example lines, the §7 template headings, the role document path
+(including the §7.3 heading at :466 and the test-table row at :701), and the
+file-layout tree. `CONTRACTS.md` — the embedded-assets path in C1, the package
+layout line, **and C8 at :228** ("Deep context for stage 2 is `collect.Run`
+with `DeepComponent` set"), which is live jargon in a binding convention.
+`contracts/runtime.md` — the role document filename. `PLAN.md` — "two-stage
+analysis" wording. `internal/report/report_test.go:37` — the `"stage-2 fields"`
+case name. `ARCHITECTURE.md` needs **nothing**; it already used the vocabulary
+being adopted.
+
+**`stage` is overloaded in this repo — three uses must NOT be renamed:**
+`contracts/runtime.md:33,40` (`Stage 1 — builder` / `Stage 2 — runtime`) are
+Docker build stages. `PLAN.md:22,35,47` and `CONTRACTS.md:236,239` say
+"implementation stage" in the TODO sense. And `role.md` contains "the analysis
+stage of a read-only server supervisor" — ordinary English, and its bytes are
+inside all three goldens. A blanket `sed` fails the golden tests loudly, but
+would corrupt the documents silently.
 
 Spotted while reading, unrelated to the rename but worth fixing in the same
 pass: the contract's temp-file cleanup sentence describes a glob that does not

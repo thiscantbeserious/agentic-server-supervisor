@@ -357,13 +357,15 @@ Inline, at the deep-dive log call:
 On the embed block — this carries the `prompt/` directory charter:
 
 ```go
-// The prompt/ directory is the complete answer to "what does the model
-// see": the role document, the prompt skeleton, and the deep-dive response
-// schema. Nothing model-facing lives anywhere else in this package, and no
-// prompt byte originates in Go source — every substitution goes through
-// these files, which keeps the prompt auditable as text. (The one
-// model-facing file outside this directory is report.schema.json, which
-// lives in internal/report because go:embed cannot cross packages.)
+// The prompt/ directory holds every fixed prompt byte: the role document,
+// the prompt skeleton, and the deep-dive response schema. No instruction,
+// boundary paragraph or fence originates in a Go string literal, which is
+// what keeps the prompt auditable as text. The variable payloads are of
+// course marshalled from Go — the facts and finding JSON, the history
+// projection's field names, and the validator's own message quoted in the
+// retry correction. (The one model-facing file outside this directory is
+// report.schema.json, which lives in internal/report because go:embed
+// cannot cross packages.)
 //
 // text/template, not html/template: HTML escaping would corrupt the
 // embedded JSON payloads. Both calls share one header define so the fence
@@ -528,9 +530,10 @@ On the embed block — this carries the `prompt/` directory charter:
 The complete prompt skeleton for both model calls, in render order:
 security-boundary paragraphs, shared header, triage task, deep-dive task,
 retry correction. Every substitution point in every prompt is in this file;
-role.md and deepdive.schema.json beside it are the only other bytes the
-model ever sees from this package. Rendered output is compared byte-for-
-byte against testdata goldens — whitespace inside defines is load-bearing.
+role.md and deepdive.schema.json beside it hold the rest of the fixed text.
+Rendered output is compared byte-for-byte against testdata goldens, and
+whitespace inside a define is load-bearing — text between defines is not,
+since it belongs to the file template and is never rendered.
 */}}
 ```
 
