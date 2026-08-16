@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,6 +284,29 @@ func TestConfigErrorExits78AndNamesVariable(t *testing.T) {
 // C2 maps a recovered panic to exit 1. guard is the seam that makes that path
 // reachable without a panic hook in the production dispatch: main wraps run in
 // it, and this test wraps a deliberately panicking func.
+// TestLogLevelForSubcommandError_HonorsLogLevel is the T5 fix for a T2
+// foundation gap (t5-review2, routed through main): main.go:107 hardcoded
+// slog.LevelInfo for every subcommand-error log regardless of
+// cfg.LogLevel. run() never holds a *config.Config (each subcommand loads
+// its own), so logLevelForSubcommandError re-reads it via a second, cheap
+// config.Load() call — this drives that exact function in-process, the
+// same one logSubcommandError calls, rather than a hand-built level.
+func TestLogLevelForSubcommandError_HonorsLogLevel(t *testing.T) {
+	t.Setenv("STATE_DIR", t.TempDir())
+	t.Setenv("HOST_ROOT", t.TempDir())
+	t.Setenv("HOST_PROC", t.TempDir())
+
+	t.Setenv("LOG_LEVEL", "DEBUG")
+	if got := logLevelForSubcommandError(); got != slog.LevelDebug {
+		t.Errorf("LOG_LEVEL=DEBUG: logLevelForSubcommandError() = %v, want LevelDebug", got)
+	}
+
+	t.Setenv("LOG_LEVEL", "ERROR")
+	if got := logLevelForSubcommandError(); got != slog.LevelError {
+		t.Errorf("LOG_LEVEL=ERROR: logLevelForSubcommandError() = %v, want LevelError", got)
+	}
+}
+
 func TestGuardRecoversPanicAsExitOne(t *testing.T) {
 	var stderr bytes.Buffer
 	code := guard(&stderr, func() int { panic("boom") })

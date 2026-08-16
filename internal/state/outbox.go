@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"os"
@@ -21,12 +22,22 @@ import (
 // that isn't this literal shape before it ever reaches filepath.Join.
 var outboxIDRe = regexp.MustCompile(`^[0-9]+-[0-9]{3}$`)
 
+// stateLogWriter mirrors internal/analyze's logWriter: nil in production
+// (stateLogger defaults to os.Stderr), redirected by tests to capture the
+// C7-format lines this package emits.
+var stateLogWriter io.Writer
+
 // stateLogger is the C7 "component=state" logger, used only for the one
 // WARN case that isn't allowed to surface as a returned error (trimOutbox's
 // best-effort eviction) — every other diagnostic in this package is
-// reported through a returned error instead.
-func stateLogger() *slog.Logger {
-	return slog.New(logging.New(os.Stderr, slog.LevelInfo)).With("component", "state")
+// reported through a returned error instead. A method (not a bare func) so
+// it can honor s.cfg.LogLevel instead of hardcoding one.
+func (s *Store) stateLogger() *slog.Logger {
+	w := stateLogWriter
+	if w == nil {
+		w = os.Stderr
+	}
+	return slog.New(logging.New(w, logging.ParseLevel(s.cfg.LogLevel))).With("component", "state")
 }
 
 // randIntn is a seam over math/rand.Intn so tests can force a deterministic
@@ -220,7 +231,7 @@ func (s *Store) trimOutbox() error {
 	// worse than the eviction that didn't happen. Log at WARN instead: a
 	// failing eviction stays visible (C7) without turning a working add
 	// into an error.
-	logger := stateLogger()
+	logger := s.stateLogger()
 
 	wellFormed := files[:0]
 	for _, f := range files {

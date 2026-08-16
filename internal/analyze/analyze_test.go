@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
@@ -60,6 +62,41 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	logWriter = &buf
 	t.Cleanup(func() { logWriter = old })
 	return &buf
+}
+
+// TestNewLogger_HonorsLogLevel is the T5 fix for a T2 foundation gap
+// (t5-review2, routed through main): analyze.go's Run() used to call
+// newLogger() with no argument, which hardcoded slog.LevelInfo regardless
+// of cfg.LogLevel — LOG_LEVEL=DEBUG produced no extra output and
+// LOG_LEVEL=ERROR suppressed nothing, despite config.Load() validating
+// the variable strictly enough to refuse startup over a typo (exit 78).
+//
+// Drives the real construction path end to end — LOG_LEVEL through
+// config.Load(), then logging.ParseLevel(cfg.LogLevel) into newLogger(),
+// the exact call Run() makes — rather than hand-building a slog.Logger,
+// which would pass even if Run() itself never wired cfg.LogLevel through.
+func TestNewLogger_HonorsLogLevel(t *testing.T) {
+	t.Run("DEBUG level logger emits a debug record", func(t *testing.T) {
+		t.Setenv("LOG_LEVEL", "DEBUG")
+		cfg := newTestConfig(t)
+		buf := captureLog(t)
+		logger := newLogger(logging.ParseLevel(cfg.LogLevel))
+		logger.Debug("debug probe")
+		if !strings.Contains(buf.String(), "debug probe") {
+			t.Errorf("LOG_LEVEL=DEBUG: debug record missing from output: %s", buf.String())
+		}
+	})
+
+	t.Run("ERROR level logger does not emit a debug record", func(t *testing.T) {
+		t.Setenv("LOG_LEVEL", "ERROR")
+		cfg := newTestConfig(t)
+		buf := captureLog(t)
+		logger := newLogger(logging.ParseLevel(cfg.LogLevel))
+		logger.Debug("debug probe")
+		if strings.Contains(buf.String(), "debug probe") {
+			t.Errorf("LOG_LEVEL=ERROR: debug record must be suppressed, got: %s", buf.String())
+		}
+	})
 }
 
 // --- agy stub recorder ---
@@ -635,7 +672,7 @@ func TestManageDeepQueue_LogsOnMkdirFailure(t *testing.T) {
 		Severity: "watch", Component: "zfs", Evidence: newEvidence, Explanation: "e",
 		Key: dedup.Key("zfs", newEvidence),
 	}}
-	manageDeepQueue(cfg.StateDir, findings, "", newLogger())
+	manageDeepQueue(cfg.StateDir, findings, "", newLogger(slog.LevelInfo))
 	if !strings.Contains(buf.String(), "deep-queue bookkeeping skipped") {
 		t.Fatalf("stderr does not contain the deep-queue bookkeeping skipped note: %s", buf.String())
 	}

@@ -62,6 +62,29 @@ func TestHandlerRespectsMinLevel(t *testing.T) {
 	}
 }
 
+// ParseLevel is the mapping every LOG_LEVEL-honoring construction site
+// (internal/state, internal/analyze, cmd/sentinel) routes through instead
+// of hardcoding slog.LevelInfo — this is the one place that mapping can
+// be wrong for all three at once.
+func TestParseLevel(t *testing.T) {
+	cases := []struct {
+		in   string
+		want slog.Level
+	}{
+		{"DEBUG", slog.LevelDebug},
+		{"INFO", slog.LevelInfo},
+		{"WARN", slog.LevelWarn},
+		{"ERROR", slog.LevelError},
+		{"", slog.LevelInfo},      // unset default (config.Load's own default)
+		{"bogus", slog.LevelInfo}, // config.Load already rejects this at exit 78; pure mapping falls back rather than erroring again
+	}
+	for _, tc := range cases {
+		if got := ParseLevel(tc.in); got != tc.want {
+			t.Errorf("ParseLevel(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestHandlerMissingComponentDefaultsToDash(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(New(&buf, slog.LevelInfo))

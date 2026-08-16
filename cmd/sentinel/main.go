@@ -101,10 +101,25 @@ func printUsage() {
        sentinel --version`)
 }
 
+// logLevelForSubcommandError re-reads LOG_LEVEL for logSubcommandError:
+// run() never holds a *config.Config (each subcommand loads its own), so a
+// second, cheap config.Load() call is how this stays honoring the
+// configured level rather than hardcoding one — a bare os.Getenv would
+// bypass internal/config as the single loader (C1). LevelInfo is the
+// fallback for the one case that second call can itself fail: reporting
+// that config.Load() failed, which is exactly what logSubcommandError
+// exists to do, so the fallback still gets that message out.
+func logLevelForSubcommandError() slog.Level {
+	if cfg, err := config.Load(); err == nil {
+		return logging.ParseLevel(cfg.LogLevel)
+	}
+	return slog.LevelInfo
+}
+
 // logSubcommandError logs to stderr via the C7 handler. Config errors are
 // reported with the offending variable name only (C7: never the value).
 func logSubcommandError(sub string, err error) {
-	logger := slog.New(logging.New(os.Stderr, slog.LevelInfo)).With("component", sub)
+	logger := slog.New(logging.New(os.Stderr, logLevelForSubcommandError())).With("component", sub)
 	var cerr *config.Error
 	if errors.As(err, &cerr) {
 		logger.Error("configuration error", "var", cerr.Var)

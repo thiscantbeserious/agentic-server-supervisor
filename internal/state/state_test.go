@@ -876,6 +876,49 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 // to fix once (OutboxTake's false-healthy case). trimOutbox must reclaim
 // non-conforming filenames first, unconditionally, before any real entry
 // is even considered.
+// captureStateLog redirects this package's slog output into a buffer for
+// the duration of the test, mirroring internal/analyze's captureLog.
+func captureStateLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := stateLogWriter
+	stateLogWriter = &buf
+	t.Cleanup(func() { stateLogWriter = old })
+	return &buf
+}
+
+// TestStateLogger_HonorsLogLevel is the T5 fix for a T2 foundation gap
+// (t5-review2, routed through main): outbox.go's stateLogger() used to
+// hardcode slog.LevelInfo regardless of cfg.LogLevel — LOG_LEVEL=DEBUG
+// produced no extra output and LOG_LEVEL=ERROR suppressed nothing.
+// Drives the real construction path: s.stateLogger(), the exact method
+// trimOutbox calls, built from a Store whose cfg.LogLevel came through
+// unmodified — not a hand-built slog.Logger, which would pass even if
+// stateLogger() itself never read s.cfg.LogLevel.
+func TestStateLogger_HonorsLogLevel(t *testing.T) {
+	t.Run("DEBUG level logger emits a debug record", func(t *testing.T) {
+		cfg := testConfig(t, time.Unix(1000, 0))
+		cfg.LogLevel = "DEBUG"
+		s := newStore(t, cfg)
+		buf := captureStateLog(t)
+		s.stateLogger().Debug("debug probe")
+		if !strings.Contains(buf.String(), "debug probe") {
+			t.Errorf("LOG_LEVEL=DEBUG: debug record missing from output: %s", buf.String())
+		}
+	})
+
+	t.Run("ERROR level logger does not emit a debug record", func(t *testing.T) {
+		cfg := testConfig(t, time.Unix(1000, 0))
+		cfg.LogLevel = "ERROR"
+		s := newStore(t, cfg)
+		buf := captureStateLog(t)
+		s.stateLogger().Debug("debug probe")
+		if strings.Contains(buf.String(), "debug probe") {
+			t.Errorf("LOG_LEVEL=ERROR: debug record must be suppressed, got: %s", buf.String())
+		}
+	})
+}
+
 func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	cfg.OutboxMax = 3
