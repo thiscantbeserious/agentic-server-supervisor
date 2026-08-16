@@ -41,7 +41,7 @@ var acceptCases = []struct {
 }{
 	{"minimal OK report", minimalOK()},
 	{
-		name: "WATCH report with stage-2 fields (ARCHITECTURE §2.7 ZFS CKSUM benchmark)",
+		name: "WATCH report with deep-dive fields (ARCHITECTURE §2.7 ZFS CKSUM benchmark)",
 		doc: map[string]any{
 			"status":   "WATCH",
 			"headline": "One checksum error on seagate-zvtazeam-crypt, mirror partner clean",

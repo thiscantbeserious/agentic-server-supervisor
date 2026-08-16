@@ -1,3 +1,8 @@
+// prompt.go: prompt construction. Embeds the prompt/ directory, renders the
+// templates, generates the fence nonce, and keeps every prompt under the
+// size at which agy silently stops answering.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -5,63 +10,69 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"text/template"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// sentinelMDRaw is the embedded role/instructions document (§7.3). go:embed
-// cannot escape its package directory (C1), so it lives here rather than
-// under internal/report or being read from disk.
+// The prompt/ directory holds everything this package says TO the model:
+// the role document, the prompt skeleton, and the deep-dive response
+// schema. No instruction, boundary paragraph or fence originates in a Go
+// string literal, which is what keeps the prompt auditable as text.
 //
-//go:embed sentinel.md
-var sentinelMDRaw string
-
-// sentinelMD trims the file's own trailing newline before it goes into
-// header.tmpl, which supplies the blank-line separator before "=====
-// SECURITY BOUNDARY =====" itself (§7.1: "${SENTINEL_MD}\n\n===== SECURITY
-// BOUNDARY ====="). Without the trim, the file's trailing "\n" plus the
-// template's own blank line double up into two blank lines instead of one
-// (t4-review round 3: byte-diffed against §7.1, one blank line off).
-var sentinelMD = strings.TrimRight(sentinelMDRaw, "\n")
-
-// templatesFS embeds the stage-1/stage-2 prompt skeletons (§7.1, §7.2).
-// text/template, not html/template: the latter HTML-escapes the payload
-// and would corrupt the embedded facts/finding/deep JSON. The two stages
-// share one "header" define (role doc + SECURITY BOUNDARY heading +
-// HISTORY fence) so the fence/heading structure that tests 9/9b assert on
-// exists in exactly one place — a change to it cannot silently diverge
-// between stages the way two hand-copied string-builder blocks could.
+// The payloads are a different matter and some of their bytes are
+// Go-authored: the history projection's field names, the validator message
+// the correction quotes, and text this package itself wrote into an
+// earlier tick's report — a withheld-recommendation note, a fallback
+// placeholder — which returns here as history evidence. Auditing what the
+// model is told means reading this directory; auditing everything it sees
+// means following the payloads too.
 //
-//go:embed templates/*.tmpl
-var templatesFS embed.FS
+// (The one model-facing file outside this directory is report.schema.json,
+// which lives in internal/report because go:embed cannot cross packages.)
+//
+// text/template, not html/template: HTML escaping would corrupt the
+// embedded JSON payloads. Both calls share one header define so the fence
+// and boundary structure exists in exactly one place and cannot silently
+// diverge between the triage and deep-dive prompts.
+//
+//go:embed prompt/role.md
+var roleMDRaw string
 
-var promptTmpl = template.Must(template.ParseFS(templatesFS, "templates/*.tmpl"))
+// roleMD is the embedded role document with its trailing newline trimmed:
+// the template supplies the blank-line separator that follows it, and the
+// file's own newline would double it. The prompt is compared byte-for-byte
+// in tests, so this matters.
+var roleMD = strings.TrimRight(roleMDRaw, "\n")
 
-// promptData is the single struct passed to both stage templates; unused
-// fields for a given stage are simply left zero.
+//go:embed prompt/prompt.tmpl
+var promptFS embed.FS
+
+var promptTmpl = template.Must(template.ParseFS(promptFS, "prompt/prompt.tmpl"))
+
+// promptData feeds both prompt templates; fields unused by one call stay
+// zero. DeepDive selects the deep-dive boundary paragraph, which names all
+// three of that prompt's fenced payloads.
 type promptData struct {
-	SentinelMD  string
-	Stage2      bool // selects boundary_stage2 vs boundary_stage1 in header.tmpl (D8)
-	Nonce       string
-	HistoryN    int
-	History     string
-	FactsJSON   string
-	FindingJSON string
-	DeepJSON    string
-	Component   string
+	RoleMD          string
+	DeepDive        bool
+	Nonce           string
+	HistoryN        int
+	History         string
+	FactsJSON       string
+	FindingJSON     string
+	DeepJSON        string
+	Component       string
+	ValidationError string
 }
 
-// newNonce returns 16 lowercase hex chars from 8 bytes of crypto/rand (§6
-// step 1) — a fresh, unguessable fence token per Run so injected data
-// cannot pre-empt the fence markers.
+// newNonce returns 16 hex chars from crypto/rand — the per-run fence
+// token. The fences are only a boundary if injected log text cannot
+// predict them; a fresh random nonce per run is what makes a forged
+// "end of fence" line inert.
 func newNonce() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
@@ -70,228 +81,50 @@ func newNonce() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// truncRunes truncates s to at most n runes, keeping the prefix. Used for
-// the HISTORY evidence projection (160 runes) and the resolved-evidence
-// rendering (120 runes) — unlike the fallback's newest-preserving
-// truncation (fallback.go's truncLinesKeepNewest), these are plain prefix
-// truncations of a single already-short string.
-func truncRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
-}
-
-// historyFinding and historyProjection are the compact per-report
-// projection injected into HISTORY (§6 step 2): {status, headline,
-// findings:[{severity,component,key,evidence,occurrences,first_seen}],
-// resolved}.
-//
-// evidence/occurrences/first_seen are the load-bearing fix from the design
-// review (Fable + agy, independently): dedup.EvidenceCore deliberately
-// masks digits (C6), so "cksum_errors=1" and "cksum_errors=7" share the
-// same key — the key alone proves recurrence and can NEVER prove growth.
-// sentinel.md's Trend section asks the model to compare counters between
-// HISTORY and FACTS; without the evidence text that comparison is
-// impossible and the model answers from imagination.
-type historyFinding struct {
-	Severity    string `json:"severity"`
-	Component   string `json:"component"`
-	Key         string `json:"key"`
-	Evidence    string `json:"evidence"`
-	Occurrences int    `json:"occurrences,omitempty"`
-	FirstSeen   int64  `json:"first_seen,omitempty"`
-}
-
-type historyProjection struct {
-	Status   string           `json:"status"`
-	Headline string           `json:"headline"`
-	Findings []historyFinding `json:"findings"`
-	Resolved []string         `json:"resolved"`
-}
-
-// loadHistoryReports returns the newest n parsed history documents from
-// ${stateDir}/history/*.json, oldest first. Newest is determined by
-// sort.Strings of the filenames (the <unix-seconds,10>-<tick_seq,6>.json
-// naming written by state sorts chronologically as strings). The "*.json"
-// filter matters: state writes atomically via ".tmp-*" files in the same
-// directory (C4), and letting one into the window evicts a real report.
-// Unreadable or unparseable files are skipped silently (§6 step 2); a
-// missing dir yields nil.
-func loadHistoryReports(stateDir string, n int) []report.Report {
-	dir := filepath.Join(stateDir, "history")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-	if n > 0 && len(names) > n {
-		names = names[len(names)-n:]
-	}
-
-	out := make([]report.Report, 0, len(names))
-	for _, name := range names {
-		b, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		var r report.Report
-		if err := json.Unmarshal(b, &r); err != nil {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-// historyProjectionLines renders each parsed history report as one
-// compact JSON line for the HISTORY prompt section (§6 step 2), oldest
-// first — hist is expected already in that order (loadHistoryReports's).
-func historyProjectionLines(hist []report.Report) []string {
-	lines := make([]string, 0, len(hist))
-	for _, r := range hist {
-		proj := historyProjection{
-			Status: r.Status, Headline: r.Headline,
-			Findings: []historyFinding{}, Resolved: r.Resolved,
-		}
-		for _, f := range r.Findings {
-			proj.Findings = append(proj.Findings, historyFinding{
-				Severity: f.Severity, Component: f.Component, Key: f.Key,
-				Evidence:    truncRunes(f.Evidence, 160),
-				Occurrences: f.Occurrences, FirstSeen: f.FirstSeen,
-			})
-		}
-		if proj.Resolved == nil {
-			proj.Resolved = []string{}
-		}
-		b, err := json.Marshal(proj)
-		if err != nil {
-			continue
-		}
-		lines = append(lines, string(b))
-	}
-	return lines
-}
-
-// newestHistory returns the last (= most recent) report in an
-// oldest-first history slice, or nil if there is none.
-func newestHistory(hist []report.Report) *report.Report {
-	if len(hist) == 0 {
-		return nil
-	}
-	return &hist[len(hist)-1]
-}
-
-// computeResolved is §6 step 7's Go-computed `resolved`: the set
-// difference historyKeys \ currentKeys, using ONLY the newest history
-// document, rendered as the past finding's evidence truncated to 120
-// runes, sorted for determinism, capped at the schema's 20 items. This
-// overwrites whatever the model emitted in its own "resolved" field —
-// set arithmetic over data analyze already holds does not belong in a
-// probabilistic component.
-func computeResolved(newest *report.Report, current []report.Finding) []string {
-	if newest == nil {
-		return []string{}
-	}
-	currentKeys := make(map[string]bool, len(current))
-	for _, f := range current {
-		if f.Key != "" {
-			currentKeys[f.Key] = true
-		}
-	}
-	var out []string
-	for _, f := range newest.Findings {
-		if f.Key == "" || currentKeys[f.Key] {
-			continue
-		}
-		// report.schema.json's resolved[] maxLength is 80, not 120 (main's
-		// own error, corrected live-gate round 6): 120 makes
-		// report.Validate reject the WHOLE report the first time a
-		// resolved finding carries a typical kernel/ZED line. Truncating
-		// to 80 can also produce "" for already-degenerate evidence, and
-		// minLength:1 forbids that — skip empty results rather than emit
-		// an invalid entry.
-		ev := truncRunes(f.Evidence, 80)
-		if ev == "" {
-			continue
-		}
-		out = append(out, ev)
-	}
-	sort.Strings(out)
-	if len(out) > 20 {
-		out = out[:20]
-	}
-	if out == nil {
-		out = []string{}
-	}
-	return out
-}
-
-// buildCorrectionBlock is §6 step 5's CORRECTION suffix, appended verbatim
-// to the stage-1 prompt on retry. validationErr is the concrete error the
-// first attempt produced (json.Unmarshal or report.Validate's own error
-// text), truncated to 300 runes — --print mode is stateless, so without
-// the actual error "your previous answer was not valid" carries no
-// information and the retry is a re-roll rather than a correction. The
-// error text is generated by our own validator and contains no facts
-// content, so C7 is not at risk.
-func buildCorrectionBlock(validationErr string) string {
-	return "\n\n===== CORRECTION =====\n" +
-		"Your previous answer failed validation: " + truncRunes(validationErr, 300) + "\n" +
-		`Output ONE JSON object only - no prose, no markdown fence, no explanation
-before or after it. It must match the schema exactly: required keys status,
-headline, body, findings, resolved; no additional keys; status must equal the
-highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
-not emit "key", "meta", "first_seen" or "occurrences".`
-}
-
-// assembleStage1 builds the stage-1 prompt verbatim per §7.1. The
-// SECURITY BOUNDARY paragraph itself lives in
-// templates/boundary_stage1.tmpl — every substitution into prompt text,
-// nonce included, goes through the one text/template engine.
-func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
-	factsJSON, err := json.Marshal(f)
-	if err != nil {
-		return "", err
-	}
-	data := promptData{
-		SentinelMD: sentinelMD,
-		Nonce:      nonce,
-		HistoryN:   cfg.HistoryN,
-		History:    strings.Join(historyLines, "\n"),
-		FactsJSON:  string(factsJSON),
-	}
+// buildCorrection renders the retry suffix with the concrete validation
+// error from the failed attempt (truncated; the text comes from our own
+// validator and contains no log content, so it is safe to embed).
+func buildCorrection(validationErr string) (string, error) {
 	var b strings.Builder
-	if err := promptTmpl.ExecuteTemplate(&b, "stage1", data); err != nil {
+	data := promptData{ValidationError: truncRunes(validationErr, 300)}
+	if err := promptTmpl.ExecuteTemplate(&b, "correction", data); err != nil {
 		return "", err
 	}
 	return b.String(), nil
 }
 
-// buildStage1PromptWithinBudget is §6 step 3's prompt-budget enforcement:
-// agy silently returns an empty response past a measured ~30KB prompt
-// (contracts/analyze.md §6 step 3 — 35KB reproduced SUCCESS with an empty
-// response and zero tokens), an order of magnitude under FACTS_MAX_BYTES
-// (262144). The facts document itself is never touched — only the prompt
-// rendered from a REDUCED COPY is, via collect.Truncate (reused, D2: never
-// invents a second truncation algorithm) — so the raw-alert path and
-// everything else that reads collect's own output is unaffected.
-//
-// Because the "shell" (sentinel.md + boundary + HISTORY + TASK) has a
-// fixed size independent of the facts payload, one render is enough to
-// compute it exactly (shellLen = fullLen - factsJSONLen) — no guessing,
-// no iteration: reduce once against the exact remaining budget and
-// re-render.
-func buildStage1PromptWithinBudget(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
-	prompt, err := assembleStage1(cfg, f, historyLines, nonce)
+// renderTriagePrompt renders the triage prompt: role document, security
+// boundary, history window, this tick's facts, task.
+func renderTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
+	factsJSON, err := json.Marshal(f)
+	if err != nil {
+		return "", err
+	}
+	data := promptData{
+		RoleMD:    roleMD,
+		Nonce:     nonce,
+		HistoryN:  cfg.HistoryN,
+		History:   strings.Join(historyLines, "\n"),
+		FactsJSON: string(factsJSON),
+	}
+	var b strings.Builder
+	if err := promptTmpl.ExecuteTemplate(&b, "triage", data); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// buildTriagePrompt renders the triage prompt and, if it exceeds the size
+// budget, re-renders it from a reduced copy of the facts. agy silently
+// returns an empty answer past a measured ~30 KB prompt, an order of
+// magnitude below the facts size cap, so an unbudgeted prompt fails in the
+// worst way: successfully, with nothing. The non-facts shell has a fixed
+// size, so one render yields the exact remaining budget — no iteration.
+// The reduction uses the collector's own truncation on a copy; the
+// original facts are never touched, because the fallback and raw-alert
+// paths read them and must see exactly what the collector emitted.
+func buildTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
+	prompt, err := renderTriagePrompt(cfg, f, historyLines, nonce)
 	if err != nil {
 		return "", err
 	}
@@ -321,18 +154,16 @@ func buildStage1PromptWithinBudget(cfg *config.Config, f *facts.Facts, historyLi
 	budgetCfg.FactsMaxBytes = budget
 	collect.Truncate(reduced, &budgetCfg)
 
-	reducedPrompt, err := assembleStage1(cfg, reduced, historyLines, nonce)
+	reducedPrompt, err := renderTriagePrompt(cfg, reduced, historyLines, nonce)
 	if err != nil {
 		return prompt, nil
 	}
 	return reducedPrompt, nil
 }
 
-// deepCopyFacts returns an independent copy of f: facts.Section[T] fields
-// are pointers, so a shallow struct copy would still alias the original's
-// slices — collect.Truncate mutates in place, and the ORIGINAL facts must
-// stay exactly what collect emitted (the raw-alert path and the §5
-// fallback both read Options.Facts directly).
+// deepCopyFacts returns a fully independent copy. The facts sections are
+// pointers, so a struct copy would still alias the slices the budget
+// reduction mutates.
 func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
 	b, err := json.Marshal(f)
 	if err != nil {
@@ -345,12 +176,13 @@ func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
 	return &cp, nil
 }
 
-// assembleStage2 builds the stage-2 prompt verbatim per §7.2, selecting
-// templates/boundary_stage2.tmpl (D8) via Stage2.
-func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
+// renderDeepDivePrompt renders the deep-dive prompt: role document,
+// security boundary, history window, the one candidate finding, the deep
+// collection, task.
+func renderDeepDivePrompt(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
 	data := promptData{
-		SentinelMD:  sentinelMD,
-		Stage2:      true,
+		RoleMD:      roleMD,
+		DeepDive:    true,
 		Nonce:       nonce,
 		HistoryN:    cfg.HistoryN,
 		History:     strings.Join(historyLines, "\n"),
@@ -359,28 +191,24 @@ func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLin
 		Component:   component,
 	}
 	var b strings.Builder
-	if err := promptTmpl.ExecuteTemplate(&b, "stage2", data); err != nil {
+	if err := promptTmpl.ExecuteTemplate(&b, "deepdive", data); err != nil {
 		return "", err
 	}
 	return b.String(), nil
 }
 
-// buildStage2PromptWithinBudget is §6 step 10's PROMPT_MAX_BYTES
-// enforcement, applying the exact same exact-arithmetic technique as
-// buildStage1PromptWithinBudget, to the deep collect document instead of
-// the tick facts. This is critical, not cosmetic (main's own live-gate
-// finding, round 6): a deep collect can reach FACTS_MAX_BYTES (262144) —
-// on Linux a single argv string past MAX_ARG_STRLEN (128 KiB) fails
-// execve with E2BIG, and anything past ~30KB is agy's silent empty-answer
-// cliff (§6 step 3). Unbudgeted, stage 2 fails systematically for every
-// realistic deep collect — a 24h ZED window, exactly the case A9 exists
-// to analyze.
-func buildStage2PromptWithinBudget(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
+// buildDeepDivePrompt applies the same budget technique to the deep-dive
+// prompt. Not cosmetic: a deep collection can reach the full facts size
+// cap, a single argv string that large fails exec outright on Linux, and
+// anything past ~30 KB hits agy's silent-empty cliff — unbudgeted, the
+// deep dive would fail systematically for exactly the large collections it
+// exists to analyze.
+func buildDeepDivePrompt(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
 	deepJSON, err := json.Marshal(deepFacts)
 	if err != nil {
 		return "", err
 	}
-	prompt, err := assembleStage2(cfg, findingJSON, string(deepJSON), historyLines, nonce, component)
+	prompt, err := renderDeepDivePrompt(cfg, findingJSON, string(deepJSON), historyLines, nonce, component)
 	if err != nil {
 		return "", err
 	}
@@ -406,7 +234,7 @@ func buildStage2PromptWithinBudget(cfg *config.Config, findingJSON string, deepF
 	if err != nil {
 		return prompt, nil
 	}
-	reducedPrompt, err := assembleStage2(cfg, findingJSON, string(reducedDeepJSON), historyLines, nonce, component)
+	reducedPrompt, err := renderDeepDivePrompt(cfg, findingJSON, string(reducedDeepJSON), historyLines, nonce, component)
 	if err != nil {
 		return prompt, nil
 	}

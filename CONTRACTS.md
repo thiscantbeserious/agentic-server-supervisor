@@ -17,14 +17,14 @@ internal/report/              Report wire types + report.schema.json (embedded) 
 internal/dedup/               Key, EvidenceCore — the single normalizer
 internal/journal/             journalctl exec + normalization + merge/dedup
 internal/collect/             Run (tick + deep)
-internal/analyze/             Run, prompt assembly, fallback, sentinel.md (embedded)
+internal/analyze/             Run, prompt assembly, fallback, prompt/role.md (embedded)
 internal/state/               Store: Process, History, Outbox{Add,Take,Ack}, Health
 internal/notify/              Send, BuildPayload, Sanitize, SMTP fallback, SeedConfig
 internal/runtime/             Tick, Loop, raw-alert path
 test/container_test.go        build tag `container`
 ```
 
-`internal/hostenv` and `internal/schema` do not exist. `go:embed` cannot escape its package directory, so embedded assets live **in** the package that owns them: `internal/facts/facts.schema.json`, `internal/report/report.schema.json`, `internal/analyze/sentinel.md`. `supervisor/prompts/` and `supervisor/schemas/` are deleted; the image ships no prompt or schema files and `SENTINEL_HOME` is abolished (its preflight check is removed).
+`internal/hostenv` and `internal/schema` do not exist. `go:embed` cannot escape its package directory, so embedded assets live **in** the package that owns them: `internal/facts/facts.schema.json`, `internal/report/report.schema.json`, `internal/analyze/prompt/role.md`. `supervisor/prompts/` and `supervisor/schemas/` are deleted; the image ships no prompt or schema files and `SENTINEL_HOME` is abolished (its preflight check is removed).
 
 Single owners — no second implementation anywhere:
 
@@ -225,7 +225,7 @@ state.Process(raw []byte) (*state.Decision, error)   // history stores the input
 notify.Send(ctx, cfg, r report.Report, smtpFallback bool) error
 ```
 
-`tick` marshals the analyzer's report once and hands the bytes to `state.Process`. `analyze` builds its own fallback report (stable key, `component: "meta"`) and returns it as a valid `*report.Report` with a non-nil error; `tick` sends it through `state` unchanged and exits 3 — `tick` never authors an analyzer fallback. `tick` authors only the collector fallback (`component: "meta"`, headline "Collector unavailable"). Deep context for stage 2 is `collect.Run` with `DeepComponent` set, under `DEEP_TIMEOUT`.
+`tick` marshals the analyzer's report once and hands the bytes to `state.Process`. `analyze` builds its own fallback report (stable key, `component: "meta"`) and returns it as a valid `*report.Report` with a non-nil error; `tick` sends it through `state` unchanged and exits 3 — `tick` never authors an analyzer fallback. `tick` authors only the collector fallback (`component: "meta"`, headline "Collector unavailable"). Deep context for the deep dive is `collect.Run` with `DeepComponent` set, under `DEEP_TIMEOUT`.
 
 Outbox flow, once per tick, in this order: `state.OutboxTake()` → `notify.Send(item.Payload, item.FallbackSMTP)` → `state.OutboxAck(id)` on success. On the current report: `notify.Send` error ⇒ `state.OutboxAdd(payload)`. `notify` has no `--retry-outbox`, no envelope of its own, and never writes to `$STATE_DIR`. The queued payload is the `decision.report` document, so a retry is byte-identical. Raw alerts follow the same path — a failed raw-alert POST is queued like any other.
 

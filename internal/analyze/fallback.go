@@ -1,3 +1,8 @@
+// fallback.go: the LLM-free report. Built whenever no valid model report
+// could be produced, it carries the raw high-priority kernel lines so an
+// analyzer outage can never hide a hardware event.
+//
+// The binding spec is contracts/analyze.md.
 package analyze
 
 import (
@@ -9,16 +14,14 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// noKernelLinesPlaceholder is used verbatim (§5) when the fallback has no
+// noKernelLinesPlaceholder is used verbatim when the fallback has no
 // protected kernel line to show.
 const noKernelLinesPlaceholder = "no emerg or crit kernel lines in this tick"
 
-// reasonPhrase maps the machine-readable <CODE> (what slog records on
-// stderr, C7) to the human <REASON> phrase the report document carries
-// (§5, amended by commit 0651b69): notify strips "_" from every
-// report-derived string (C8), so "reason: agy_missing" would reach a human
-// as "reason: agymissing". The code never reaches report text; only the
-// phrase does. D10 keeps no exception for the fallback.
+// reasonPhrase maps machine failure codes to the human phrases the report
+// carries. The code goes to the log; only the phrase enters report text,
+// because the notifier strips underscores from report strings and
+// "agy_missing" would reach the operator as "agymissing".
 var reasonPhrase = map[string]string{
 	"agy_missing":    "analyzer binary not found",
 	"agy_failed":     "analyzer exited non-zero",
@@ -30,12 +33,13 @@ var reasonPhrase = map[string]string{
 	"agy_unauth":     "analyzer not authenticated",
 }
 
-// Fallback builds the exact §5 fallback document: the analyzer stage
-// could not produce a valid report, so the deterministic path surfaces the
-// raw high-priority kernel lines instead of losing them silently. Always
-// returns a document that passes report.Validate. code is the machine
-// <CODE> (already logged to stderr by the caller); the document itself
-// only ever carries the mapped human phrase.
+// Fallback builds the report used when no valid model report exists: an
+// ALERT carrying the raw high-priority kernel lines of this tick, so the
+// operator still sees hardware events during an analyzer outage. code is
+// the machine-readable failure reason; the report text carries only the
+// mapped human phrase, because the notifier strips underscores from report
+// strings and "agy_missing" would arrive as "agymissing". The result always
+// passes report.Validate.
 func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *report.Report {
 	reason := reasonPhrase[code]
 	if reason == "" {
@@ -73,15 +77,10 @@ func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *repor
 	}
 }
 
-// protectedKernelLines returns the protected (priority <= RawAlertMaxPriority)
-// kernel lines, oldest first, capped at RawAlertMaxLines — but the cap keeps
-// the NEWEST lines, not the oldest: entries are stored oldest-first, so a
-// forward walk that breaks at the limit would keep the 20 oldest crit lines
-// and drop the incident happening right now, the same inversion the T3
-// journal record cap had (now contract-sanctioned in §5, commit 4dc1b00).
-// We walk the entries backwards (newest first) collecting up to
-// RawAlertMaxLines, then reverse the result back to chronological order for
-// the human reading the report.
+// protectedKernelLines returns this tick's high-priority kernel lines,
+// oldest first, capped — keeping the newest when the cap binds. A forward
+// walk that stops at the limit would keep the oldest lines and drop the
+// incident happening right now.
 func protectedKernelLines(cfg *config.Config, f *facts.Facts) []string {
 	switch {
 	case f == nil || f.Kernel == nil:
@@ -106,12 +105,10 @@ func protectedKernelLines(cfg *config.Config, f *facts.Facts) []string {
 	return lines
 }
 
-// truncLinesKeepNewest fits lines (chronological, oldest first) into at
-// most max runes by dropping whole lines from the OLDEST end first — never
-// splitting a line mid-rune-budget, so the newest protected line is always
-// present when the rune budget binds before the line-count cap does
-// (test 16). If even the single newest line does not fit, its trailing
-// (newest) runes are kept instead of its leading ones.
+// truncLinesKeepNewest fits lines into a rune budget by dropping whole
+// lines from the oldest end, never splitting a line, so the newest line
+// survives whenever the budget binds. If even the single newest line does
+// not fit, its trailing runes are kept.
 func truncLinesKeepNewest(lines []string, max int, fallback string) string {
 	if len(lines) == 0 {
 		return truncRunesSuffix(fallback, max)
@@ -139,6 +136,7 @@ func truncLinesKeepNewest(lines []string, max int, fallback string) string {
 	return strings.Join(kept, "\n")
 }
 
+// truncRunesSuffix keeps at most n trailing runes.
 func truncRunesSuffix(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

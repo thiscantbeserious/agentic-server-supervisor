@@ -1,0 +1,160 @@
+// history.go: the report window. Loads recent reports from state, projects
+// them into the compact form the prompts carry, and computes which previous
+// findings are resolved this tick.
+//
+// The binding spec is contracts/analyze.md.
+package analyze
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+)
+
+// historyFinding is the compact projection of a past finding carried in the
+// prompt. Evidence, occurrences and first_seen are load-bearing: the dedup
+// key deliberately masks digits, so "cksum_errors=1" and "cksum_errors=7"
+// share a key — the key alone proves recurrence but can never prove
+// growth. The model is asked to compare counters across ticks; without the
+// evidence text that comparison is impossible and it answers from
+// imagination.
+type historyFinding struct {
+	Severity    string `json:"severity"`
+	Component   string `json:"component"`
+	Key         string `json:"key"`
+	Evidence    string `json:"evidence"`
+	Occurrences int    `json:"occurrences,omitempty"`
+	FirstSeen   int64  `json:"first_seen,omitempty"`
+}
+
+type historyProjection struct {
+	Status   string           `json:"status"`
+	Headline string           `json:"headline"`
+	Findings []historyFinding `json:"findings"`
+	Resolved []string         `json:"resolved"`
+}
+
+// loadHistoryReports returns the newest n reports from the state history,
+// oldest first. Filenames sort chronologically as strings by construction.
+// Only *.json is read: atomic writes leave .tmp-* files in the same
+// directory, and letting one into the window would evict a real report.
+// Unreadable or unparseable files are skipped; a missing directory yields
+// nil.
+func loadHistoryReports(stateDir string, n int) []report.Report {
+	dir := filepath.Join(stateDir, "history")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	if n > 0 && len(names) > n {
+		names = names[len(names)-n:]
+	}
+
+	out := make([]report.Report, 0, len(names))
+	for _, name := range names {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		var r report.Report
+		if err := json.Unmarshal(b, &r); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// historyProjectionLines renders each history report as one compact JSON
+// line for the prompt.
+func historyProjectionLines(hist []report.Report) []string {
+	lines := make([]string, 0, len(hist))
+	for _, r := range hist {
+		proj := historyProjection{
+			Status: r.Status, Headline: r.Headline,
+			Findings: []historyFinding{}, Resolved: r.Resolved,
+		}
+		for _, f := range r.Findings {
+			proj.Findings = append(proj.Findings, historyFinding{
+				Severity: f.Severity, Component: f.Component, Key: f.Key,
+				Evidence:    truncRunes(f.Evidence, 160),
+				Occurrences: f.Occurrences, FirstSeen: f.FirstSeen,
+			})
+		}
+		if proj.Resolved == nil {
+			proj.Resolved = []string{}
+		}
+		b, err := json.Marshal(proj)
+		if err != nil {
+			continue
+		}
+		lines = append(lines, string(b))
+	}
+	return lines
+}
+
+func newestHistory(hist []report.Report) *report.Report {
+	if len(hist) == 0 {
+		return nil
+	}
+	return &hist[len(hist)-1]
+}
+
+// computeResolved returns which of the previous report's findings are gone
+// this tick, as evidence snippets. Computed in Go, overwriting whatever the
+// model emitted: set arithmetic over data we already hold does not belong
+// in a probabilistic component. Only the newest report is compared —
+// anything older was already announced resolved. Entries are truncated to
+// the schema's length bound and empty results skipped, since one overlong
+// or empty entry would invalidate the whole report.
+func computeResolved(newest *report.Report, current []report.Finding) []string {
+	if newest == nil {
+		return []string{}
+	}
+	currentKeys := make(map[string]bool, len(current))
+	for _, f := range current {
+		if f.Key != "" {
+			currentKeys[f.Key] = true
+		}
+	}
+	var out []string
+	for _, f := range newest.Findings {
+		if f.Key == "" || currentKeys[f.Key] {
+			continue
+		}
+		ev := truncRunes(f.Evidence, 80)
+		if ev == "" {
+			continue
+		}
+		out = append(out, ev)
+	}
+	sort.Strings(out)
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// truncRunes keeps at most n leading runes.
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
