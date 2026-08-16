@@ -90,6 +90,8 @@ These range rules apply to numeric variables only. `DEEP_ENABLED` is the `0`|`1`
 
 The 24h bound exists because a second-valued variable is multiplied by `time.Second`: without an upper bound, a large value overflows `int64` nanoseconds and becomes a **negative** duration, which would make a timeout fire instantly instead of erroring. `STALE_ALERT_SEC` defaults to exactly `86400` (24h), so 24h is the ceiling, not a value below it. `RAW_ALERT_MARKER_TTL_HOURS` is a marker lifetime rather than a timeout and keeps its own row.
 
+**`TICK_WINDOW` and `DEEP_WINDOW` are kept as both.** `Config` exposes the parsed `time.Duration` *and* the raw configured string (`TickWindowRaw`, `DeepWindowRaw`). `facts.meta.window` echoes the **raw** string, so a configured `10m` is reported as `10m` and not as `time.Duration.String()`'s `10m0s`. Re-rendering the value from the parsed duration is the "rewriting of the input" this section forbids, only in the output direction — and `meta.window` is not internal bookkeeping: it travels into the analyzer prompt and from there into text a human reads.
+
 **The bound is on the variable, not on the Go type `Config` happens to store it in.** `STALE_ALERT_SEC`, `RENOTIFY_ALERT_SEC`, `RENOTIFY_WATCH_SEC` and `RAW_ALERT_REPEAT_SECONDS` stay `int` seconds in `Config` and only become durations in `state`/`runtime`, but `Load` bounds them at `86400` all the same. `internal/config` is the single loader (C1) and downstream components contain no env parsing and no re-validation: a rule enforced in two places is a rule that will drift out of sync, and the consumer that forgets it is the one that overflows. T5 and T6 therefore inherit already-valid values and add no bounds checks of their own.
 
 | Name | Default | Owner |
