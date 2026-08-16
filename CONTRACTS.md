@@ -111,7 +111,7 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `HOST_RASDAEMON` | `/host/rasdaemon` | collect |
 | `SENTINEL_HOSTNAME` | resolved, see C5 | all |
 | `AGY_BIN` | `agy` | analyze |
-| `AGY_HOME` | `/tmp/agy-home` | runtime |
+| `AGY_HOME` | `/state/agy-home` (persistent; NEVER tmpfs — a lost token refresh cannot be re-authenticated headlessly) | runtime |
 | `AGY_SECRET_DIR` | `/run/secrets/agy` | runtime |
 | `AGY_PRINT_TIMEOUT` | `120s` | analyze |
 | `AGY_HARD_TIMEOUT` | `150s` (raised to print+30s if lower) | analyze |

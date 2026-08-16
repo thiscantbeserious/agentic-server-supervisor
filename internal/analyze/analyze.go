@@ -85,6 +85,16 @@ var (
 	errAgyMissing = errors.New("agy: binary not found")
 	errAgyTimeout = errors.New("agy: killed by hard timeout")
 	errAgyFailed  = errors.New("agy: exited non-zero or unusable")
+	// errAgyEmptySystemic marks the two agy_empty sub-cases that are NOT
+	// retry-eligible (t4-review round 4, routed to main and implemented on
+	// their reasoning pending main's ruling): status != "SUCCESS" or
+	// input_tokens == 0 both mean the prompt never reached a model that
+	// actually answered — a retry re-runs the identical broken invocation
+	// and doubles the outage window, exactly what D7 forbids for a dead
+	// binary. An empty `response` WITH status SUCCESS and non-zero tokens
+	// is the one agy_empty sub-case that's plausibly transient and stays
+	// retry-eligible.
+	errAgyEmptySystemic = errors.New("agy: envelope reports failure or zero input tokens")
 )
 
 // Run performs §6. It always returns a non-nil, valid report; a non-nil
@@ -126,7 +136,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	histLines := historyProjectionLines(hist)
 	newest := newestHistory(hist)
 
-	stage1Prompt, err := assembleStage1(cfg, o.Facts, histLines, nonce)
+	stage1Prompt, err := buildStage1PromptWithinBudget(cfg, o.Facts, histLines, nonce)
 	if err != nil {
 		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: assemble stage1: %w", err)
 	}
@@ -171,14 +181,23 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 // runStage1 performs §6 steps 4-6: agy attempt 1, normalise + validate,
 // attempt 2 with the CORRECTION suffix (now carrying the real validation
 // error, §6 step 5) on parse/validate failure only (D7 — a dead binary,
-// non-zero exit or hard timeout never retries).
+// non-zero exit or hard timeout never retries). agy_empty splits in two
+// (t4-review round 4, routed to main, implemented on their reasoning
+// pending main's ruling): status != "SUCCESS" or input_tokens == 0 is
+// systemic — the prompt never reached a model that answered, so retrying
+// re-runs the identical broken invocation and only doubles the outage
+// window (errAgyEmptySystemic, checked via errors.Is below). An empty
+// response WITH a successful, token-spending call is plausibly a
+// transient antigravity-cli#76 drop and stays retry-eligible.
 func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
 	rep, reason, err := agyAttempt(ctx, o, d, promptPath, schemaPath, 1, logger)
 	if rep != nil {
 		return rep, "", nil
 	}
-	if err != nil && reason != "invalid_json" && reason != "schema_invalid" {
-		// dead binary / non-zero / timeout: no retry (D7).
+	retryEligible := reason == "invalid_json" || reason == "schema_invalid" ||
+		(reason == "agy_empty" && !errors.Is(err, errAgyEmptySystemic))
+	if err != nil && !retryEligible {
+		// dead binary / non-zero / timeout / systemic agy_empty: no retry (D7).
 		return nil, reason, err
 	}
 
@@ -198,6 +217,43 @@ func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 	return nil, reason, err
 }
 
+// agyEnvelope is agy's --output-format json wrapper (§6 step 4, mandatory
+// since t4's live-validation round). agy has an open upstream defect
+// (antigravity-cli#76): --print silently drops stdout in non-TTY contexts
+// — exactly how sentinel spawns it — returning exit 0 with nothing, so a
+// caller cannot otherwise tell "no response" from "response lost". The
+// envelope makes that distinguishable: a dropped prompt reports
+// status="SUCCESS" with an empty response and zero tokens.
+type agyEnvelope struct {
+	Status   string `json:"status"`
+	Response string `json:"response"`
+	Usage    struct {
+		InputTokens int64 `json:"input_tokens"`
+	} `json:"usage"`
+}
+
+// decodeAgyEnvelope implements §6 step 4's envelope check, shared by both
+// stage 1 (agyAttempt) and stage 2 (runDeepDive) — every real agy
+// invocation now goes through --output-format json, stage 2 included, so
+// both call sites face the same antigravity-cli#76 empty-stdout risk.
+func decodeAgyEnvelope(out []byte) (string, error) {
+	var env agyEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return "", fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
+	}
+	// status != "SUCCESS" or input_tokens == 0 both mean the prompt never
+	// reached a model that answered — systemic, not retry-eligible.
+	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
+		return "", fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
+	}
+	// SUCCESS with tokens spent but nothing came back: plausibly a
+	// transient antigravity-cli#76 drop, retry-eligible.
+	if strings.TrimSpace(env.Response) == "" {
+		return "", fmt.Errorf("empty response (status=%q input_tokens=%d)", env.Status, env.Usage.InputTokens)
+	}
+	return env.Response, nil
+}
+
 // agyAttempt runs one d.RunAgy call and classifies its outcome. A non-nil
 // report means success; otherwise reason names why, and err is non-nil and,
 // for invalid_json/schema_invalid, carries the concrete validation error
@@ -215,7 +271,16 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	}
 	logger.Info("stage1", "attempt", attempt, "rc", 0, "bytes", len(out))
 
-	normalized := normalizeAgyOutput(out)
+	// Decode the envelope first (§6 step 4): status != "SUCCESS", an
+	// empty/whitespace response, or zero input_tokens is a dropped prompt
+	// (agy_empty), not a model that legitimately said nothing. Only after
+	// this check does normalisation/decoding touch the model's own answer.
+	response, everr := decodeAgyEnvelope(out)
+	if everr != nil {
+		return nil, "agy_empty", fmt.Errorf("analyze: agy attempt %d: %w", attempt, everr)
+	}
+
+	normalized := normalizeAgyOutput([]byte(response))
 	rep, verr := report.Validate(normalized)
 	if verr == nil {
 		return rep, "", nil
@@ -359,8 +424,15 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		logger.Info("deep-dive failed, keeping stage1")
 		return
 	}
-	// No retry at stage 2 (§6 step 10).
-	normalized := normalizeAgyOutput(out)
+	// No retry at stage 2 (§6 step 10) — an envelope failure here is just
+	// another non-fatal enrichment failure, same as any other stage-2
+	// problem (§5: "stage 2 fails in any way ... non-fatal").
+	response, everr := decodeAgyEnvelope(out)
+	if everr != nil {
+		logger.Info("deep-dive failed, keeping stage1")
+		return
+	}
+	normalized := normalizeAgyOutput([]byte(response))
 	stage2Rep, verr := validateStage2(normalized)
 	if verr != nil {
 		logger.Info("deep-dive failed, keeping stage1")
@@ -414,21 +486,28 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 
 // runAgy is DefaultDeps' RunAgy: exec agy --print under AgyHardTimeout,
 // stdin from promptPath, a minimal env (§6 step 4).
+// runAgy is DefaultDeps' RunAgy. The prompt is passed as an ARGV argument,
+// never on stdin (§6 step 4, t4's live-validation defect): agy 1.1.13's
+// print mode ignores stdin entirely — a piped-in prompt produces a
+// hallucinated answer to an empty question, while the same text as an
+// argument answers correctly. The prompt file at promptPath is still
+// written (for debugging and the attempt-2 CORRECTION append) but is read
+// here and passed by value.
 func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath string) ([]byte, error) {
 	if _, err := exec.LookPath(cfg.AgyBin); err != nil {
 		return nil, fmt.Errorf("%w: %v", errAgyMissing, err)
 	}
 
-	promptFile, err := os.Open(promptPath)
+	promptBytes, err := os.ReadFile(promptPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: open prompt: %v", errAgyFailed, err)
+		return nil, fmt.Errorf("%w: read prompt: %v", errAgyFailed, err)
 	}
-	defer promptFile.Close()
 
-	cmd := exec.CommandContext(ctx, cfg.AgyBin, "--print",
+	cmd := exec.CommandContext(ctx, cfg.AgyBin, "--print", string(promptBytes),
 		"--json-schema", schemaPath,
+		"--output-format", "json",
 		"--print-timeout", cfg.AgyPrintTimeout.String())
-	cmd.Stdin = promptFile
+	cmd.Stdin = nil // agy's print mode does not read stdin at all
 	var out bytes.Buffer
 	var agyErr bytes.Buffer
 	cmd.Stdout = &limitedBuffer{buf: &out, max: 1 << 20}

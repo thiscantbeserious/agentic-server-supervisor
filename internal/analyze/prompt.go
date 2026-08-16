@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
@@ -262,6 +263,75 @@ func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, n
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// buildStage1PromptWithinBudget is §6 step 3's prompt-budget enforcement:
+// agy silently returns an empty response past a measured ~30KB prompt
+// (contracts/analyze.md §6 step 3 — 35KB reproduced SUCCESS with an empty
+// response and zero tokens), an order of magnitude under FACTS_MAX_BYTES
+// (262144). The facts document itself is never touched — only the prompt
+// rendered from a REDUCED COPY is, via collect.Truncate (reused, D2: never
+// invents a second truncation algorithm) — so the raw-alert path and
+// everything else that reads collect's own output is unaffected.
+//
+// Because the "shell" (sentinel.md + boundary + HISTORY + TASK) has a
+// fixed size independent of the facts payload, one render is enough to
+// compute it exactly (shellLen = fullLen - factsJSONLen) — no guessing,
+// no iteration: reduce once against the exact remaining budget and
+// re-render.
+func buildStage1PromptWithinBudget(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
+	prompt, err := assembleStage1(cfg, f, historyLines, nonce)
+	if err != nil {
+		return "", err
+	}
+	if len(prompt) <= cfg.PromptMaxBytes {
+		return prompt, nil
+	}
+
+	factsJSON, err := json.Marshal(f)
+	if err != nil {
+		return "", err
+	}
+	shellLen := len(prompt) - len(factsJSON)
+	budget := cfg.PromptMaxBytes - shellLen
+	if budget < 1 {
+		budget = 1 // pathological: the shell alone exceeds the budget; Truncate still degrades gracefully
+	}
+
+	reduced, err := deepCopyFacts(f)
+	if err != nil {
+		// Reduction failed — ship the oversized prompt rather than fail the
+		// whole tick; agy will most likely return agy_empty and the
+		// fallback path (which reads the UNREDUCED facts) still surfaces
+		// every protected kernel line regardless.
+		return prompt, nil
+	}
+	budgetCfg := *cfg
+	budgetCfg.FactsMaxBytes = budget
+	collect.Truncate(reduced, &budgetCfg)
+
+	reducedPrompt, err := assembleStage1(cfg, reduced, historyLines, nonce)
+	if err != nil {
+		return prompt, nil
+	}
+	return reducedPrompt, nil
+}
+
+// deepCopyFacts returns an independent copy of f: facts.Section[T] fields
+// are pointers, so a shallow struct copy would still alias the original's
+// slices — collect.Truncate mutates in place, and the ORIGINAL facts must
+// stay exactly what collect emitted (the raw-alert path and the §5
+// fallback both read Options.Facts directly).
+func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return nil, err
+	}
+	var cp facts.Facts
+	if err := json.Unmarshal(b, &cp); err != nil {
+		return nil, err
+	}
+	return &cp, nil
 }
 
 // assembleStage2 builds the stage-2 prompt verbatim per §7.2, selecting

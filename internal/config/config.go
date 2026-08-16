@@ -77,6 +77,7 @@ type Config struct {
 	AgyPrintTimeout        time.Duration
 	AgyHardTimeout         time.Duration
 	HistoryN               int
+	PromptMaxBytes         int
 	HistoryKeep            int
 	DeepEnabled            bool
 	DeepTimeout            time.Duration
@@ -159,6 +160,9 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.HistoryN, err = loadIntRange("HISTORY_N", 5, 1, noMax); err != nil {
+		return nil, err
+	}
+	if cfg.PromptMaxBytes, err = loadIntRange("PROMPT_MAX_BYTES", 20000, 1, noMax); err != nil {
 		return nil, err
 	}
 	if cfg.HistoryKeep, err = loadIntRange("HISTORY_KEEP", 50, 1, noMax); err != nil {

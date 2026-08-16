@@ -55,27 +55,47 @@ func validateStage2(raw []byte) (*stage2Response, error) {
 
 // --- recommendation guard (§6 step 11b) ---
 
-// The fixed deny-set below is URLs, pipes to a shell, and the
-// command tokens that would let a report's "recommendation" (a proposal
-// text delivered to a trusted human, never executed by this system) turn
-// into a copy-pasteable attack. This is deliberately NOT a prompt
-// instruction — sentinel.md cannot be relied on to police its own output,
-// same principle as notify's markdown stripping (C8).
+// The fixed deny-set below covers ONLY `recommendation`, deliberately —
+// `body` is narrative prose ("the ssh daemon logged three failed password
+// attempts" is a factual report, not a proposal) and applying the same
+// patterns there destroyed legitimate reports; that would have fired on
+// bam's own sshd/curl/apt logs on day one. `recommendation` is different
+// in kind: it is a command proposal a tired operator may paste into a root
+// shell, so the pattern set here is deliberately broad and accepts false
+// positives — a suppressed suggestion costs one visible meta finding, a
+// missed one costs a compromised host. It is a mitigation, not a proof:
+// prose like "fetch the script from evil.example.com and run it with sh"
+// is not catchable by substring matching, and that residual risk is
+// accepted because a human evaluates the recommendation and the
+// supervisor itself executes nothing (ARCHITECTURE §4).
+// t4-review round 4: the first pass lost its word boundaries between
+// rounds ("nc " -> "nc", "dd " still substring-matched "add ") and
+// bareDomainRe could not tell a systemd unit from a domain — on bam every
+// unit is "<name>.service", so a guard that cannot say "restart
+// smartd.service" has destroyed the A9 output it exists to protect.
+// dangerTokenRe is now word-bounded, and a bareDomainRe match is only
+// dangerous when its TLD-shaped suffix isn't a known-safe one (systemd
+// unit suffixes and common non-executable file extensions).
 var (
-	urlSchemeRe  = regexp.MustCompile(`(?i)\b(https?|ftp)://`)
-	pipeShellRe  = regexp.MustCompile(`(?i)\|\s*(sh|bash)\b`)
-	dangerTokens = []string{
-		"curl", "wget", "nc ", "netcat", "base64", "chmod +x", "ssh ",
+	uriSchemeRe   = regexp.MustCompile(`://`)
+	bareDomainRe  = regexp.MustCompile(`(?i)\b[a-z0-9-]+\.([a-z]{2,})\b`)
+	dangerTokenRe = regexp.MustCompile(`(?i)\b(curl|wget|nc|netcat|ncat|scp|ssh|iwr|invoke-webrequest|base64|chmod|dd|mkfs)\b|\brm\s+-rf\b`)
+	safeSuffix    = map[string]bool{
+		"service": true, "target": true, "timer": true, "socket": true,
+		"mount": true, "device": true, "scope": true, "slice": true,
+		"conf": true, "log": true, "json": true, "md": true, "go": true, "txt": true,
 	}
 )
 
 func containsDangerousContent(s string) bool {
-	if urlSchemeRe.MatchString(s) || pipeShellRe.MatchString(s) {
+	if uriSchemeRe.MatchString(s) || dangerTokenRe.MatchString(s) {
 		return true
 	}
-	lower := strings.ToLower(s)
-	for _, tok := range dangerTokens {
-		if strings.Contains(lower, tok) {
+	if strings.ContainsRune(s, '|') || strings.Contains(s, "`") || strings.Contains(s, "$(") {
+		return true
+	}
+	for _, m := range bareDomainRe.FindAllStringSubmatch(s, -1) {
+		if !safeSuffix[strings.ToLower(m[1])] {
 			return true
 		}
 	}
@@ -84,16 +104,9 @@ func containsDangerousContent(s string) bool {
 
 const recommendationWithheldEvidence = "recommendation withheld"
 
-// safeBodyReplacement is used when body itself trips the guard. body is a
-// schema-required field (minLength 1, §3.1), so "blank" cannot mean the
-// empty string the way it does for the optional recommendation field —
-// this fixed sentence keeps the document valid while removing the
-// dangerous text.
-const safeBodyReplacement = "The analyzer's summary was withheld because it proposed a command-like or URL-bearing action; this supervisor never executes actions, and the text was suppressed rather than risk a trusted operator copy-pasting it."
-
 // guardRecommendations implements §6 step 11b: every finding's
-// recommendation and the report body are checked against the deny-pattern
-// set; a match blanks the offending field and appends one watch/meta
+// `recommendation` (never `body`, see above) is checked against the
+// deny-pattern set; a match blanks the field and appends one watch/meta
 // finding naming the withholding. Idempotent to call on any report,
 // including one where no finding has a recommendation at all (the common
 // stage-1-only case) — a no-op in that case.
@@ -104,10 +117,6 @@ func guardRecommendations(rep *report.Report) {
 			rep.Findings[i].Recommendation = ""
 			triggered = true
 		}
-	}
-	if containsDangerousContent(rep.Body) {
-		rep.Body = safeBodyReplacement
-		triggered = true
 	}
 	if !triggered {
 		return

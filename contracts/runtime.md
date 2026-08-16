@@ -40,7 +40,7 @@ Build context = repo root.
 **Stage 2 — runtime (`debian:trixie-slim`)** — matches the target's Debian 13 journal format (ARCHITECTURE §2.7).
 - apt, `--no-install-recommends`, lists deleted in the same layer, exactly: `systemd` (provides `journalctl`), `lm-sensors`, `ca-certificates`, `tzdata`.
   Explicitly **not** installed: `jq`, `curl`, `bash` as a dependency, `smartmontools`, `zfsutils-linux`. HTTP is `net/http`, JSON is `encoding/json`, hashing is `crypto/sha256`.
-- User `sentinel`, uid **10001**, gid **10001**, home `/home/sentinel` (unused — `$HOME` is `$AGY_HOME` in tmpfs).
+- User `sentinel`, uid **10001**, gid **10001**, home `/home/sentinel` (unused — `$HOME` is `$AGY_HOME`, a persistent named volume).
 - `COPY --from=builder /out/sentinel /usr/local/bin/sentinel` and `/out/agy` → `/usr/local/bin/agy`, both mode `0555`, owner `root:root`.
 - **No `/opt/sentinel`, no prompt or schema files.** `sentinel.md`, `report.schema.json` and `facts.schema.json` are `go:embed`ed in their owning packages (C1); the image ships two binaries and nothing writable.
 - Build-time verification (any failure fails the build): `sentinel --version`, `agy --version`, `journalctl --version`, `sensors -v`.
@@ -79,7 +79,12 @@ sentinel health
    There is no prompt/schema path check: both are embedded.
 3. Assert `/usr/local/bin` is not writable (proves `read_only: true` took effect). Writable ⇒ `WARN`, continue — never block ticks on a lint.
 4. Seed agy home: `MkdirAll($AGY_HOME, 0700)`, copy `$AGY_SECRET_DIR/*` into it (regular files only, mode `0600`), `os.Setenv("HOME", $AGY_HOME)`. Missing or empty secret dir ⇒ `WARN runtime agy credentials absent — analysis will fall back`, continue: the raw-alert path must survive without the LLM.
-   `// ponytail: credentials live in tmpfs, so an agy token refresh is lost on restart. Re-auth on the host and restart the container. Upgrade path: a small rw named volume for $AGY_HOME.`
+
+   **`$AGY_HOME` is a persistent named volume, NOT tmpfs.** agy refreshes its OAuth token as it runs; on tmpfs that refresh is lost at every restart, and headless mode **cannot** re-authenticate — it prints an OAuth URL nobody will ever see and exits non-zero. The analyzer would then be permanently down after the first container restart, with the raw-alert path as the only surviving coverage. A `docker compose restart` must not cost the LLM stage.
+
+   **Seeding from `$AGY_SECRET_DIR` is an UNVERIFIED assumption and T8 must prove it empirically.** Measured on macOS 2026-08-16: agy's session is bound to the OS keychain (`svce=gemini`, `acct=antigravity`), and copying the entire `~/.gemini` tree into a fresh `HOME` did **not** restore authentication — only the original `HOME` worked. Linux has no keychain, so file-based credentials are expected to be portable there, but "expected" is not "verified". Before rollout, T8 runs the container with a seeded `$AGY_HOME` and confirms a real analysis (`status` from a live call, non-zero `usage.input_tokens`) rather than a fallback. If seeding does not work on Linux either, the LLM stage cannot run unattended and that must be known before the 24h trial, not during it.
+
+   `// ponytail: agy-home is a named volume because a lost token refresh means the analyzer never comes back — headless cannot re-auth.`
 5. `MkdirAll` of `history`, `active-alerts`, `outbox`, `raw-alerts`, `deep-queue` under `$STATE_DIR`, mode `0700`.
 6. `signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)`; the sleep between ticks is `select { case <-ctx.Done(): case <-time.After(interval) }`, so shutdown is prompt. A tick already in flight gets 5 s, then its context is cancelled.
 7. Loop body: `seq := nextTickSeq()` (R3.1), run the tick, log `WARN tick rc=<n>` on non-zero, never terminate the loop.
@@ -244,7 +249,7 @@ services:
       HOST_RASDAEMON: "/host/rasdaemon"
       SENTINEL_HOSTNAME: "${SENTINEL_HOSTNAME:-}"
       AGY_BIN: "agy"
-      AGY_HOME: "/tmp/agy-home"
+      AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
       AGY_SECRET_DIR: "/run/secrets/agy"
       AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-120s}"
       AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-150s}"

