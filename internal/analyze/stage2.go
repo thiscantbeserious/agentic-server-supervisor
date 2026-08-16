@@ -17,7 +17,7 @@ import (
 // the model cannot copy/fabricate the full report shape (key, status,
 // headline, ...) the way the old full-report deep dive schema let it.
 //
-//go:embed stage2.schema.json
+//go:embed prompt/deepdive.schema.json
 var deepDiveSchemaJSON []byte
 
 // deepDiveResponse is the deep dive RPC payload (§6 step 10): analysis and
@@ -30,7 +30,7 @@ type deepDiveResponse struct {
 	Headline       string `json:"headline,omitempty"`
 }
 
-// validateDeepDiveResponse is the hand-written bounds check for stage2.schema.json
+// validateDeepDiveResponse is the hand-written bounds check for prompt/deepdive.schema.json
 // (same D3 pattern as report.Validate: the schema file is what's handed to
 // agy --json-schema, Go enforces it at runtime). No DisallowUnknownFields,
 // consistent with report.Validate's own convention.

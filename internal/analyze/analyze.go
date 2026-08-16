@@ -224,7 +224,11 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 	}
 
 	logger.Info("triage invalid, retrying")
-	retryPrompt := promptText + buildCorrectionBlock(err.Error())
+	correction, cerr := buildCorrection(err.Error())
+	if cerr != nil {
+		return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
+	}
+	retryPrompt := promptText + correction
 	if werr := os.WriteFile(promptPath, []byte(retryPrompt), 0o600); werr != nil {
 		return nil, "internal_error", fmt.Errorf("analyze: write correction prompt: %w", werr)
 	}

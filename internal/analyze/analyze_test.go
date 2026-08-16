@@ -1852,13 +1852,13 @@ func TestPromptGoldenFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderTriagePrompt: %v", err)
 	}
-	compareGolden(t, "testdata/prompt-stage1.golden", s1)
+	compareGolden(t, "testdata/prompt-triage.golden", s1)
 
 	s2, err := renderDeepDivePrompt(cfg, `{"key":"x"}`, `{"deep":1}`, []string{`{"status":"OK"}`}, nonce, "zfs")
 	if err != nil {
 		t.Fatalf("renderDeepDivePrompt: %v", err)
 	}
-	compareGolden(t, "testdata/prompt-stage2.golden", s2)
+	compareGolden(t, "testdata/prompt-deepdive.golden", s2)
 }
 
 // TestPromptGoldenFiles_EmptyHistory covers the empty-HISTORY edge case:
@@ -1880,7 +1880,7 @@ func TestPromptGoldenFiles_EmptyHistory(t *testing.T) {
 	if strings.Contains(s1, "RESOLVED") {
 		t.Fatalf("resolved is output-only (commit ba631ca) — the triage prompt must not mention it:\n%s", s1)
 	}
-	compareGolden(t, "testdata/prompt-stage1-empty-history.golden", s1)
+	compareGolden(t, "testdata/prompt-triage-empty-history.golden", s1)
 }
 
 func compareGolden(t *testing.T, path, got string) {
