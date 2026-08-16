@@ -11,43 +11,43 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// stage2SchemaJSON is the stage-2 RPC payload schema (§6 step 10): this
+// deepDiveSchemaJSON is the deep dive RPC payload schema (§6 step 10): this
 // document is never emitted to a user, so D3's "one schema, normative for
 // everything the system emits" does not apply to it — it exists only so
 // the model cannot copy/fabricate the full report shape (key, status,
-// headline, ...) the way the old full-report stage-2 schema let it.
+// headline, ...) the way the old full-report deep dive schema let it.
 //
 //go:embed stage2.schema.json
-var stage2SchemaJSON []byte
+var deepDiveSchemaJSON []byte
 
-// stage2Response is the stage-2 RPC payload (§6 step 10): analysis and
+// deepDiveResponse is the deep dive RPC payload (§6 step 10): analysis and
 // recommendation for the one candidate finding, identified by the candidate
 // analyze itself sent — never by a key the model echoes back — plus an
-// optional headline that, when present, replaces stage 1's (§6 step 11).
-type stage2Response struct {
+// optional headline that, when present, replaces triage's (§6 step 11).
+type deepDiveResponse struct {
 	Analysis       string `json:"analysis"`
 	Recommendation string `json:"recommendation"`
 	Headline       string `json:"headline,omitempty"`
 }
 
-// validateStage2 is the hand-written bounds check for stage2.schema.json
+// validateDeepDiveResponse is the hand-written bounds check for stage2.schema.json
 // (same D3 pattern as report.Validate: the schema file is what's handed to
 // agy --json-schema, Go enforces it at runtime). No DisallowUnknownFields,
 // consistent with report.Validate's own convention.
-func validateStage2(raw []byte) (*stage2Response, error) {
-	var r stage2Response
+func validateDeepDiveResponse(raw []byte) (*deepDiveResponse, error) {
+	var r deepDiveResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("stage2: invalid JSON: %w", err)
+		return nil, fmt.Errorf("deepdive: invalid JSON: %w", err)
 	}
 	if n := len([]rune(r.Analysis)); n < 1 || n > 1200 {
-		return nil, fmt.Errorf("stage2: analysis: length %d runes out of bounds [1,1200]", n)
+		return nil, fmt.Errorf("deepdive: analysis: length %d runes out of bounds [1,1200]", n)
 	}
 	if n := len([]rune(r.Recommendation)); n < 1 || n > 800 {
-		return nil, fmt.Errorf("stage2: recommendation: length %d runes out of bounds [1,800]", n)
+		return nil, fmt.Errorf("deepdive: recommendation: length %d runes out of bounds [1,800]", n)
 	}
 	if r.Headline != "" {
 		if n := len([]rune(r.Headline)); n > 80 {
-			return nil, fmt.Errorf("stage2: headline: length %d runes exceeds maxLength 80", n)
+			return nil, fmt.Errorf("deepdive: headline: length %d runes exceeds maxLength 80", n)
 		}
 	}
 	return &r, nil
@@ -146,7 +146,7 @@ const recommendationWithheldEvidence = "recommendation withheld"
 // deny-pattern set; a match blanks the field and appends one watch/meta
 // finding naming the withholding. Idempotent to call on any report,
 // including one where no finding has a recommendation at all (the common
-// stage-1-only case) — a no-op in that case.
+// triage-only case) — a no-op in that case.
 func guardRecommendations(rep *report.Report) {
 	triggered := false
 	for i := range rep.Findings {

@@ -32,7 +32,7 @@ var sentinelMDRaw string
 // (t4-review round 3: byte-diffed against §7.1, one blank line off).
 var sentinelMD = strings.TrimRight(sentinelMDRaw, "\n")
 
-// templatesFS embeds the stage-1/stage-2 prompt skeletons (§7.1, §7.2).
+// templatesFS embeds the triage/deep dive prompt skeletons (§7.1, §7.2).
 // text/template, not html/template: the latter HTML-escapes the payload
 // and would corrupt the embedded facts/finding/deep JSON. The two stages
 // share one "header" define (role doc + SECURITY BOUNDARY heading +
@@ -49,7 +49,7 @@ var promptTmpl = template.Must(template.ParseFS(templatesFS, "templates/*.tmpl")
 // fields for a given stage are simply left zero.
 type promptData struct {
 	SentinelMD  string
-	Stage2      bool // selects boundary_stage2 vs boundary_stage1 in header.tmpl (D8)
+	Stage2      bool // selects boundary_stage2 vs boundary_stage1 in header.tmpl (D8) — renamed to DeepDive in step 2, alongside the templates
 	Nonce       string
 	HistoryN    int
 	History     string
@@ -236,7 +236,7 @@ func computeResolved(newest *report.Report, current []report.Finding) []string {
 }
 
 // buildCorrectionBlock is §6 step 5's CORRECTION suffix, appended verbatim
-// to the stage-1 prompt on retry. validationErr is the concrete error the
+// to the triage prompt on retry. validationErr is the concrete error the
 // first attempt produced (json.Unmarshal or report.Validate's own error
 // text), truncated to 300 runes — --print mode is stateless, so without
 // the actual error "your previous answer was not valid" carries no
@@ -253,11 +253,11 @@ highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
 not emit "key", "meta", "first_seen" or "occurrences".`
 }
 
-// assembleStage1 builds the stage-1 prompt verbatim per §7.1. The
+// renderTriagePrompt builds the triage prompt verbatim per §7.1. The
 // SECURITY BOUNDARY paragraph itself lives in
 // templates/boundary_stage1.tmpl — every substitution into prompt text,
 // nonce included, goes through the one text/template engine.
-func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
+func renderTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
 	factsJSON, err := json.Marshal(f)
 	if err != nil {
 		return "", err
@@ -276,7 +276,7 @@ func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, n
 	return b.String(), nil
 }
 
-// buildStage1PromptWithinBudget is §6 step 3's prompt-budget enforcement:
+// buildTriagePrompt is §6 step 3's prompt-budget enforcement:
 // agy silently returns an empty response past a measured ~30KB prompt
 // (contracts/analyze.md §6 step 3 — 35KB reproduced SUCCESS with an empty
 // response and zero tokens), an order of magnitude under FACTS_MAX_BYTES
@@ -290,8 +290,8 @@ func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, n
 // compute it exactly (shellLen = fullLen - factsJSONLen) — no guessing,
 // no iteration: reduce once against the exact remaining budget and
 // re-render.
-func buildStage1PromptWithinBudget(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
-	prompt, err := assembleStage1(cfg, f, historyLines, nonce)
+func buildTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
+	prompt, err := renderTriagePrompt(cfg, f, historyLines, nonce)
 	if err != nil {
 		return "", err
 	}
@@ -321,7 +321,7 @@ func buildStage1PromptWithinBudget(cfg *config.Config, f *facts.Facts, historyLi
 	budgetCfg.FactsMaxBytes = budget
 	collect.Truncate(reduced, &budgetCfg)
 
-	reducedPrompt, err := assembleStage1(cfg, reduced, historyLines, nonce)
+	reducedPrompt, err := renderTriagePrompt(cfg, reduced, historyLines, nonce)
 	if err != nil {
 		return prompt, nil
 	}
@@ -345,9 +345,9 @@ func deepCopyFacts(f *facts.Facts) (*facts.Facts, error) {
 	return &cp, nil
 }
 
-// assembleStage2 builds the stage-2 prompt verbatim per §7.2, selecting
+// renderDeepDivePrompt builds the deep dive prompt verbatim per §7.2, selecting
 // templates/boundary_stage2.tmpl (D8) via Stage2.
-func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
+func renderDeepDivePrompt(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
 	data := promptData{
 		SentinelMD:  sentinelMD,
 		Stage2:      true,
@@ -365,22 +365,22 @@ func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLin
 	return b.String(), nil
 }
 
-// buildStage2PromptWithinBudget is §6 step 10's PROMPT_MAX_BYTES
+// buildDeepDivePrompt is §6 step 10's PROMPT_MAX_BYTES
 // enforcement, applying the exact same exact-arithmetic technique as
-// buildStage1PromptWithinBudget, to the deep collect document instead of
+// buildTriagePrompt, to the deep collect document instead of
 // the tick facts. This is critical, not cosmetic (main's own live-gate
 // finding, round 6): a deep collect can reach FACTS_MAX_BYTES (262144) —
 // on Linux a single argv string past MAX_ARG_STRLEN (128 KiB) fails
 // execve with E2BIG, and anything past ~30KB is agy's silent empty-answer
-// cliff (§6 step 3). Unbudgeted, stage 2 fails systematically for every
+// cliff (§6 step 3). Unbudgeted, deep dive fails systematically for every
 // realistic deep collect — a 24h ZED window, exactly the case A9 exists
 // to analyze.
-func buildStage2PromptWithinBudget(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
+func buildDeepDivePrompt(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {
 	deepJSON, err := json.Marshal(deepFacts)
 	if err != nil {
 		return "", err
 	}
-	prompt, err := assembleStage2(cfg, findingJSON, string(deepJSON), historyLines, nonce, component)
+	prompt, err := renderDeepDivePrompt(cfg, findingJSON, string(deepJSON), historyLines, nonce, component)
 	if err != nil {
 		return "", err
 	}
@@ -406,7 +406,7 @@ func buildStage2PromptWithinBudget(cfg *config.Config, findingJSON string, deepF
 	if err != nil {
 		return prompt, nil
 	}
-	reducedPrompt, err := assembleStage2(cfg, findingJSON, string(reducedDeepJSON), historyLines, nonce, component)
+	reducedPrompt, err := renderDeepDivePrompt(cfg, findingJSON, string(reducedDeepJSON), historyLines, nonce, component)
 	if err != nil {
 		return prompt, nil
 	}

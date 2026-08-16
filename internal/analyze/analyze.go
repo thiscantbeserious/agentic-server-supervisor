@@ -9,7 +9,7 @@
 // model has no tools and executes nothing; the worst case of a successful
 // prompt injection here is wrong text in a report (ARCHITECTURE design
 // principle 4) — and even that is bounded by the deterministic
-// recommendation guard (§6 step 11b, stage2.go).
+// recommendation guard (§6 step 11b, deepdive.go).
 package analyze
 
 import (
@@ -141,30 +141,30 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	}
 
 	// resolved is output-only (commit ba631ca): historyKeys \ this tick's
-	// findings needs findings that do not exist until AFTER the stage-1
+	// findings needs findings that do not exist until AFTER the triage
 	// call below, so it is never part of the prompt — only newest (kept
 	// for computeResolved post-call) is needed here.
 	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryN)
 	histLines := historyProjectionLines(hist)
 	newest := newestHistory(hist)
 
-	stage1Prompt, err := buildStage1PromptWithinBudget(cfg, o.Facts, histLines, nonce)
+	triagePrompt, err := buildTriagePrompt(cfg, o.Facts, histLines, nonce)
 	if err != nil {
-		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: assemble stage1: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: assemble triage: %w", err)
 	}
 
 	promptPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("sentinel-prompt-%d.txt", pid))
 	schemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("report.schema-%d.json", pid))
 	cleanup = append(cleanup, promptPath, schemaPath)
 
-	if err := os.WriteFile(promptPath, []byte(stage1Prompt), 0o600); err != nil {
+	if err := os.WriteFile(promptPath, []byte(triagePrompt), 0o600); err != nil {
 		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write prompt: %w", err)
 	}
 	if err := os.WriteFile(schemaPath, report.SchemaJSON, 0o600); err != nil {
 		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write schema: %w", err)
 	}
 
-	rep, reason, err := runStage1(ctx, o, d, promptPath, schemaPath, stage1Prompt, logger)
+	rep, reason, err := runTriage(ctx, o, d, promptPath, schemaPath, triagePrompt, logger)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// §6 step 4: "Cancellation is not an analyzer failure ...
@@ -200,7 +200,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	return rep, nil
 }
 
-// runStage1 performs §6 steps 4-6: agy attempt 1, normalise + validate,
+// runTriage performs §6 steps 4-6: agy attempt 1, normalise + validate,
 // attempt 2 with the CORRECTION suffix (now carrying the real validation
 // error, §6 step 5) on parse/validate failure only (D7 — a dead binary,
 // non-zero exit or hard timeout never retries). agy_empty splits in two
@@ -211,7 +211,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 // window (errAgyEmptySystemic, checked via errors.Is below). An empty
 // response WITH a successful, token-spending call is plausibly a
 // transient antigravity-cli#76 drop and stays retry-eligible.
-func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
+func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
 	rep, reason, err := agyAttempt(ctx, o, d, promptPath, schemaPath, 1, logger)
 	if rep != nil {
 		return rep, "", nil
@@ -223,7 +223,7 @@ func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 		return nil, reason, err
 	}
 
-	logger.Info("stage1 invalid, retrying")
+	logger.Info("triage invalid, retrying")
 	retryPrompt := promptText + buildCorrectionBlock(err.Error())
 	if werr := os.WriteFile(promptPath, []byte(retryPrompt), 0o600); werr != nil {
 		return nil, "internal_error", fmt.Errorf("analyze: write correction prompt: %w", werr)
@@ -255,8 +255,8 @@ type agyEnvelope struct {
 }
 
 // decodeAgyEnvelope implements §6 step 4's envelope check, shared by both
-// stage 1 (agyAttempt) and stage 2 (runDeepDive) — every real agy
-// invocation now goes through --output-format json, stage 2 included, so
+// triage (agyAttempt) and deep dive (runDeepDive) — every real agy
+// invocation now goes through --output-format json, deep dive included, so
 // both call sites face the same antigravity-cli#76 empty-stdout risk.
 func decodeAgyEnvelope(out []byte) (string, error) {
 	var env agyEnvelope
@@ -289,15 +289,15 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Cancellation propagates as-is — no reason classification, no
-			// fallback, no retry (the caller, runStage1/Run, checks
+			// fallback, no retry (the caller, runTriage/Run, checks
 			// errors.Is(err, context.Canceled) and authors no report).
 			return nil, "", fmt.Errorf("analyze: agy attempt %d: %w", attempt, err)
 		}
 		reason := classifyAgyErr(err)
-		logger.Warn("stage1", "attempt", attempt, "rc", "error", "reason", reason)
+		logger.Warn("triage", "attempt", attempt, "rc", "error", "reason", reason)
 		return nil, reason, fmt.Errorf("analyze: agy attempt %d: %w", attempt, err)
 	}
-	logger.Info("stage1", "attempt", attempt, "rc", 0, "bytes", len(out))
+	logger.Info("triage", "attempt", attempt, "rc", 0, "bytes", len(out))
 
 	// Decode the envelope first (§6 step 4): status != "SUCCESS", an
 	// empty/whitespace response, or zero input_tokens is a dropped prompt
@@ -371,7 +371,7 @@ func normalizeAgyOutput(out []byte) []byte {
 }
 
 // runDeepDive performs §6 steps 8-11. Any failure along this path is
-// non-fatal (§5): the caller already holds the validated stage-1 report
+// non-fatal (§5): the caller already holds the validated triage report
 // and this function only ever enriches it in place or leaves it untouched.
 func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep *report.Report, nonce string, histLines []string, pid int, cleanup *[]string, logger *slog.Logger) {
 	appendNoDeepDiveSuffix(rep.Findings, cfg.StateDir)
@@ -397,17 +397,17 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	defer cancel()
 	deepFacts, err := d.CollectDeep(dctx, candidate.Component)
 	if err != nil || deepFacts == nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 
-	// The candidate is sent to stage 2 as-is (its dedup key included, for
+	// The candidate is sent to deep dive as-is (its dedup key included, for
 	// the operator's own reference in the prompt) but the MERGE below
 	// never trusts a key the model echoes back — this is the finding we
 	// sent, identified by our own pointer (§6 step 11).
 	findingJSON, err := json.Marshal(candidate)
 	if err != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 
@@ -420,73 +420,73 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	// comment exists to prevent a future edit from reintroducing.
 	logger.Info("deep-dive", "target", candidate.Component, "key", candidateKey)
 
-	// §6 step 10: PROMPT_MAX_BYTES applies to stage 2 exactly as it does to
-	// stage 1 — a deep collect can reach FACTS_MAX_BYTES (262144), and an
+	// §6 step 10: PROMPT_MAX_BYTES applies to deep dive exactly as it does to
+	// triage — a deep collect can reach FACTS_MAX_BYTES (262144), and an
 	// unbudgeted argv string that large fails execve outright or hits
 	// agy's silent-empty-answer cliff. Reduce a COPY, never deepFacts itself.
-	stage2Prompt, err := buildStage2PromptWithinBudget(cfg, string(findingJSON), deepFacts, histLines, nonce, candidate.Component)
+	deepDivePrompt, err := buildDeepDivePrompt(cfg, string(findingJSON), deepFacts, histLines, nonce, candidate.Component)
 	if err != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 	deepPromptPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("sentinel-deep-%d.txt", pid))
-	if err := os.WriteFile(deepPromptPath, []byte(stage2Prompt), 0o600); err != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+	if err := os.WriteFile(deepPromptPath, []byte(deepDivePrompt), 0o600); err != nil {
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 	*cleanup = append(*cleanup, deepPromptPath)
 
-	// §6 step 10: stage 2 gets its OWN schema, not report.schema.json —
+	// §6 step 10: deep dive gets its OWN schema, not report.schema.json —
 	// requiring the full report shape let the model copy a 16-hex key
 	// wrong and silently lose the enrichment (key mismatch).
-	stage2SchemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("stage2.schema-%d.json", pid))
-	if err := os.WriteFile(stage2SchemaPath, stage2SchemaJSON, 0o600); err != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+	deepDiveSchemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("deepdive.schema-%d.json", pid))
+	if err := os.WriteFile(deepDiveSchemaPath, deepDiveSchemaJSON, 0o600); err != nil {
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
-	*cleanup = append(*cleanup, stage2SchemaPath)
+	*cleanup = append(*cleanup, deepDiveSchemaPath)
 
 	cctx, cancel2 := context.WithTimeout(ctx, cfg.AgyHardTimeout)
 	defer cancel2()
-	out, rerr := d.RunAgy(cctx, o, deepPromptPath, stage2SchemaPath)
+	out, rerr := d.RunAgy(cctx, o, deepPromptPath, deepDiveSchemaPath)
 	if rerr != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
-	// No retry at stage 2 (§6 step 10) — an envelope failure here is just
-	// another non-fatal enrichment failure, same as any other stage-2
-	// problem (§5: "stage 2 fails in any way ... non-fatal").
+	// No retry at deep dive (§6 step 10) — an envelope failure here is just
+	// another non-fatal enrichment failure, same as any other deep dive
+	// problem (§5: "deep dive fails in any way ... non-fatal").
 	response, everr := decodeAgyEnvelope(out)
 	if everr != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 	normalized := normalizeAgyOutput([]byte(response))
-	stage2Rep, verr := validateStage2(normalized)
+	deepDiveRep, verr := validateDeepDiveResponse(normalized)
 	if verr != nil {
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 
 	origAnalysis, origRecommendation, origHeadline := candidate.Analysis, candidate.Recommendation, rep.Headline
-	candidate.Analysis = stage2Rep.Analysis
-	candidate.Recommendation = stage2Rep.Recommendation
-	if stage2Rep.Headline != "" {
-		// §6 step 11: the optional headline REPLACES stage 1's — the
+	candidate.Analysis = deepDiveRep.Analysis
+	candidate.Recommendation = deepDiveRep.Recommendation
+	if deepDiveRep.Headline != "" {
+		// §6 step 11: the optional headline REPLACES triage's — the
 		// notification title must not stay frozen on the shallow tick
 		// view once the deep collect reveals something worse.
-		rep.Headline = stage2Rep.Headline
+		rep.Headline = deepDiveRep.Headline
 	}
 
 	raw, merr := json.Marshal(rep)
 	if merr != nil {
 		candidate.Analysis, candidate.Recommendation, rep.Headline = origAnalysis, origRecommendation, origHeadline
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
 	if _, verr := report.Validate(raw); verr != nil {
 		candidate.Analysis, candidate.Recommendation, rep.Headline = origAnalysis, origRecommendation, origHeadline
-		logger.Info("deep-dive failed, keeping stage1")
+		logger.Info("deep-dive failed, keeping triage report")
 	}
 }
 
