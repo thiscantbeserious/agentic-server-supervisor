@@ -14,6 +14,7 @@ import (
 )
 
 func testConfig(t *testing.T, now time.Time) *config.Config {
+	loc, _ := time.LoadLocation("UTC")
 	return &config.Config{
 		StateDir:         t.TempDir(),
 		HistoryKeep:      50,
@@ -25,6 +26,7 @@ func testConfig(t *testing.T, now time.Time) *config.Config {
 		OutboxSMTPAfter:  3,
 		TickInterval:     5 * time.Minute,
 		TZ:               "UTC",
+		Loc:              loc,
 		Now:              now,
 	}
 }
@@ -37,25 +39,12 @@ func TestProcess_SameWatchFinding3Ticks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	finding := report.Finding{
-		Severity:    "watch",
-		Component:   "test",
-		Evidence:    "test evidence",
-		Explanation: "test",
-	}
+	// Create minimal valid JSON - no optional fields that would be zero-valued
+	b1 := []byte(`{"status":"WATCH","headline":"Test","body":"Test body","findings":[{"severity":"watch","component":"kernel","evidence":"test evidence","explanation":"test"}],"resolved":[]}`)
 
-	report1 := &report.Report{
-		Status:   "WATCH",
-		Headline: "Test",
-		Body:     "Test body",
-		Findings: []report.Finding{finding},
-		Resolved: []string{},
-	}
-
-	b1, _ := json.Marshal(report1)
 	d1, err := s.Process(b1)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Process failed: %v, input was: %s", err, string(b1))
 	}
 	if !d1.Notify || d1.Reason != "new_finding" || d1.SuppressedCount != 0 || d1.ActiveCount != 1 {
 		t.Errorf("Tick 1: notify=%v reason=%s suppressed=%d active=%d, want notify=true reason=new_finding",

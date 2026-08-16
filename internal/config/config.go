@@ -244,11 +244,11 @@ func Load() (*Config, error) {
 	cfg.TmpDir = loadString("TMPDIR", "/tmp")
 
 	cfg.TZ = loadString("TZ", "UTC")
-	var err error
-	cfg.Loc, err = time.LoadLocation(cfg.TZ)
+	loc, err := time.LoadLocation(cfg.TZ)
 	if err != nil {
 		return nil, errf("TZ", "not a valid time zone")
 	}
+	cfg.Loc = loc
 
 	if raw := os.Getenv("SENTINEL_NOW"); raw != "" {
 		now, err := time.Parse(time.RFC3339, raw)

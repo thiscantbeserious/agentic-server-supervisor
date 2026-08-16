@@ -66,11 +66,6 @@ func (s *Store) now() int64 {
 	return time.Now().Unix()
 }
 
-func (s *Store) loc() *time.Location {
-	loc, _ := time.LoadLocation(s.cfg.TZ)
-	return loc
-}
-
 func (s *Store) tickSeq() int64 {
 	if s.cfg.TickSeq > 0 {
 		return s.cfg.TickSeq
@@ -80,7 +75,6 @@ func (s *Store) tickSeq() int64 {
 
 func (s *Store) Process(raw []byte) (*Decision, error) {
 	now := s.now()
-	loc := s.loc()
 
 	// Parse and validate input
 	rep, err := report.Validate(raw)
@@ -98,18 +92,12 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		histTickSeq = rep.Meta.TickSeq
 	}
 
-	// b) History rotation - store raw input
-	historyPath := filepath.Join(s.cfg.StateDir, "history", fmt.Sprintf("%010d-%06d.json", now, histTickSeq))
-	if err := writeAtomic(s.cfg.StateDir, filepath.Join("history", fmt.Sprintf("%010d-%06d.json", now, histTickSeq)), raw, 0644); err == nil {
-		// Rotate history: delete all but the HISTORY_KEEP newest
-		s.rotateHistory()
-	}
-
-	// c) Stale expiry
+	// c) Stale expiry - do this first
 	s.expireStaleAlerts(now)
 
-	// d) Process findings
+	// d) Process findings - build suppressed list for annotation later
 	notified := []report.Finding{}
+	suppressedFinding := make(map[string]*report.Finding) // key -> suppressed finding
 	allClear := []string{}
 	suppressedCount := 0
 
@@ -139,11 +127,6 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			s.saveAlert(alert)
 			decision.Notify = true
 			decision.Reason = "new_finding"
-
-			// Annotate finding
-			f.Key = key
-			f.FirstSeen = alert.FirstSeen
-			f.Occurrences = 1
 			notified = append(notified, f)
 		} else {
 			// Existing finding
@@ -163,10 +146,6 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				s.saveAlert(alert)
 				decision.Notify = true
 				decision.Reason = "escalation"
-
-				f.Key = key
-				f.FirstSeen = alert.FirstSeen
-				f.Occurrences = alert.Occurrences
 				notified = append(notified, f)
 			} else {
 				// Check renotify window
@@ -184,24 +163,29 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 						decision.Notify = true
 						decision.Reason = "renotify"
 					}
-
-					f.Key = key
-					f.FirstSeen = alert.FirstSeen
-					f.Occurrences = alert.Occurrences
 					notified = append(notified, f)
 				} else {
 					// Suppressed
 					s.saveAlert(alert)
 					suppressedCount++
-					f.Key = key
-					f.FirstSeen = alert.FirstSeen
-					f.Occurrences = alert.Occurrences
+					fCopy := f
+					suppressedFinding[key] = &fCopy
 				}
 			}
 		}
 	}
 
-	// e) Resolved / all-clear
+	// e) Resolved / all-clear - only consider alerts NOT touched in step (d)
+	// Collect keys of notified findings
+	notifiedKeys := make(map[string]bool)
+	for _, f := range notified {
+		key := f.Key
+		if key == "" {
+			key = dedup.Key(f.Component, dedup.EvidenceCore(f.Evidence))
+		}
+		notifiedKeys[key] = true
+	}
+
 	for _, res := range rep.Resolved {
 		res = strings.TrimSpace(strings.ToLower(res))
 		if res == "" {
@@ -216,38 +200,32 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				continue
 			}
 
-			// Check if this alert was touched in step (d)
-			touched := false
-			for _, notif := range notified {
-				if notif.Key == alert.Key {
-					touched = true
-					break
-				}
+			// Skip if this alert was touched in step (d)
+			if notifiedKeys[alert.Key] {
+				continue
 			}
 
-			if !touched {
-				normHeadline := strings.TrimSpace(strings.ToLower(alert.Headline))
-				if normHeadline == res {
-					// Match - add to all-clear and delete
-					found := false
-					for _, existing := range allClear {
-						if existing == alert.Headline {
-							found = true
-							break
-						}
+			normHeadline := strings.TrimSpace(strings.ToLower(alert.Headline))
+			if normHeadline == res {
+				// Match - add to all-clear and delete
+				found := false
+				for _, existing := range allClear {
+					if existing == alert.Headline {
+						found = true
+						break
 					}
-					if !found {
-						allClear = append(allClear, alert.Headline)
-					}
-					os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
 				}
+				if !found {
+					allClear = append(allClear, alert.Headline)
+				}
+				os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
 			}
 		}
 	}
 
 	// f) Heartbeat check
 	hbPath := filepath.Join(s.cfg.StateDir, "heartbeat")
-	hbTime := time.Unix(now, 0).In(loc)
+	hbTime := time.Unix(now, 0).In(s.cfg.Loc)
 	hbStr := hbTime.Format("2006-01-02")
 
 	hbData, _ := os.ReadFile(hbPath)
@@ -290,7 +268,13 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			suffix := fmt.Sprintf(" (+%d more)", len(allClear)-1)
 			full := headline + suffix
 			if len([]rune(full)) > 80 {
-				headline = headline[:min(len([]rune(headline)), 80-len([]rune(suffix))-1)] + suffix
+				runes := []rune(headline)
+				keep := 80 - len([]rune(suffix)) - 1
+				if keep > 0 {
+					headline = string(runes[:keep]) + suffix
+				} else {
+					headline = string(runes[:min(len(runes), 80)])
+				}
 			} else {
 				headline = full
 			}
@@ -322,17 +306,18 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		// Count history files for body
 		histDir := filepath.Join(s.cfg.StateDir, "history")
 		histFiles, _ := os.ReadDir(histDir)
+		histCount := len(histFiles)
 		oldest := ""
-		if len(histFiles) > 0 {
+		if histCount > 0 {
 			oldest = histFiles[0].Name()
 		}
 
-		rep.Body = fmt.Sprintf("No open findings. %d ticks since", len(histFiles))
+		rep.Body = fmt.Sprintf("No open findings. %d ticks since", histCount)
 		if oldest != "" {
-			// Parse oldest timestamp
+			// Parse oldest timestamp - format is XXXXXXXXXX-XXXXXX.json
 			parts := strings.Split(oldest, "-")
 			if len(parts) >= 1 {
-				rep.Body = fmt.Sprintf("No open findings. %d ticks since %s.", len(histFiles), oldest[:10])
+				rep.Body = fmt.Sprintf("No open findings. %d ticks since %s.", histCount, oldest[:10])
 			}
 		}
 
@@ -341,6 +326,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 
 	default:
 		// Rule 4: suppressed
+		decision.Reason = "suppressed"
 		rep.Status = "OK"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = []string{}
@@ -356,45 +342,75 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	// Always update heartbeat mtime
 	os.WriteFile(hbPath, []byte(hbStr+"\n"), 0644)
 
-	// Annotate notified and suppressed findings in history
-	s.annotateHistory(historyPath, rep)
+	// b) History write - AFTER step (d), with annotations
+	s.writeAnnotatedHistory(now, histTickSeq, rep, suppressedFinding)
 
 	return decision, nil
 }
 
-func (s *Store) annotateHistory(histPath string, rep *report.Report) {
-	// Read the history file and annotate findings with key/first_seen/occurrences
-	data, err := os.ReadFile(histPath)
-	if err != nil {
-		return
-	}
+func (s *Store) writeAnnotatedHistory(now int64, tickSeq int64, rep *report.Report, suppressedFinding map[string]*report.Finding) {
+	// Merge notified and suppressed findings with annotations from active-alert records
+	allFindings := append([]report.Finding{}, rep.Findings...)
 
-	var histRep report.Report
-	if err := json.Unmarshal(data, &histRep); err != nil {
-		return
-	}
-
-	// Annotate all findings (notified and suppressed)
-	for i, f := range histRep.Findings {
+	// Add suppressed findings in their original order
+	for _, f := range rep.Findings {
 		key := f.Key
 		if key == "" {
 			key = dedup.Key(f.Component, dedup.EvidenceCore(f.Evidence))
 		}
+		// Note: this won't duplicate notified findings since they're already in allFindings
+	}
+
+	// Now add suppressedFindings (those that weren't in the notified list)
+	for key, suppressedF := range suppressedFinding {
+		allFindings = append(allFindings, *suppressedF)
+		_ = key // for clarity
+	}
+
+	// Annotate all findings with key/first_seen/occurrences
+	for i := range allFindings {
+		key := allFindings[i].Key
+		if key == "" {
+			key = dedup.Key(allFindings[i].Component, dedup.EvidenceCore(allFindings[i].Evidence))
+		}
 
 		if alert, exists := s.loadAlert(key); exists {
-			histRep.Findings[i].Key = alert.Key
-			histRep.Findings[i].FirstSeen = alert.FirstSeen
-			histRep.Findings[i].Occurrences = alert.Occurrences
+			allFindings[i].Key = alert.Key
+			allFindings[i].FirstSeen = alert.FirstSeen
+			allFindings[i].Occurrences = alert.Occurrences
 		} else {
-			histRep.Findings[i].Key = key
-			histRep.Findings[i].FirstSeen = time.Unix(s.now(), 0).Unix()
-			histRep.Findings[i].Occurrences = 1
+			allFindings[i].Key = key
+			allFindings[i].FirstSeen = now
+			allFindings[i].Occurrences = 1
 		}
 	}
 
-	// Write annotated version back atomically
-	annotated, _ := json.Marshal(histRep)
-	writeAtomic(s.cfg.StateDir, filepath.Join("history", filepath.Base(histPath)), annotated, 0644)
+	// Create annotated history document
+	histRep := report.Report{
+		Status:   rep.Status,
+		Headline: rep.Headline,
+		Body:     rep.Body,
+		Findings: allFindings,
+		Resolved: rep.Resolved,
+		Meta:     rep.Meta,
+	}
+
+	// Write atomically with cleanup of temp files
+	histPath := filepath.Join("history", fmt.Sprintf("%010d-%06d.json", now, tickSeq))
+	data, _ := json.Marshal(histRep)
+	writeAtomic(s.cfg.StateDir, histPath, data, 0644)
+
+	// Clean up any stray temp files from the history dir
+	histDir := filepath.Join(s.cfg.StateDir, "history")
+	files, _ := os.ReadDir(histDir)
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), ".tmp-") {
+			os.Remove(filepath.Join(histDir, f.Name()))
+		}
+	}
+
+	// Rotate history: delete all but the HISTORY_KEEP newest
+	s.rotateHistory()
 }
 
 func (s *Store) rotateHistory() {
@@ -402,13 +418,14 @@ func (s *Store) rotateHistory() {
 	files, _ := os.ReadDir(histDir)
 
 	if len(files) > s.cfg.HistoryKeep {
+		// Sort by name descending (newest first), then delete oldest
 		sort.Slice(files, func(i, j int) bool {
-			return files[i].Name() < files[j].Name()
+			return files[i].Name() > files[j].Name()
 		})
 
 		toDelete := len(files) - s.cfg.HistoryKeep
 		for i := 0; i < toDelete; i++ {
-			os.Remove(filepath.Join(histDir, files[i].Name()))
+			os.Remove(filepath.Join(histDir, files[len(files)-1-i].Name()))
 		}
 	}
 }
@@ -449,7 +466,7 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 	result := make([]json.RawMessage, 0, n)
 	for i := 0; i < n; i++ {
 		data, err := os.ReadFile(filepath.Join(histDir, files[i].Name()))
-		if err == nil {
+		if err == nil && json.Valid(data) {
 			result = append(result, json.RawMessage(data))
 		}
 	}
