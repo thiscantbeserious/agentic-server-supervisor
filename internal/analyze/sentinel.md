@@ -37,12 +37,62 @@ otherwise any `watch` -> WATCH, otherwise OK.
 
 ## Trend
 
-HISTORY contains the previous reports, oldest first, with the stable `key` of
-each finding. A key you see again is a repeat: say how many ticks it has been
-present and whether it is worsening, and escalate `watch` to `alert` when the
-underlying counter has grown. A key from HISTORY that has no counterpart in the
-current FACTS is resolved: list its headline in `resolved`. Do not list anything
-in `resolved` that you did not see in HISTORY.
+HISTORY contains the previous reports, oldest first. Each past finding carries
+its stable `key`, its `evidence` line, `occurrences` (how many ticks it has been
+seen) and `first_seen` (epoch seconds).
+
+A key you see again is a repeat. Use `occurrences` and `first_seen` to say how
+long it has been present - do not count HISTORY lines. To decide whether it is
+worsening, compare the counters inside the past `evidence` against the matching
+line in the current FACTS: `cksum_errors=1` last tick and `cksum_errors=7` now
+is growth. Escalate `watch` to `alert` only when a counter has actually grown,
+not merely because the finding repeated.
+
+Do not emit `resolved` yourself beyond an empty list. Which findings have gone
+away is computed deterministically after your answer and filled in for you.
+
+## Consistency
+
+Be conservative and stable. A value inside its normal operating range - disk
+below 90 percent, a temperature inside the sensor's own limits, load below the
+core count, memory with free headroom - is not a finding. If HISTORY shows you
+did not report a value last tick and it has not changed materially, do not
+start reporting it now. A finding appears because something changed, not
+because you looked harder this time. Every flip between reporting and not
+reporting produces a resolved-then-reappearing alert, which is exactly the
+spam this supervisor exists to avoid.
+
+## Example
+
+Illustration only - never treat it as FACTS.
+
+FACTS contained one ZED event on a mirrored pool during a scrub:
+
+    eid=1841 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1
+
+HISTORY had no matching key, SMART was clean, no kernel errors.
+
+The right finding:
+
+    severity: watch
+    component: zfs
+    evidence: eid=1841 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1
+    explanation: One checksum error was detected and corrected on a single
+      mirror member during a scrub. The mirror partner is clean, so redundancy
+      is intact and no data was lost.
+    analysis: Single event, not a trend: counter at 1, first occurrence, no
+      read or write errors, no SMART attribute movement, no kernel I/O errors
+      on that device. A scrub is when latent bit flips surface, so one
+      corrected error here is expected behaviour rather than a failing disk.
+    recommendation: Wait for the scrub to finish. If the counter is still 1 and
+      SMART reallocated and pending sectors stay at 0, clearing the counter
+      with zpool clear hotstore is reasonable and the next scrub confirms it.
+      If the counter rises, or SMART sectors move, plan replacement of that
+      member instead. This supervisor executes nothing.
+
+Note the shape: name the redundancy state, ground every claim in a value that
+is actually in FACTS, and make the recommendation conditional with a named
+command. That is the standard for every finding, not only ZFS.
 
 ## Components
 

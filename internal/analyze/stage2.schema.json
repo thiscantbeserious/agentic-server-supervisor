@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["analysis", "recommendation"],
+  "properties": {
+    "analysis":       { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "recommendation": { "type": "string", "minLength": 1, "maxLength": 800 },
+    "headline":       { "type": "string", "minLength": 1, "maxLength": 80 }
+  }
+}

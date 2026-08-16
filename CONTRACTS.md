@@ -116,6 +116,7 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `AGY_PRINT_TIMEOUT` | `120s` | analyze |
 | `AGY_HARD_TIMEOUT` | `150s` (raised to print+30s if lower) | analyze |
 | `HISTORY_N` | `5` | analyze |
+| `PROMPT_MAX_BYTES` | `20000` (whole assembled prompt; agy drops larger prompts silently) | analyze |
 | `HISTORY_KEEP` | `50` | state |
 | `DEEP_ENABLED` | `1` | analyze |
 | `DEEP_TIMEOUT` | `30s` (overrides `SECTION_TIMEOUT` for deep collects) | analyze |

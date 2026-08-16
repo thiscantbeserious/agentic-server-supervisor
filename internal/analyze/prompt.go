@@ -16,12 +16,20 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// sentinelMD is the embedded role/instructions document (§7.3). go:embed
+// sentinelMDRaw is the embedded role/instructions document (§7.3). go:embed
 // cannot escape its package directory (C1), so it lives here rather than
 // under internal/report or being read from disk.
 //
 //go:embed sentinel.md
-var sentinelMD string
+var sentinelMDRaw string
+
+// sentinelMD trims the file's own trailing newline before it goes into
+// header.tmpl, which supplies the blank-line separator before "=====
+// SECURITY BOUNDARY =====" itself (§7.1: "${SENTINEL_MD}\n\n===== SECURITY
+// BOUNDARY ====="). Without the trim, the file's trailing "\n" plus the
+// template's own blank line double up into two blank lines instead of one
+// (t4-review round 3: byte-diffed against §7.1, one blank line off).
+var sentinelMD = strings.TrimRight(sentinelMDRaw, "\n")
 
 // templatesFS embeds the stage-1/stage-2 prompt skeletons (§7.1, §7.2).
 // text/template, not html/template: the latter HTML-escapes the payload
@@ -50,14 +58,6 @@ type promptData struct {
 	Component   string
 }
 
-const correctionBlock = `===== CORRECTION =====
-Your previous answer was not a valid report document. Output ONE JSON object
-only - no prose, no markdown fence, no explanation before or after it. It must
-match the schema exactly: required keys status, headline, body, findings,
-resolved; no additional keys; status must equal the highest finding severity
-(alert -> ALERT, watch -> WATCH, otherwise OK). Do not emit "key", "meta",
-"first_seen" or "occurrences".`
-
 // newNonce returns 16 lowercase hex chars from 8 bytes of crypto/rand (§6
 // step 1) — a fresh, unguessable fence token per Run so injected data
 // cannot pre-empt the fence markers.
@@ -69,13 +69,38 @@ func newNonce() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// truncRunes truncates s to at most n runes, keeping the prefix. Used for
+// the HISTORY evidence projection (160 runes) and the resolved-evidence
+// rendering (120 runes) — unlike the fallback's newest-preserving
+// truncation (fallback.go's truncLinesKeepNewest), these are plain prefix
+// truncations of a single already-short string.
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // historyFinding and historyProjection are the compact per-report
 // projection injected into HISTORY (§6 step 2): {status, headline,
-// findings:[{severity,component,key}], resolved}.
+// findings:[{severity,component,key,evidence,occurrences,first_seen}],
+// resolved}.
+//
+// evidence/occurrences/first_seen are the load-bearing fix from the design
+// review (Fable + agy, independently): dedup.EvidenceCore deliberately
+// masks digits (C6), so "cksum_errors=1" and "cksum_errors=7" share the
+// same key — the key alone proves recurrence and can NEVER prove growth.
+// sentinel.md's Trend section asks the model to compare counters between
+// HISTORY and FACTS; without the evidence text that comparison is
+// impossible and the model answers from imagination.
 type historyFinding struct {
-	Severity  string `json:"severity"`
-	Component string `json:"component"`
-	Key       string `json:"key"`
+	Severity    string `json:"severity"`
+	Component   string `json:"component"`
+	Key         string `json:"key"`
+	Evidence    string `json:"evidence"`
+	Occurrences int    `json:"occurrences,omitempty"`
+	FirstSeen   int64  `json:"first_seen,omitempty"`
 }
 
 type historyProjection struct {
@@ -85,13 +110,15 @@ type historyProjection struct {
 	Resolved []string         `json:"resolved"`
 }
 
-// historyLines returns the newest n history documents from
-// ${stateDir}/history, oldest first, each rendered as one compact JSON
-// line. Newest is determined by sort.Strings of the filenames (the
-// <unix-seconds,10>-<tick_seq,6>.json naming written by state sorts
-// chronologically as strings). Unreadable or unparseable files are skipped
-// silently (§6 step 2); a missing dir yields nil.
-func historyLines(stateDir string, n int) []string {
+// loadHistoryReports returns the newest n parsed history documents from
+// ${stateDir}/history/*.json, oldest first. Newest is determined by
+// sort.Strings of the filenames (the <unix-seconds,10>-<tick_seq,6>.json
+// naming written by state sorts chronologically as strings). The "*.json"
+// filter matters: state writes atomically via ".tmp-*" files in the same
+// directory (C4), and letting one into the window evicts a real report.
+// Unreadable or unparseable files are skipped silently (§6 step 2); a
+// missing dir yields nil.
+func loadHistoryReports(stateDir string, n int) []report.Report {
 	dir := filepath.Join(stateDir, "history")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -99,7 +126,7 @@ func historyLines(stateDir string, n int) []string {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		names = append(names, e.Name())
@@ -109,7 +136,7 @@ func historyLines(stateDir string, n int) []string {
 		names = names[len(names)-n:]
 	}
 
-	lines := make([]string, 0, len(names))
+	out := make([]report.Report, 0, len(names))
 	for _, name := range names {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
@@ -119,34 +146,106 @@ func historyLines(stateDir string, n int) []string {
 		if err := json.Unmarshal(b, &r); err != nil {
 			continue
 		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// historyProjectionLines renders each parsed history report as one
+// compact JSON line for the HISTORY prompt section (§6 step 2), oldest
+// first — hist is expected already in that order (loadHistoryReports's).
+func historyProjectionLines(hist []report.Report) []string {
+	lines := make([]string, 0, len(hist))
+	for _, r := range hist {
 		proj := historyProjection{
-			Status:   r.Status,
-			Headline: r.Headline,
-			Findings: []historyFinding{},
-			Resolved: r.Resolved,
+			Status: r.Status, Headline: r.Headline,
+			Findings: []historyFinding{}, Resolved: r.Resolved,
 		}
 		for _, f := range r.Findings {
 			proj.Findings = append(proj.Findings, historyFinding{
 				Severity: f.Severity, Component: f.Component, Key: f.Key,
+				Evidence:    truncRunes(f.Evidence, 160),
+				Occurrences: f.Occurrences, FirstSeen: f.FirstSeen,
 			})
 		}
 		if proj.Resolved == nil {
 			proj.Resolved = []string{}
 		}
-		line, err := json.Marshal(proj)
+		b, err := json.Marshal(proj)
 		if err != nil {
 			continue
 		}
-		lines = append(lines, string(line))
+		lines = append(lines, string(b))
 	}
 	return lines
+}
+
+// newestHistory returns the last (= most recent) report in an
+// oldest-first history slice, or nil if there is none.
+func newestHistory(hist []report.Report) *report.Report {
+	if len(hist) == 0 {
+		return nil
+	}
+	return &hist[len(hist)-1]
+}
+
+// computeResolved is §6 step 7's Go-computed `resolved`: the set
+// difference historyKeys \ currentKeys, using ONLY the newest history
+// document, rendered as the past finding's evidence truncated to 120
+// runes, sorted for determinism, capped at the schema's 20 items. This
+// overwrites whatever the model emitted in its own "resolved" field —
+// set arithmetic over data analyze already holds does not belong in a
+// probabilistic component.
+func computeResolved(newest *report.Report, current []report.Finding) []string {
+	if newest == nil {
+		return []string{}
+	}
+	currentKeys := make(map[string]bool, len(current))
+	for _, f := range current {
+		if f.Key != "" {
+			currentKeys[f.Key] = true
+		}
+	}
+	var out []string
+	for _, f := range newest.Findings {
+		if f.Key == "" || currentKeys[f.Key] {
+			continue
+		}
+		out = append(out, truncRunes(f.Evidence, 120))
+	}
+	sort.Strings(out)
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// buildCorrectionBlock is §6 step 5's CORRECTION suffix, appended verbatim
+// to the stage-1 prompt on retry. validationErr is the concrete error the
+// first attempt produced (json.Unmarshal or report.Validate's own error
+// text), truncated to 300 runes — --print mode is stateless, so without
+// the actual error "your previous answer was not valid" carries no
+// information and the retry is a re-roll rather than a correction. The
+// error text is generated by our own validator and contains no facts
+// content, so C7 is not at risk.
+func buildCorrectionBlock(validationErr string) string {
+	return "\n\n===== CORRECTION =====\n" +
+		"Your previous answer failed validation: " + truncRunes(validationErr, 300) + "\n" +
+		`Output ONE JSON object only - no prose, no markdown fence, no explanation
+before or after it. It must match the schema exactly: required keys status,
+headline, body, findings, resolved; no additional keys; status must equal the
+highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
+not emit "key", "meta", "first_seen" or "occurrences".`
 }
 
 // assembleStage1 builds the stage-1 prompt verbatim per §7.1. The
 // SECURITY BOUNDARY paragraph itself lives in
 // templates/boundary_stage1.tmpl — every substitution into prompt text,
 // nonce included, goes through the one text/template engine.
-func assembleStage1(cfg *config.Config, f *facts.Facts, hist []string, nonce string) (string, error) {
+func assembleStage1(cfg *config.Config, f *facts.Facts, historyLines []string, nonce string) (string, error) {
 	factsJSON, err := json.Marshal(f)
 	if err != nil {
 		return "", err
@@ -155,7 +254,7 @@ func assembleStage1(cfg *config.Config, f *facts.Facts, hist []string, nonce str
 		SentinelMD: sentinelMD,
 		Nonce:      nonce,
 		HistoryN:   cfg.HistoryN,
-		History:    strings.Join(hist, "\n"),
+		History:    strings.Join(historyLines, "\n"),
 		FactsJSON:  string(factsJSON),
 	}
 	var b strings.Builder
@@ -167,13 +266,13 @@ func assembleStage1(cfg *config.Config, f *facts.Facts, hist []string, nonce str
 
 // assembleStage2 builds the stage-2 prompt verbatim per §7.2, selecting
 // templates/boundary_stage2.tmpl (D8) via Stage2.
-func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, hist []string, nonce, component string) (string, error) {
+func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, historyLines []string, nonce, component string) (string, error) {
 	data := promptData{
 		SentinelMD:  sentinelMD,
 		Stage2:      true,
 		Nonce:       nonce,
 		HistoryN:    cfg.HistoryN,
-		History:     strings.Join(hist, "\n"),
+		History:     strings.Join(historyLines, "\n"),
 		FindingJSON: findingJSON,
 		DeepJSON:    deepJSON,
 		Component:   component,
@@ -183,13 +282,4 @@ func assembleStage2(cfg *config.Config, findingJSON, deepJSON string, hist []str
 		return "", err
 	}
 	return b.String(), nil
-}
-
-// truncRunes truncates s to at most n runes, keeping the prefix.
-func truncRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
 }

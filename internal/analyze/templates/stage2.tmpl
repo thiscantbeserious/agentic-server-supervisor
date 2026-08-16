@@ -10,14 +10,16 @@
 <<<END_DEEP_{{.Nonce}}>>>
 
 ===== TASK =====
-Classify this single finding, then output ONE JSON object matching the report
-schema containing exactly this one finding, with "analysis" and "recommendation"
-filled in and every other field copied unchanged from the finding above,
-including "key". Do not change "severity". Set "status", "headline" and "body"
-consistently with that one finding; they will be discarded.
+Classify the single finding above, then output ONE JSON object with exactly the
+keys "analysis" and "recommendation", plus "headline" only if the deep context
+changes what the operator most needs to know. Nothing else - no finding object,
+no "key", no "status", no "severity".
 "analysis": transient event vs. developing trend, state of redundancy, blast
 radius - grounded only in the evidence and deep context above.
 "recommendation": one concrete, CONDITIONAL proposal ("if X still holds after Y,
 then Z; if the counter rises, then W"). Name the command you would propose, and
 state that this supervisor executes nothing. Never recommend a blind action.
+"headline" (optional): at most 80 characters, replacing the summary line written
+before this deep context existed. Supply it only when the deep context changes
+the picture materially.
 No prose outside the JSON object, and no markdown anywhere in the text fields.{{end}}

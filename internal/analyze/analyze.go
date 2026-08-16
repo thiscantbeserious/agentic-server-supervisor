@@ -4,11 +4,12 @@
 // deterministic fallback, and the two-stage (A9) deep-dive analysis.
 //
 // This package is the security boundary between attacker-controlled log
-// text and an LLM prompt: the FACTS/HISTORY/FINDING/DEEP fences and the
-// per-run nonce (§6, §7) are load-bearing, not decoration. The model has no
-// tools and executes nothing; the worst case of a successful prompt
-// injection here is wrong text in a report (ARCHITECTURE design
-// principle 4).
+// text and an LLM prompt: the FACTS/HISTORY/RESOLVED/FINDING/DEEP fences
+// and the per-run nonce (§6, §7) are load-bearing, not decoration. The
+// model has no tools and executes nothing; the worst case of a successful
+// prompt injection here is wrong text in a report (ARCHITECTURE design
+// principle 4) — and even that is bounded by the deterministic
+// recommendation guard (§6 step 11b, stage2.go).
 package analyze
 
 import (
@@ -101,16 +102,33 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 		}
 	}()
 
-	nonce, err := newNonce()
-	if err != nil {
-		return buildFallback(cfg, o.Seq, "agy_failed", o.Facts, logger), fmt.Errorf("analyze: nonce: %w", err)
+	// §9: "It never panics and never writes outside the paths in §8." A
+	// nil RunAgy (misconstructed Deps) is not a documented failure mode,
+	// but the alternative is a nil-pointer panic on the first call below —
+	// treat it the same as agy being missing rather than crashing.
+	if d.RunAgy == nil {
+		return buildFallback(cfg, o.Seq, "agy_missing", o.Facts, logger), errors.New("analyze: Deps.RunAgy is nil")
 	}
 
-	hist := historyLines(cfg.StateDir, cfg.HistoryN)
-
-	stage1Prompt, err := assembleStage1(cfg, o.Facts, hist, nonce)
+	// internal_error (not agy_failed) below: these paths fail before agy
+	// is ever invoked, so blaming "the analyzer exited non-zero" would send
+	// a 3am reader to check agy's health for a fault that is ours.
+	nonce, err := newNonce()
 	if err != nil {
-		return buildFallback(cfg, o.Seq, "agy_failed", o.Facts, logger), fmt.Errorf("analyze: assemble stage1: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: nonce: %w", err)
+	}
+
+	// resolved is output-only (commit ba631ca): historyKeys \ this tick's
+	// findings needs findings that do not exist until AFTER the stage-1
+	// call below, so it is never part of the prompt — only newest (kept
+	// for computeResolved post-call) is needed here.
+	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryN)
+	histLines := historyProjectionLines(hist)
+	newest := newestHistory(hist)
+
+	stage1Prompt, err := assembleStage1(cfg, o.Facts, histLines, nonce)
+	if err != nil {
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: assemble stage1: %w", err)
 	}
 
 	promptPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("sentinel-prompt-%d.txt", pid))
@@ -118,10 +136,10 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cleanup = append(cleanup, promptPath, schemaPath)
 
 	if err := os.WriteFile(promptPath, []byte(stage1Prompt), 0o600); err != nil {
-		return buildFallback(cfg, o.Seq, "agy_failed", o.Facts, logger), fmt.Errorf("analyze: write prompt: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write prompt: %w", err)
 	}
 	if err := os.WriteFile(schemaPath, report.SchemaJSON, 0o600); err != nil {
-		return buildFallback(cfg, o.Seq, "agy_failed", o.Facts, logger), fmt.Errorf("analyze: write schema: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write schema: %w", err)
 	}
 
 	rep, reason, err := runStage1(ctx, o, d, promptPath, schemaPath, stage1Prompt, logger)
@@ -129,26 +147,31 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 		return buildFallback(cfg, o.Seq, reason, o.Facts, logger), err
 	}
 
-	// §6 step 7: inject keys and meta; drop any model-supplied ones.
+	// §6 step 7: inject keys, meta and resolved; drop any model-supplied
+	// key/first_seen/occurrences/meta/resolved.
 	for i := range rep.Findings {
 		rep.Findings[i].Key = dedup.Key(rep.Findings[i].Component, rep.Findings[i].Evidence)
 		rep.Findings[i].FirstSeen = 0
 		rep.Findings[i].Occurrences = 0
 	}
 	rep.Meta = &report.Meta{Hostname: cfg.Hostname, TickSeq: o.Seq}
+	rep.Resolved = computeResolved(newest, rep.Findings)
 
 	if !cfg.DeepEnabled || rep.Status == "OK" {
+		guardRecommendations(rep)
 		return rep, nil
 	}
 
-	runDeepDive(ctx, cfg, o, d, rep, nonce, hist, pid, &cleanup, logger)
+	runDeepDive(ctx, cfg, o, d, rep, nonce, histLines, pid, &cleanup, logger)
+	guardRecommendations(rep)
 
 	return rep, nil
 }
 
 // runStage1 performs §6 steps 4-6: agy attempt 1, normalise + validate,
-// attempt 2 with the CORRECTION suffix on parse/validate failure only
-// (D7 — a dead binary, non-zero exit or hard timeout never retries).
+// attempt 2 with the CORRECTION suffix (now carrying the real validation
+// error, §6 step 5) on parse/validate failure only (D7 — a dead binary,
+// non-zero exit or hard timeout never retries).
 func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
 	rep, reason, err := agyAttempt(ctx, o, d, promptPath, schemaPath, 1, logger)
 	if rep != nil {
@@ -160,8 +183,9 @@ func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 	}
 
 	logger.Info("stage1 invalid, retrying")
-	if werr := os.WriteFile(promptPath, []byte(promptText+"\n\n"+correctionBlock), 0o600); werr != nil {
-		return nil, reason, fmt.Errorf("analyze: write correction prompt: %w", werr)
+	retryPrompt := promptText + buildCorrectionBlock(err.Error())
+	if werr := os.WriteFile(promptPath, []byte(retryPrompt), 0o600); werr != nil {
+		return nil, "internal_error", fmt.Errorf("analyze: write correction prompt: %w", werr)
 	}
 
 	rep2, reason2, err2 := agyAttempt(ctx, o, d, promptPath, schemaPath, 2, logger)
@@ -175,7 +199,10 @@ func runStage1(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 }
 
 // agyAttempt runs one d.RunAgy call and classifies its outcome. A non-nil
-// report means success; otherwise reason names why, and err is non-nil.
+// report means success; otherwise reason names why, and err is non-nil and,
+// for invalid_json/schema_invalid, carries the concrete validation error
+// text (§6 step 5's ${VALIDATION_ERROR}) rather than a wrapped/prefixed
+// message, so the CORRECTION block can quote it directly.
 func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath string, attempt int, logger *slog.Logger) (*report.Report, string, error) {
 	cctx, cancel := context.WithTimeout(ctx, o.Cfg.AgyHardTimeout)
 	defer cancel()
@@ -197,7 +224,7 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	if len(normalized) > 0 && json.Valid(normalized) {
 		reason = "schema_invalid"
 	}
-	return nil, reason, fmt.Errorf("analyze: agy attempt %d: %w", attempt, verr)
+	return nil, reason, verr
 }
 
 func classifyAgyErr(err error) string {
@@ -251,7 +278,7 @@ func normalizeAgyOutput(out []byte) []byte {
 // runDeepDive performs §6 steps 8-11. Any failure along this path is
 // non-fatal (§5): the caller already holds the validated stage-1 report
 // and this function only ever enriches it in place or leaves it untouched.
-func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep *report.Report, nonce string, hist []string, pid int, cleanup *[]string, logger *slog.Logger) {
+func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep *report.Report, nonce string, histLines []string, pid int, cleanup *[]string, logger *slog.Logger) {
 	appendNoDeepDiveSuffix(rep.Findings, cfg.StateDir)
 
 	candidateKey, ok := selectCandidate(cfg.StateDir, rep.Findings)
@@ -279,6 +306,10 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		return
 	}
 
+	// The candidate is sent to stage 2 as-is (its dedup key included, for
+	// the operator's own reference in the prompt) but the MERGE below
+	// never trusts a key the model echoes back — this is the finding we
+	// sent, identified by our own pointer (§6 step 11).
 	findingJSON, err := json.Marshal(candidate)
 	if err != nil {
 		logger.Info("deep-dive failed, keeping stage1")
@@ -290,9 +321,16 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		return
 	}
 
-	logger.Info("deep-dive", "component", candidate.Component, "key", candidateKey)
+	// "component" is deliberately not used as an attr key here: the C7
+	// handler (internal/logging) special-cases any attr literally named
+	// "component" and diverts it into the line's own component SLOT
+	// instead of printing it as k=v (that slot is already "analyze" for
+	// this whole package) — using it here would silently overwrite the
+	// line's component with "zfs"/"kernel"/etc, exactly the bug this
+	// comment exists to prevent a future edit from reintroducing.
+	logger.Info("deep-dive", "target", candidate.Component, "key", candidateKey)
 
-	stage2Prompt, err := assembleStage2(cfg, string(findingJSON), string(deepJSON), hist, nonce, candidate.Component)
+	stage2Prompt, err := assembleStage2(cfg, string(findingJSON), string(deepJSON), histLines, nonce, candidate.Component)
 	if err != nil {
 		logger.Info("deep-dive failed, keeping stage1")
 		return
@@ -304,45 +342,49 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	}
 	*cleanup = append(*cleanup, deepPromptPath)
 
-	schemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("report.schema-%d.json", pid))
+	// §6 step 10: stage 2 gets its OWN schema, not report.schema.json —
+	// requiring the full report shape let the model copy a 16-hex key
+	// wrong and silently lose the enrichment (key mismatch).
+	stage2SchemaPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("stage2.schema-%d.json", pid))
+	if err := os.WriteFile(stage2SchemaPath, stage2SchemaJSON, 0o600); err != nil {
+		logger.Info("deep-dive failed, keeping stage1")
+		return
+	}
+	*cleanup = append(*cleanup, stage2SchemaPath)
+
 	cctx, cancel2 := context.WithTimeout(ctx, cfg.AgyHardTimeout)
 	defer cancel2()
-	out, rerr := d.RunAgy(cctx, o, deepPromptPath, schemaPath)
+	out, rerr := d.RunAgy(cctx, o, deepPromptPath, stage2SchemaPath)
 	if rerr != nil {
 		logger.Info("deep-dive failed, keeping stage1")
 		return
 	}
+	// No retry at stage 2 (§6 step 10).
 	normalized := normalizeAgyOutput(out)
-	rep2, verr := report.Validate(normalized)
+	stage2Rep, verr := validateStage2(normalized)
 	if verr != nil {
 		logger.Info("deep-dive failed, keeping stage1")
 		return
 	}
 
-	var merged *report.Finding
-	for i := range rep2.Findings {
-		if rep2.Findings[i].Key == candidateKey {
-			merged = &rep2.Findings[i]
-			break
-		}
+	origAnalysis, origRecommendation, origHeadline := candidate.Analysis, candidate.Recommendation, rep.Headline
+	candidate.Analysis = stage2Rep.Analysis
+	candidate.Recommendation = stage2Rep.Recommendation
+	if stage2Rep.Headline != "" {
+		// §6 step 11: the optional headline REPLACES stage 1's — the
+		// notification title must not stay frozen on the shallow tick
+		// view once the deep collect reveals something worse.
+		rep.Headline = stage2Rep.Headline
 	}
-	if merged == nil || (merged.Analysis == "" && merged.Recommendation == "") {
-		logger.Info("deep-dive failed, keeping stage1")
-		return
-	}
-
-	origAnalysis, origRecommendation := candidate.Analysis, candidate.Recommendation
-	candidate.Analysis = merged.Analysis
-	candidate.Recommendation = merged.Recommendation
 
 	raw, merr := json.Marshal(rep)
 	if merr != nil {
-		candidate.Analysis, candidate.Recommendation = origAnalysis, origRecommendation
+		candidate.Analysis, candidate.Recommendation, rep.Headline = origAnalysis, origRecommendation, origHeadline
 		logger.Info("deep-dive failed, keeping stage1")
 		return
 	}
 	if _, verr := report.Validate(raw); verr != nil {
-		candidate.Analysis, candidate.Recommendation = origAnalysis, origRecommendation
+		candidate.Analysis, candidate.Recommendation, rep.Headline = origAnalysis, origRecommendation, origHeadline
 		logger.Info("deep-dive failed, keeping stage1")
 	}
 }

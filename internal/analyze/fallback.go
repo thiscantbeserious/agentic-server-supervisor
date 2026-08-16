@@ -13,11 +13,32 @@ import (
 // protected kernel line to show.
 const noKernelLinesPlaceholder = "no emerg or crit kernel lines in this tick"
 
+// reasonPhrase maps the machine-readable <CODE> (what slog records on
+// stderr, C7) to the human <REASON> phrase the report document carries
+// (§5, amended by commit 0651b69): notify strips "_" from every
+// report-derived string (C8), so "reason: agy_missing" would reach a human
+// as "reason: agymissing". The code never reaches report text; only the
+// phrase does. D10 keeps no exception for the fallback.
+var reasonPhrase = map[string]string{
+	"agy_missing":    "analyzer binary not found",
+	"agy_failed":     "analyzer exited non-zero",
+	"agy_timeout":    "analyzer timed out",
+	"invalid_json":   "analyzer output was not valid JSON",
+	"schema_invalid": "analyzer output failed schema validation",
+	"internal_error": "analyzer internal failure",
+}
+
 // Fallback builds the exact §5 fallback document: the analyzer stage
 // could not produce a valid report, so the deterministic path surfaces the
 // raw high-priority kernel lines instead of losing them silently. Always
-// returns a document that passes report.Validate.
-func Fallback(cfg *config.Config, seq int64, reason string, f *facts.Facts) *report.Report {
+// returns a document that passes report.Validate. code is the machine
+// <CODE> (already logged to stderr by the caller); the document itself
+// only ever carries the mapped human phrase.
+func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *report.Report {
+	reason := reasonPhrase[code]
+	if reason == "" {
+		reason = code // defensive: an unmapped code still surfaces something rather than an empty phrase
+	}
 	lines := protectedKernelLines(cfg, f)
 	raw := strings.Join(lines, "\n")
 	if raw == "" {
@@ -52,12 +73,13 @@ func Fallback(cfg *config.Config, seq int64, reason string, f *facts.Facts) *rep
 
 // protectedKernelLines returns the protected (priority <= RawAlertMaxPriority)
 // kernel lines, oldest first, capped at RawAlertMaxLines — but the cap keeps
-// the NEWEST lines, not the oldest (t4-review pre-diff finding: entries are
-// stored oldest-first, so a forward walk that breaks at the limit would keep
-// the 20 oldest crit lines and drop the incident happening right now, the
-// same inversion the T3 journal record cap had). We walk the entries
-// backwards (newest first) collecting up to RawAlertMaxLines, then reverse
-// the result back to chronological order for the human reading the report.
+// the NEWEST lines, not the oldest: entries are stored oldest-first, so a
+// forward walk that breaks at the limit would keep the 20 oldest crit lines
+// and drop the incident happening right now, the same inversion the T3
+// journal record cap had (now contract-sanctioned in §5, commit 4dc1b00).
+// We walk the entries backwards (newest first) collecting up to
+// RawAlertMaxLines, then reverse the result back to chronological order for
+// the human reading the report.
 func protectedKernelLines(cfg *config.Config, f *facts.Facts) []string {
 	switch {
 	case f == nil || f.Kernel == nil:
