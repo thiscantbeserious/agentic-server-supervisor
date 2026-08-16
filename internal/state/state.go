@@ -279,7 +279,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		rep.Headline = "Daily heartbeat: all clear"
 		rep.Findings = []report.Finding{}
 		rep.Resolved = []string{}
-		rep.Body = heartbeatBody(s.cfg.StateDir)
+		rep.Body = heartbeatBody(s.cfg.StateDir, now)
 
 	default:
 		decision.Reason = "suppressed"
@@ -337,12 +337,16 @@ func allClearHeadline(allClear []string) string {
 
 // heartbeatBody is S.3(g) rule 3: "No open findings. <k> ticks since
 // <RFC3339 UTC of the oldest kept history entry>." k = number of kept
-// history files that exist BEFORE this tick's own entry is written.
-func heartbeatBody(stateDir string) string {
+// history files that exist BEFORE this tick's own entry is written. now is
+// this Process call's clock (C9: never time.Now(), always cfg.Now/the
+// caller's clock) — used as the fallback "since" when history/ is still
+// empty (a fresh $STATE_DIR's first heartbeat), a case the contract text
+// doesn't spell out explicitly.
+func heartbeatBody(stateDir string, now int64) string {
 	histDir := filepath.Join(stateDir, "history")
 	files, _ := os.ReadDir(histDir) // ReadDir returns entries sorted by name (== chronological)
 	k := len(files)
-	since := time.Now().UTC()
+	since := time.Unix(now, 0).UTC()
 	if k > 0 {
 		epochStr, _, _ := strings.Cut(files[0].Name(), "-")
 		if epoch, err := strconv.ParseInt(epochStr, 10, 64); err == nil {

@@ -319,6 +319,52 @@ func TestProcess_RenotifyAlert(t *testing.T) {
 	}
 }
 
+// S.3(d): "de-escalation never notifies on its own, but it does lower the
+// stored severity and switch the renotify window." A version that only
+// ever raises severity leaves a dropped-then-persisting finding pinned to
+// the 1h alert window forever — this must fail with the fix reverted.
+func TestProcess_DeEscalationLowersSeverityAndWindow(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	alertKey := dedup.Key("kernel", "de-escalating evidence")
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "b", Findings: []report.Finding{finding("alert", "de-escalating evidence")}})
+	if d1 := mustProcess(t, s, b1); !d1.Notify {
+		t.Fatal("initial notify failed")
+	}
+
+	// De-escalate to watch, small delta — must not notify on its own.
+	cfg.Now = time.Unix(1010, 0)
+	b2 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "H", Body: "b", Findings: []report.Finding{finding("watch", "de-escalating evidence")}})
+	d2 := mustProcess(t, s, b2)
+	if d2.Notify {
+		t.Fatalf("de-escalation must not notify on its own: notify=%v reason=%s", d2.Notify, d2.Reason)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "active-alerts", alertKey+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored ActiveAlert
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Severity != "watch" {
+		t.Fatalf("stored severity = %q, want watch (de-escalation must lower it)", stored.Severity)
+	}
+
+	// now - last_notified(1000) = 3601s: past the ALERT window (3600) but
+	// well inside the WATCH window (21600). If the window is still keyed
+	// off "alert" (severity never actually lowered), this renotifies
+	// wrongly; with the fix, it stays suppressed.
+	cfg.Now = time.Unix(1000+3601, 0)
+	d3 := mustProcess(t, s, b2)
+	if d3.Notify {
+		t.Errorf("at +3601s (past the old alert window, inside the new watch window): notify=%v reason=%s, want suppressed — "+
+			"the renotify window did not switch to watch's, de-escalation left severity pinned at alert", d3.Notify, d3.Reason)
+	}
+}
+
 // S.3(g) rule 1: when findings are notified AND an unrelated alert resolves
 // in the same tick, "resolved" on the outgoing report must still be
 // all_clear (S.4's own worked example shows exactly this combination) — an
@@ -598,6 +644,26 @@ func TestOutbox(t *testing.T) {
 
 // --- case 11: heartbeat timing ---
 
+// S.3(g) rule 3, amended: when k == 0 (a fresh $STATE_DIR's very first
+// heartbeat — history/ is still empty because the history write happens
+// after step g), the body's "since" timestamp is `now`: cfg.Now when set,
+// never a second time.Now() read deeper in the code (C9). Pins the exact
+// RFC3339 value so a reintroduced time.Now() call fails this immediately.
+func TestHeartbeat_FreshStateDirBodyUsesNow(t *testing.T) {
+	now := time.Date(2000, 1, 1, 8, 1, 0, 0, time.UTC)
+	cfg := testConfig(t, now)
+	s := newStore(t, cfg)
+
+	d := mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "Empty", Body: "body"}))
+	if !d.Heartbeat {
+		t.Fatal("expected the first Process call on a fresh StateDir at 08:01 to be the heartbeat")
+	}
+	want := "No open findings. 0 ticks since " + now.Format(time.RFC3339) + "."
+	if d.Report.Body != want {
+		t.Errorf("heartbeat body = %q, want %q (k==0 must use the injected clock, not time.Now())", d.Report.Body, want)
+	}
+}
+
 func TestHeartbeat(t *testing.T) {
 	cfg := testConfig(t, time.Date(2000, 1, 1, 7, 59, 0, 0, time.UTC))
 	s := newStore(t, cfg)
@@ -815,7 +881,13 @@ func TestWriteContainment(t *testing.T) {
 		os.Chmod(roDir, 0o755) // let t.TempDir() clean up
 	})
 
-	before := snapshotFS(t, cfg.StateDir)
+	// Snapshot the shared parent of cfg.StateDir and roDir (both are
+	// t.TempDir() calls from this same test, so they are siblings under a
+	// common per-test root) — walking cfg.StateDir alone would make the
+	// containment check below tautological, since every path found by
+	// walking cfg.StateDir trivially has cfg.StateDir as a prefix.
+	testRoot := filepath.Dir(cfg.StateDir)
+	before := snapshotFS(t, testRoot)
 
 	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "B", Findings: []report.Finding{finding("alert", "e")}})
 	d, err := s.Process(b)
@@ -834,8 +906,11 @@ func TestWriteContainment(t *testing.T) {
 		t.Errorf("Process wrote into the read-only working directory: %v", roEntries)
 	}
 
-	after := snapshotFS(t, cfg.StateDir)
+	after := snapshotFS(t, testRoot)
 	for p := range after {
+		if before[p] {
+			continue // pre-existing, not a write from this Process call
+		}
 		if !strings.HasPrefix(p, cfg.StateDir) {
 			t.Errorf("write outside StateDir: %s", p)
 		}
