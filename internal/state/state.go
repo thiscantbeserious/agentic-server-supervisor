@@ -449,7 +449,7 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 	// exhausted, not after scanning the first n directory positions —
 	// otherwise a single corrupt file among the newest N silently shrinks
 	// the trend window analyze reads.
-	result := make([]json.RawMessage, 0, n)
+	result := make([]json.RawMessage, 0, min(n, len(files)))
 	for _, f := range files {
 		if len(result) >= n {
 			break

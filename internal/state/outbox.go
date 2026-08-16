@@ -6,8 +6,20 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 )
+
+// outboxIDRe is the exact shape OutboxAdd emits (S.4: "<epoch>-<rand3>").
+// OutboxAck joins its argument onto $STATE_DIR/outbox/ before checking it
+// exists, so an unvalidated id is a path-traversal primitive (e.g.
+// "../history/<file>" resolves outside outbox/ entirely) — reject anything
+// that isn't this literal shape before it ever reaches filepath.Join.
+var outboxIDRe = regexp.MustCompile(`^[0-9]+-[0-9]{3}$`)
+
+// randIntn is a seam over math/rand.Intn so tests can force a deterministic
+// id collision in OutboxAdd without depending on the real PRNG's sequence.
+var randIntn = rand.Intn
 
 type OutboxEntry struct {
 	ID       string          `json:"id"`
@@ -25,17 +37,37 @@ type OutboxItem struct {
 
 func (s *Store) OutboxAdd(payload []byte) (string, error) {
 	// S.2: "outbox-add stdin — an opaque JSON object; state validates only
-	// that" -> not a JSON object is exit 65.
-	var probe map[string]json.RawMessage
+	// that" -> not a JSON object is exit 65. Unmarshaling into a map alone
+	// lets JSON `null` through (it's valid for any nullable type, so the
+	// map ends up nil with no error) — decode into `any` and require the
+	// concrete type to be a JSON object.
+	var probe any
 	if err := json.Unmarshal(payload, &probe); err != nil {
+		return "", ErrBadInput
+	}
+	if _, ok := probe.(map[string]any); !ok {
 		return "", ErrBadInput
 	}
 
 	now := s.now()
 
-	// Generate ID: <epoch>-<rand3>
-	r := rand.Intn(1000)
-	id := fmt.Sprintf("%d-%03d", now, r)
+	// <epoch>-<rand3> (S.4) collides across two adds in the same second
+	// roughly 1-in-1000 of the time; writeAtomic's rename would silently
+	// REPLACE the existing entry, destroying a queued notification with no
+	// error. Sequential by construction (S.5: no lock file, the tick loop
+	// never runs two Process/OutboxAdd calls concurrently), so checking
+	// "does this candidate already exist" and retrying is race-free here.
+	var id string
+	for i := 0; i < 1000; i++ {
+		candidate := fmt.Sprintf("%d-%03d", now, randIntn(1000))
+		if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "outbox", candidate+".json")); os.IsNotExist(err) {
+			id = candidate
+			break
+		}
+	}
+	if id == "" {
+		return "", fmt.Errorf("state: could not find a free outbox id for %d", now)
+	}
 
 	entry := OutboxEntry{
 		ID:       id,
@@ -53,14 +85,19 @@ func (s *Store) OutboxAdd(payload []byte) (string, error) {
 	}
 
 	// Enforce OUTBOX_MAX
-	s.trimOutbox()
+	if err := s.trimOutbox(); err != nil {
+		return "", fmt.Errorf("state: trim outbox: %w", err)
+	}
 
 	return id, nil
 }
 
 func (s *Store) OutboxTake() ([]OutboxItem, error) {
 	outboxDir := filepath.Join(s.cfg.StateDir, "outbox")
-	files, _ := os.ReadDir(outboxDir)
+	files, err := os.ReadDir(outboxDir)
+	if err != nil {
+		return nil, fmt.Errorf("state: read outbox dir: %w", err)
+	}
 
 	items := []OutboxItem{} // S.4/C5: [] on stdout, never null
 
@@ -107,6 +144,15 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 }
 
 func (s *Store) OutboxAck(id string) error {
+	// Path traversal guard: id is a positional CLI argument and gets
+	// joined onto $STATE_DIR/outbox/ unchecked below. Without this,
+	// "../history/<file>" (or any id containing a path separator) resolves
+	// outside outbox/ and os.Remove deletes whatever it lands on — a
+	// history file analyze's trend window depends on, for one.
+	if !outboxIDRe.MatchString(id) {
+		return ErrUnknownID
+	}
+
 	path := filepath.Join(s.cfg.StateDir, "outbox", id+".json")
 	if _, err := os.Stat(path); err != nil {
 		return ErrUnknownID
@@ -115,9 +161,12 @@ func (s *Store) OutboxAck(id string) error {
 	return os.Remove(path)
 }
 
-func (s *Store) trimOutbox() {
+func (s *Store) trimOutbox() error {
 	outboxDir := filepath.Join(s.cfg.StateDir, "outbox")
-	files, _ := os.ReadDir(outboxDir)
+	files, err := os.ReadDir(outboxDir)
+	if err != nil {
+		return fmt.Errorf("state: read outbox dir: %w", err)
+	}
 
 	if len(files) > s.cfg.OutboxMax {
 		sort.Slice(files, func(i, j int) bool {
@@ -129,4 +178,5 @@ func (s *Store) trimOutbox() {
 			os.Remove(filepath.Join(outboxDir, files[i].Name()))
 		}
 	}
+	return nil
 }

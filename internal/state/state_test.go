@@ -791,6 +791,139 @@ func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
+// CodeRabbit PR #3, most serious: id is an unvalidated positional CLI
+// argument joined onto $STATE_DIR/outbox/ before the exists-check. Without
+// the outboxIDRe guard, "../history/<file>" resolves outside outbox/
+// entirely and os.Remove deletes whatever it lands on — a history file
+// analyze's trend window depends on, in the exploit CodeRabbit named.
+func TestOutboxAck_RejectsPathTraversal(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	// A real history file that must survive the attack attempt.
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(histDir, "1786870800-000000.json")
+	if err := os.WriteFile(victim, []byte(`{"status":"OK","headline":"h","body":"b","findings":[],"resolved":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.OutboxAck("../history/1786870800-000000"); err != ErrUnknownID {
+		t.Errorf("OutboxAck(traversal id) = %v, want ErrUnknownID", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("traversal id deleted a file outside outbox/: %v", err)
+	}
+
+	// A well-formed id that simply doesn't exist must still behave.
+	if err := s.OutboxAck("1000-999"); err != ErrUnknownID {
+		t.Errorf("OutboxAck(well-formed but unknown id) = %v, want ErrUnknownID", err)
+	}
+}
+
+// CodeRabbit PR #3: <epoch>-<rand3> collides across two same-second adds
+// roughly 1-in-1000 of the time, and writeAtomic's rename silently
+// REPLACES whatever was already at that path — a queued notification
+// destroyed with no error. randIntn is stubbed to hand out a colliding
+// value first, then a free one, so this is deterministic rather than
+// relying on the real PRNG to happen to collide.
+func TestOutboxAdd_RetriesOnIDCollision(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dummy := []byte(`{"id":"1000-042","payload":{"x":1},"attempts":0,"created":1000}`)
+	if err := os.WriteFile(filepath.Join(outboxDir, "1000-042.json"), dummy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	origRandIntn := randIntn
+	randIntn = func(int) int {
+		calls++
+		if calls == 1 {
+			return 42 // collides with the pre-seeded "1000-042.json"
+		}
+		return 43
+	}
+	t.Cleanup(func() { randIntn = origRandIntn })
+
+	id, err := s.OutboxAdd([]byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "1000-042" {
+		t.Fatal("OutboxAdd returned a colliding id instead of retrying")
+	}
+	if id != "1000-043" {
+		t.Errorf("OutboxAdd id = %q, want 1000-043 (the second, non-colliding candidate)", id)
+	}
+	got, err := os.ReadFile(filepath.Join(outboxDir, "1000-042.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, dummy) {
+		t.Error("the pre-existing colliding outbox entry was overwritten instead of skipped")
+	}
+}
+
+// S.2: outbox-add's payload must be a JSON object. `null` unmarshals into
+// a nil map with no error, so a check that only verifies "did json.Unmarshal
+// into a map succeed" lets it through.
+func TestOutboxAdd_RejectsJSONNull(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	if _, err := s.OutboxAdd([]byte(`null`)); err != ErrBadInput {
+		t.Errorf("OutboxAdd(null) = %v, want ErrBadInput", err)
+	}
+}
+
+// CodeRabbit PR #3 item 3: OutboxTake and trimOutbox (called from
+// OutboxAdd) discarded os.ReadDir's error — the same "failing /state
+// reports success" class already fixed for OutboxAdd's own write and
+// saveAlert. Root-proof injection: replace outbox/ with a file (see
+// TestOutboxAdd_PropagatesWriteFailures for why chmod alone is vacuous
+// as root, which is what CI's Dockerfile builder stage runs as).
+func TestOutboxTake_PropagatesReadDirFailure(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.RemoveAll(outboxDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outboxDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.OutboxTake(); err == nil {
+		t.Error("OutboxTake() with outbox/ replaced by a file = nil error, want non-nil")
+	}
+}
+
+func TestTrimOutbox_PropagatesReadDirFailure(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.RemoveAll(outboxDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outboxDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.trimOutbox(); err == nil {
+		t.Error("trimOutbox() with outbox/ replaced by a file = nil error, want non-nil")
+	}
+}
+
 // --- case 11: heartbeat timing ---
 
 // S.3(g) rule 3, amended: when k == 0 (a fresh $STATE_DIR's very first
@@ -948,19 +1081,29 @@ func TestStaleExpiry(t *testing.T) {
 // A full or read-only $STATE_DIR must surface as an error (mapped to exit
 // 5 by the CLI, S.6), not a silently-discarded writeAtomic failure that
 // reports success while nothing was actually persisted.
+//
+// Failure is injected by replacing the destination DIRECTORY with a plain
+// FILE at the same path, not by removing the write permission bit —
+// os.MkdirAll/CreateTemp then fail with ENOTDIR, a structural conflict the
+// filesystem enforces for every caller including uid 0. A chmod-based
+// version of this test is vacuous as root (permission bits are not
+// consulted for root at all), and the Dockerfile builder stage that runs
+// `go test` runs as root — exactly the environment this test exists for.
 func TestProcess_PropagatesWriteFailures(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	s := newStore(t, cfg)
 
 	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
-	if err := os.Chmod(alertDir, 0o500); err != nil {
+	if err := os.RemoveAll(alertDir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(alertDir, 0o700) }) // let t.TempDir() clean up
+	if err := os.WriteFile(alertDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "b", Findings: []report.Finding{finding("alert", "e")}})
 	if _, err := s.Process(b); err == nil {
-		t.Error("Process() with an unwritable active-alerts/ = nil error, want non-nil (saveAlert's writeAtomic failure must not be discarded)")
+		t.Error("Process() with active-alerts/ replaced by a file = nil error, want non-nil (saveAlert's writeAtomic failure must not be discarded)")
 	}
 }
 
@@ -969,13 +1112,15 @@ func TestOutboxAdd_PropagatesWriteFailures(t *testing.T) {
 	s := newStore(t, cfg)
 
 	outboxDir := filepath.Join(cfg.StateDir, "outbox")
-	if err := os.Chmod(outboxDir, 0o500); err != nil {
+	if err := os.RemoveAll(outboxDir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(outboxDir, 0o700) })
+	if err := os.WriteFile(outboxDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := s.OutboxAdd([]byte(`{"a":1}`)); err == nil {
-		t.Error("OutboxAdd() with an unwritable outbox/ = nil error, want non-nil")
+		t.Error("OutboxAdd() with outbox/ replaced by a file = nil error, want non-nil")
 	}
 }
 
