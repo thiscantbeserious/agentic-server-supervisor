@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // outboxIDRe is the exact shape OutboxAdd emits (S.4: "<epoch>-<rand3>").
@@ -115,6 +116,18 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 
 		var entry OutboxEntry
 		if err := json.Unmarshal(data, &entry); err != nil {
+			continue
+		}
+
+		// S.7: a body id that disagrees with the filename it was read
+		// from is corrupt, same as unparsable JSON — "skipped by
+		// OutboxTake, still counted against OUTBOX_MAX, removable by
+		// OutboxAck [via the filename]". Without this, entry.ID (untrusted
+		// body content) is handed to tick as the notification's id; if it
+		// doesn't match outboxIDRe, OutboxAck can never acknowledge it and
+		// it retries — and re-sends via SMTP past OUTBOX_SMTP_AFTER —
+		// every tick forever.
+		if entry.ID != strings.TrimSuffix(f.Name(), ".json") {
 			continue
 		}
 

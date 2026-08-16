@@ -791,6 +791,52 @@ func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
+// TestOutboxTake_SkipsBodyIDFilenameMismatch is t5-review2's outbox
+// blocker: OutboxTake returned entry.ID straight from the file's JSON
+// body, not the filename it was read from. A body id of "../../pwned"
+// isn't itself a write escape (outboxIDRe still blocks OutboxAck's path
+// join), but tick can never ack an id that never matches outboxIDRe, so
+// the entry retries — and re-sends via SMTP once attempts crosses
+// OUTBOX_SMTP_AFTER — every tick forever. S.7 already specifies the fix:
+// a body/filename mismatch is corrupt, "skipped by OutboxTake". A
+// well-formed sibling entry in the same directory must still come back,
+// so the guard can't pass by vacuously skipping everything.
+func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	corrupt := OutboxEntry{ID: "../../pwned", Payload: json.RawMessage(`{"a":1}`), Created: 1000}
+	craw, err := json.Marshal(corrupt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outboxDir, "1000-000.json"), craw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goodID, err := s.OutboxAdd([]byte(`{"b":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := s.OutboxTake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != goodID {
+		t.Fatalf("OutboxTake() = %+v, want exactly the well-formed sibling %q (corrupt entry must be skipped, not the whole dir)", items, goodID)
+	}
+
+	if err := s.OutboxAck(goodID); err != nil {
+		t.Errorf("OutboxAck(%s) after skip: %v", goodID, err)
+	}
+}
+
 // CodeRabbit PR #3, most serious: id is an unvalidated positional CLI
 // argument joined onto $STATE_DIR/outbox/ before the exists-check. Without
 // the outboxIDRe guard, "../history/<file>" resolves outside outbox/

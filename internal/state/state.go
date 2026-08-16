@@ -441,6 +441,15 @@ func (s *Store) rotateHistory() {
 	}
 }
 
+// expireStaleAlerts runs first in step (c), before step (d)'s per-finding
+// loop. Its full directory sweep is the reason loadAlert's own key/filename
+// check (alerts.go) is currently unreachable in every test: any corrupt
+// record this sweep would have caught is already gone by the time step (d)
+// could call loadAlert on it. Both checks are still correct defence in
+// depth, not redundant code — but a future change here (skipping
+// well-named files, running every N ticks instead of every tick) would
+// silently remove that guarantee, and no test would catch it. Keep this
+// sweeping the whole directory every call.
 func (s *Store) expireStaleAlerts(now int64) {
 	alertDir := filepath.Join(s.cfg.StateDir, "active-alerts")
 	files, _ := os.ReadDir(alertDir)
