@@ -1,57 +1,12 @@
 package analyze
 
 import (
-	_ "embed"
-	"encoding/json"
-	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
-
-// deepDiveSchemaJSON is the deep dive RPC payload schema (§6 step 10): this
-// document is never emitted to a user, so D3's "one schema, normative for
-// everything the system emits" does not apply to it — it exists only so
-// the model cannot copy/fabricate the full report shape (key, status,
-// headline, ...) the way the old full-report deep dive schema let it.
-//
-//go:embed prompt/deepdive.schema.json
-var deepDiveSchemaJSON []byte
-
-// deepDiveResponse is the deep dive RPC payload (§6 step 10): analysis and
-// recommendation for the one candidate finding, identified by the candidate
-// analyze itself sent — never by a key the model echoes back — plus an
-// optional headline that, when present, replaces triage's (§6 step 11).
-type deepDiveResponse struct {
-	Analysis       string `json:"analysis"`
-	Recommendation string `json:"recommendation"`
-	Headline       string `json:"headline,omitempty"`
-}
-
-// validateDeepDiveResponse is the hand-written bounds check for prompt/deepdive.schema.json
-// (same D3 pattern as report.Validate: the schema file is what's handed to
-// agy --json-schema, Go enforces it at runtime). No DisallowUnknownFields,
-// consistent with report.Validate's own convention.
-func validateDeepDiveResponse(raw []byte) (*deepDiveResponse, error) {
-	var r deepDiveResponse
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("deepdive: invalid JSON: %w", err)
-	}
-	if n := len([]rune(r.Analysis)); n < 1 || n > 1200 {
-		return nil, fmt.Errorf("deepdive: analysis: length %d runes out of bounds [1,1200]", n)
-	}
-	if n := len([]rune(r.Recommendation)); n < 1 || n > 800 {
-		return nil, fmt.Errorf("deepdive: recommendation: length %d runes out of bounds [1,800]", n)
-	}
-	if r.Headline != "" {
-		if n := len([]rune(r.Headline)); n > 80 {
-			return nil, fmt.Errorf("deepdive: headline: length %d runes exceeds maxLength 80", n)
-		}
-	}
-	return &r, nil
-}
 
 // --- recommendation guard (§6 step 11b) ---
 
