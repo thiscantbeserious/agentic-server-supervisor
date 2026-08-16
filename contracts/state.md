@@ -102,7 +102,7 @@ sequenceDiagram
 
 1. `notified` non-empty ⇒ `status` = highest notified severity (`alert→ALERT`, `watch→WATCH`, `info→OK`); `headline`/`body` verbatim from input; `resolved` = `all_clear`; `reason` = the reason of the **first** notified finding in input order.
 2. else `all_clear` non-empty ⇒ `status="OK"`, `headline="Resolved: <first>"` (`+ " (+N more)"` when >1) **truncated to 80 runes** so the schema bound holds; `body` = one `- ` bullet per entry; `reason="all_clear"`.
-3. else heartbeat due ⇒ `status="OK"`, `headline="Daily heartbeat: all clear"`, `body="No open findings. <k> ticks since <RFC3339 UTC of the oldest kept history entry>."` (`k` = number of kept history files), `reason="heartbeat"`, `heartbeat=true`.
+3. else heartbeat due ⇒ `status="OK"`, `headline="Daily heartbeat: all clear"`, `body="No open findings. <k> ticks since <RFC3339 UTC of the oldest kept history entry>."` (`k` = number of kept history files). **When `k == 0` the timestamp is `now`** — i.e. `cfg.Now` when set, else the live clock captured once at the top of `Process`, never a second `time.Now()` call deeper in the code (C9). This case is reachable in production, not theoretical: on a fresh `/state` volume the first heartbeat assembles its body while `history/` is still empty, because the history write happens after step (g), `reason="heartbeat"`, `heartbeat=true`.
 4. else `notify=false`, `reason="suppressed"`, `status="OK"`, `findings=[]`, `resolved=[]`, `headline`/`body` verbatim from input.
 
 Rule 4's `status="OK"` is what keeps a suppressed document schema-valid (`status` = highest finding severity, and there are no findings).
