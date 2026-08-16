@@ -119,15 +119,25 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 			continue
 		}
 
-		// S.7: a body id that disagrees with the filename it was read
-		// from is corrupt, same as unparsable JSON — "skipped by
-		// OutboxTake, still counted against OUTBOX_MAX, removable by
-		// OutboxAck [via the filename]". Without this, entry.ID (untrusted
-		// body content) is handed to tick as the notification's id; if it
-		// doesn't match outboxIDRe, OutboxAck can never acknowledge it and
-		// it retries — and re-sends via SMTP past OUTBOX_SMTP_AFTER —
-		// every tick forever.
-		if entry.ID != strings.TrimSuffix(f.Name(), ".json") {
+		// S.7: "corrupt outbox/*.json -> skipped by OutboxTake, still
+		// counted against OUTBOX_MAX, removable by OutboxAck". Two checks,
+		// not one: the body id must agree with the filename it was read
+		// from (else entry.ID is untrusted content), AND the filename
+		// itself must be the shape OutboxAck actually accepts
+		// (outboxIDRe, ".json" extension). Checking only agreement lets a
+		// file where BOTH sides agree on a non-conforming value (e.g.
+		// "test-alert.json", or a filename with no ".json" extension at
+		// all) sail through: OutboxTake would hand tick a real-looking id
+		// that OutboxAck's own outboxIDRe check then permanently refuses
+		// — an entry that retries, and re-sends via SMTP past
+		// OUTBOX_SMTP_AFTER, every tick forever. OutboxAck is the
+		// authority on what a valid id looks like; OutboxTake must apply
+		// the identical predicate, not merely internal self-consistency.
+		if !strings.HasSuffix(f.Name(), ".json") {
+			continue
+		}
+		trimmed := strings.TrimSuffix(f.Name(), ".json")
+		if !outboxIDRe.MatchString(trimmed) || entry.ID != trimmed {
 			continue
 		}
 

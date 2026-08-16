@@ -42,6 +42,31 @@ func TestStateProcessCLIBadInputExits65(t *testing.T) {
 	}
 }
 
+// The agy gate: S.1 says "history [n] and outbox-ack <id> are the only
+// subcommands taking a positional argument" — process, outbox-add and
+// outbox-take were silently ignoring a stray one instead of treating it as
+// the usage error C2 requires (64). Covers all five state subcommands: the
+// three that take none, and the two that take exactly one (an extra
+// argument past the one they do accept must also be rejected).
+func TestStateStrayPositionalArgExits64(t *testing.T) {
+	bin := buildSentinel(t)
+	cases := [][]string{
+		{"state", "process", "extra_arg"},
+		{"state", "outbox-add", "extra_arg"},
+		{"state", "outbox-take", "extra_arg"},
+		{"state", "history", "5", "extra_arg"},
+		{"state", "outbox-ack", "1000-000", "extra_arg"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			_, stderr, code := runBinStdin(t, bin, baseEnv(t, t.TempDir()), validReport, args...)
+			if code != 64 {
+				t.Fatalf("%v: exit %d, want 64, stderr=%s", args, code, stderr)
+			}
+		})
+	}
+}
+
 // outbox-add prints only the id + "\n" (S.4).
 func TestStateOutboxAddPrintsOnlyID(t *testing.T) {
 	bin := buildSentinel(t)

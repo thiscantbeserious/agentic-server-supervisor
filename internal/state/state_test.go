@@ -802,38 +802,63 @@ func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 // well-formed sibling entry in the same directory must still come back,
 // so the guard can't pass by vacuously skipping everything.
 func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
-	cfg := testConfig(t, time.Unix(1000, 0))
-	s := newStore(t, cfg)
-
-	outboxDir := filepath.Join(cfg.StateDir, "outbox")
-	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name     string
+		filename string // relative to outbox/
+		bodyID   string
+	}{
+		{"body disagrees with filename", "1000-000.json", "../../pwned"},
+		// The agy gate found the door the first guard missed: filename and
+		// body AGREE, but on a value outboxIDRe (OutboxAck's own standard)
+		// would refuse. Checking only "do the two sides agree with each
+		// other" lets this through — OutboxTake then hands tick a
+		// real-looking id that OutboxAck can never ack, so the entry
+		// retries (and re-sends via SMTP past OUTBOX_SMTP_AFTER) forever.
+		{"filename and body agree but non-conforming", "test-alert.json", "test-alert"},
+		// No ".json" extension: TrimSuffix is a no-op, so a naive
+		// agreement check against the raw filename would also pass this
+		// straight through.
+		{"no .json extension, id matches raw filename", "1755248470-417", "1755248470-417"},
 	}
 
-	corrupt := OutboxEntry{ID: "../../pwned", Payload: json.RawMessage(`{"a":1}`), Created: 1000}
-	craw, err := json.Marshal(corrupt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(outboxDir, "1000-000.json"), craw, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t, time.Unix(1000, 0))
+			s := newStore(t, cfg)
 
-	goodID, err := s.OutboxAdd([]byte(`{"b":2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+			outboxDir := filepath.Join(cfg.StateDir, "outbox")
+			if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 
-	items, err := s.OutboxTake()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 1 || items[0].ID != goodID {
-		t.Fatalf("OutboxTake() = %+v, want exactly the well-formed sibling %q (corrupt entry must be skipped, not the whole dir)", items, goodID)
-	}
+			corrupt := OutboxEntry{ID: tc.bodyID, Payload: json.RawMessage(`{"a":1}`), Created: 1000}
+			craw, err := json.Marshal(corrupt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(outboxDir, tc.filename), craw, 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := s.OutboxAck(goodID); err != nil {
-		t.Errorf("OutboxAck(%s) after skip: %v", goodID, err)
+			// A well-formed sibling must still come back — the guard must
+			// not pass by vacuously skipping the whole directory.
+			goodID, err := s.OutboxAdd([]byte(`{"b":2}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			items, err := s.OutboxTake()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 || items[0].ID != goodID {
+				t.Fatalf("OutboxTake() = %+v, want exactly the well-formed sibling %q (corrupt entry must be skipped, not the whole dir)", items, goodID)
+			}
+
+			if err := s.OutboxAck(goodID); err != nil {
+				t.Errorf("OutboxAck(%s) after skip: %v", goodID, err)
+			}
+		})
 	}
 }
 

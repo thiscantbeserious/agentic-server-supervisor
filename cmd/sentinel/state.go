@@ -15,6 +15,14 @@ var stateSubcommands = map[string]bool{
 	"process": true, "history": true, "outbox-add": true, "outbox-take": true, "outbox-ack": true,
 }
 
+// stateMaxPositional is how many positional args (past the sub-subcommand
+// itself) each state subcommand accepts (S.1: only history and outbox-ack
+// take one). Subcommands absent here default to 0 via the zero value.
+var stateMaxPositional = map[string]int{
+	"history":    1,
+	"outbox-ack": 1,
+}
+
 const stateUsage = "usage: sentinel state process|history [n]|outbox-add|outbox-take|outbox-ack <id>"
 
 // runState implements `sentinel state` (contracts/state.md §S.1, §S.6).
@@ -36,6 +44,15 @@ func runState(args []string) (int, error) {
 	}
 	if sub == "outbox-ack" && len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "sentinel state outbox-ack: missing <id>")
+		return 64, nil
+	}
+	// C2/S.1: "history [n] and outbox-ack <id> are the only subcommands
+	// taking a positional argument" — process/outbox-add/outbox-take take
+	// none, and a stray one past what's allowed is a usage error (64), not
+	// something to silently ignore.
+	if maxPositional := stateMaxPositional[sub]; len(args)-1 > maxPositional {
+		fmt.Fprintf(os.Stderr, "sentinel state %s: unexpected argument %q\n", sub, args[len(args)-1])
+		fmt.Fprintln(os.Stderr, stateUsage)
 		return 64, nil
 	}
 
