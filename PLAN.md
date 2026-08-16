@@ -48,8 +48,8 @@ Rollout on `bam` is exactly: copy `deploy/`, fill `.env`, run `install-host.sh`,
 
 Summary of what stays true from v3 (unchanged semantics, now typed):
 
-- **collect** — 9 sections (kernel, ras, smart, sensors, zfs, resources, services, network, meta) from `:ro` mounts; per-section timeout & failure isolation; deterministic 256 KB truncation; `--deep <zfs|smart|kernel|ras>` for two-stage analysis. No zpool/smartctl in the container.
-- **analyze** — agy exec with embedded prompt + last N=5 reports; output ALWAYS schema-validated in-process, 1 retry, deterministic fallback report; two-stage analysis (A9): new finding ⇒ deep collect ⇒ second agy call ⇒ `analysis` + conditional `recommendation`; max 1 deep dive per tick, rest queued in `deep-queue/`.
+- **collect** — 9 sections (kernel, ras, smart, sensors, zfs, resources, services, network, meta) from `:ro` mounts; per-section timeout & failure isolation; deterministic 256 KB truncation; `--deep <zfs|smart|kernel|ras>` for the deep dive. No zpool/smartctl in the container.
+- **analyze** — agy exec with embedded prompt + last N=5 reports; output ALWAYS schema-validated in-process, 1 retry, deterministic fallback report; triage + deep dive (A9): new finding ⇒ deep collect ⇒ second agy call ⇒ `analysis` + conditional `recommendation`; max 1 deep dive per tick, rest queued in `deep-queue/`.
 - **state** — dedup via `dedup.Key` (one algorithm, one package); re-notify windows ALERT 1h / WATCH 6h; resolved ⇒ exactly one all-clear; history rotation 50; outbox with SMTP fallback after 3 failed ticks; daily 08:00 heartbeat; `heartbeat` file mtime doubles as liveness for `sentinel health`.
 - **notify** — apprise JSON POST (`[STATUS] host: headline`), body sanitization, outbox handoff on failure. Telegram credentials never enter the sentinel container.
 - **runtime** — sequential tick: collect → **raw alert for emerg/crit before the LLM step (LLM-free)** → analyze → state → notify; `--loop` with SIGTERM-clean shutdown; atomic writes (`CreateTemp` → `Sync` → `Rename`) everywhere.
@@ -65,7 +65,7 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
   AC: config validation exits 78 naming the variable; `report.Validate` rejects the negative fixtures; `dedup.Key` matches the C6 vectors incl. the ZFS CKSUM case. V: `go test ./internal/...` (foundation packages).
 - **T3 — collect**: `internal/journal` + `internal/collect` per contract (sections, timeouts, isolation, truncation, `--deep`).
   AC: valid against facts schema; injected `logger -p kern.err "SENTINEL-TEST"` appears in `kernel`; a stubbed-away section binary yields an `error` field, not an abort; truncation is deterministic at the byte budget. V: `go test ./internal/collect/... ./internal/journal/...` + in-container run.
-- **T4 — analyze**: `internal/analyze` per contract (agy exec, history, validation + retry + fallback, two-stage analysis, deep-queue).
+- **T4 — analyze**: `internal/analyze` per contract (agy exec, history, validation + retry + fallback, triage + deep dive, deep-queue).
   AC: clean facts ⇒ OK; kern.err fixture ⇒ ≥ WATCH with a human-readable explanation; ZFS CKSUM fixture ⇒ WATCH with `analysis` + `recommendation` (not ALERT); agy stub missing ⇒ fallback ALERT (exit 3 path); agy stub emitting broken JSON ⇒ retry then fallback. V: `go test ./internal/analyze/...` (agy stubbed via `AGY_BIN`), plus one real agy call locally.
 - **T5 — state**: `internal/state` per contract (Process, history, outbox, heartbeat).
   AC: 3 ticks same finding ⇒ exactly 1 notification + 1 escalation; resolved ⇒ exactly 1 all-clear; outbox SMTP fallback after 3; clock driven via `SENTINEL_NOW`. V: `go test ./internal/state/...`.

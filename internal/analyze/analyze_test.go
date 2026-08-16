@@ -1602,7 +1602,7 @@ func TestRun_CollectorErrorsSurfacedInPrompt(t *testing.T) {
 		}
 	}
 	if !strings.Contains(prompt, "collector_errors") {
-		t.Fatalf("sentinel.md's collector_errors rule not present in the prompt")
+		t.Fatalf("role.md's collector_errors rule not present in the prompt")
 	}
 }
 
