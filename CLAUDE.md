@@ -7,6 +7,7 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 - **Read-only towards the target server `bam`** (doh@192.168.1.151, key `~/.ssh/sentinel_ed25519`): strictly read commands only; every action there is announced first. Installs/deploys only in T8 after approval.
 - Local development/tests: Podman (`docker` shim available). Secrets only in `.env` (gitignored), never in code, commits, or logs.
 - All repo documents, comments, and commit messages are written in **English**. Diagrams are **Mermaid**, never ASCII art.
+- **One branch per TODO**, named `t<n>-<slug>` (e.g. `t4-analyze`), branched from `main`. The TODO's work — including any contract amendments it forces — lands there, and it reaches `main` only through a PR merged with `--no-ff`, so `main` carries one merge commit per TODO. The PR body is the gate record: reviewer verdict, agy findings, RED/GREEN evidence, and any live validation. No direct commits to `main`, no shared long-lived integration branch.
 - One commit per completed TODO: `T<n>: <deliverable>`.
 - TDD first — RED → GREEN → REFACTOR, then gates, then review. Full protocol: PLAN.md §4.
 
