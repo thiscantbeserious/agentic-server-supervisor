@@ -4,6 +4,8 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 
 ## Ground Rules
 - **No TODO starts without the user's explicit go.** Feedback is not a go.
+- **No TODO reaches `main` without the user's explicit approval on its PR.** The reviewer's APPROVE, green gates, and my own verification are all *inputs* to that decision, never a substitute for it. I open the PR and stop; the user reviews and merges. A merged PR is not a go for the next TODO either.
+- **Live validation before proposing a merge** (from T3 on): the code runs in a real Linux container under the production security flags, and its assumptions are checked read-only against `bam`. Fixtures only prove that the code agrees with whoever wrote the fixtures. Anything that cannot be validated without deploying is named as uncovered in the PR, never implied to be covered.
 - **Read-only towards the target server `bam`** (doh@192.168.1.151, key `~/.ssh/sentinel_ed25519`): strictly read commands only; every action there is announced first. Installs/deploys only in T8 after approval.
 - Local development/tests: Podman (`docker` shim available). Secrets only in `.env` (gitignored), never in code, commits, or logs.
 - All repo documents, comments, and commit messages are written in **English**. Diagrams are **Mermaid**, never ASCII art.

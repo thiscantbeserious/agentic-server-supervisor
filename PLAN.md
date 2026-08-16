@@ -95,7 +95,8 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
 **Phase 2 — Gates (main agent):**
 4. **Independent verification:** the main agent re-runs V itself. Red ⇒ back to phase 1 with the error output.
 5. **Runnability gate (mandatory after every step):**
-   a. **Container smoke run:** the affected code is actually executed — from T3 onward inside the sentinel container image (`docker build` + `docker run` with test mounts), before that via the compiled binary locally. Code that is green in tests but does not run in the container (missing tool, path, permission) fails here.
+   a. **Container smoke run — required, not "if convenient":** from T3 onward the affected code is executed **inside a Linux container** (`podman build` + `podman run` with the real security flags `--read-only --cap-drop=ALL --security-opt no-new-privileges`, unprivileged user, tmpfs `/tmp`, named volume `/state`); before T3, via the compiled binary locally. Green tests on the developer machine prove nothing about the target: macOS has no `/proc` and no journal, so on a Mac the `resources` and `network` parsers never execute at all. The gate is not passed until the paste-able evidence exists: the command, the exit code, and the emitted document. Skipping it silently is a protocol violation — T3 shipped its first commit without it and the omission had to be corrected afterwards.
+   Minimum assertions: exit code as contracted; the document parses and validates; every `:ro` surface rejects a write while `/state` and `/tmp` accept one; `id` shows the unprivileged uid and `CapEff` is `0000000000000000`; the component wrote **nothing** outside `/state`.
    b. **agy second validation:** an independent second opinion from a different vendor on two questions: "Is this code runnable in the target setup (read_only, cap_drop ALL, ro mounts, unprivileged, CGO_ENABLED=0, debian-slim)? Which runtime errors are foreseeable?" and "Where does the code contradict CONTRACTS.md C1–C9, or hide a bug the tests would miss?" Substantiated findings ⇒ back to phase 1. Invocation (verified 2026-08-16):
 
    ```bash
@@ -106,6 +107,10 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
 
    Mechanics: print mode does **not** read stdin, so the prompt must be an argument, and `--print-timeout` needs a duration unit (`10m`, not `300`). Permissions live in **`~/.gemini/antigravity-cli/settings.json`** (the path `~/.gemini/settings.json` is silently ignored — the log line `applyUserSettings: no shared config permissions` is the tell), as `action(target)` rules under `permissions.allow`: `read_file(...)` **and** `command(...)` are both needed, because agy shells out to `find`/`grep` as well as using its native reader. Writes and network are in `deny`. Diagnose any denial with `--log-file <path>` and grep `permission_manager` for the exact action it wanted. `--dangerously-skip-permissions` is not used.
 
+   c. **Live validation against reality (mandatory from T3 on, read-only):** synthetic fixtures encode the assumptions of whoever wrote them, so before a TODO can be proposed for merge its assumptions are checked against the actual target `bam` — **strictly read-only, every command announced first** (CLAUDE.md ground rule; installs and deploys remain T8-after-approval). What this means concretely: real data replayed through the new code (e.g. captured `journalctl -o json` records fed through the parser), and every environmental assumption the component makes verified on the host rather than assumed — permissions and GIDs, which paths exist, whether the required binaries are installed, real volumes and record counts.
+   This gate has already paid for itself: it confirmed `systemd-journal` GID 999 and that `/run/log/journal` exists (so the two-directory merge is live, not theoretical), showed `/proc/spl/kstat/zfs/` mixes files with pool directories, established that a 24h kernel window is ~1400 records (right-sizing the 20000 cap), and proved the dedup key collapses **real** zed evidence across differing `eid=`/offset/size values.
+   Where a component cannot be exercised against the host without deploying (that is T8), say so explicitly in the PR rather than implying coverage that does not exist.
+
 **Phase 3 — Review (reviewer subagent, fresh context):**
 6. Sees ARCHITECTURE.md, CONTRACTS.md, the diff, RED/GREEN outputs, and gate outputs — not the implementer transcript. Checks adversarially:
    - Contract honored exactly (types, exit codes, env vars, paths)? Do the tests match the contract's test table? Was the test genuinely red first?
@@ -115,4 +120,14 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
    - Over-engineering: anything not in the TODO ⇒ remove.
    Output: `APPROVE` or `REJECT` with concrete, referenced defects.
 7. **Loop:** REJECT ⇒ the reviewer sends the defect list **directly to the implementer** (Agent Teams peer messaging, see CLAUDE.md "Agent Communication"); the implementer fixes, re-runs RED/GREEN evidence, and messages the reviewer back for re-review. Max 3 iterations, then escalate to the user instead of looping. Without the teams flag, the main agent relays the same messages between fresh spawns.
-8. **Completion:** commit `T<n>: <deliverable>`, task → completed, wait for the user's go for the next TODO.
+**Phase 4 — Merge request and the user's final review (the last gate is human):**
+
+8. **Commit** `T<n>: <deliverable>` on the TODO's own branch `t<n>-<slug>`. Never on `main`.
+9. **Open the PR** (`gh pr create --base main`). The body is the **gate record**, and it is written so the user can audit the work without re-deriving it:
+   - what the TODO delivers, and every contract amendment it forced (with the reasoning, since amendments are the least-reviewed artifact in this loop — three of T3's last four defects originated in contract text, not implementation);
+   - the reviewer's verdict and how many REJECT rounds it took;
+   - agy's findings and what was done with each — including any dismissed, with the reason;
+   - **the live evidence**: the container smoke run (command + exit code + result) and the read-only host validation, quoted as output rather than summarized as a claim;
+   - what was **not** covered and why (skipped tests, deferred ceilings, anything only T8 can exercise). A gap named in the PR is honest; a gap discovered in the diff is not.
+10. **The user performs the final review and merges.** No TODO reaches `main` without their explicit approval on the PR — not on an agent APPROVE, not on green gates, not on my own verification. `--no-ff`, so `main` carries one merge commit per TODO. If they request changes, it returns to phase 1 on the same branch; the iteration cap does not apply to their rounds.
+11. Task → completed only after the merge. Then wait for their go for the next TODO — a merged PR is not a go for the next one.
