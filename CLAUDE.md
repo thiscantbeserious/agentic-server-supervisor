@@ -26,6 +26,14 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 
 If a Haiku implementer fails the gate or review twice in a row, escalate that TODO to `sonnet` (spec gap — don't grind).
 
+## Spawning the per-TODO agents
+
+Always spawn with the **named agent types**: `subagent_type: sentinel-implementer` and `subagent_type: sentinel-reviewer` (defined in `.claude/agents/`), named `t<n>-impl` / `t<n>-review`. Override the model per the matrix when a TODO calls for it (T5 was haiku).
+
+The registry loads at **session start**, so a definition added mid-session does not resolve until Claude Code is restarted — the spawn fails with "Agent type not found". Until then the fallback is `general-purpose` with the role file's absolute path as the first instruction, which reproduces the behaviour but not the mechanism. **Say so explicitly when using the fallback**; silently spawning a generic agent looks identical to ignoring the definitions.
+
+When a TODO escalates to a different model, **stop the outgoing implementer before spawning the replacement, and confirm it stopped**. Notifying it is not enough — in T5 the haiku implementer kept editing the shared worktree after the escalation, and its SHA is what reached the reviewer.
+
 ## Agent Communication (Agent Teams)
 
 With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` active, the per-TODO loop runs as a **team**: implementer and reviewer are spawned as named teammates and talk to each other directly via `SendMessage` — the REJECT defect list, follow-up questions about a contract clause, and the re-review request go peer-to-peer instead of through main-agent respawns. Rules:
