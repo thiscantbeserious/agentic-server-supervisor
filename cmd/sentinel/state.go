@@ -72,10 +72,14 @@ func runState(args []string) (int, error) {
 	case "history":
 		n := 5
 		if len(args) > 1 {
-			v, err := strconv.Atoi(args[1])
-			if err != nil || v < 0 {
+			v, convErr := strconv.Atoi(args[1])
+			if convErr != nil || v < 0 {
+				// Usage error (64), not this call's error: the diagnostic
+				// already went to stderr above, and C2's contract is
+				// every Run returns (int, error) with error carrying an
+				// internal failure — a malformed CLI argument isn't one.
 				fmt.Fprintln(os.Stderr, "sentinel state history: n must be a non-negative integer")
-				return 64, nil
+				return 64, nil //nolint:nilerr // convErr is reported via stderr above, not this return
 			}
 			n = v
 		}

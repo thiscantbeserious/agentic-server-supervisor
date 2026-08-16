@@ -11,8 +11,12 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 	fullPath := filepath.Join(stateDir, relPath)
 	dir := filepath.Dir(fullPath)
 
-	// Ensure directory exists
-	os.MkdirAll(dir, 0700)
+	// Ensure directory exists. Unchecked, this masked a real cause: a
+	// permission or ENOTDIR failure here would surface as a confusing
+	// CreateTemp error two lines later instead of its own.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
 
 	// Create temp file in the same directory for atomic rename
 	tmpFile, err := os.CreateTemp(dir, ".tmp-")
@@ -29,10 +33,16 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 		return err
 	}
 
-	// Sync to ensure durability
-	err = tmpFile.Sync()
-	tmpFile.Close()
-	if err != nil {
+	// Sync to ensure durability, then Close — both checked: a buffered
+	// write can still fail on Close (e.g. ENOSPC surfacing late), and a
+	// silently-failed Close is a truncated file this func would otherwise
+	// report as written successfully.
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
 		return err
 	}

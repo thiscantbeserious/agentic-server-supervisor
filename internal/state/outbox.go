@@ -191,14 +191,40 @@ func (s *Store) trimOutbox() error {
 		return fmt.Errorf("state: read outbox dir: %w", err)
 	}
 
-	if len(files) > s.cfg.OutboxMax {
-		sort.Slice(files, func(i, j int) bool {
-			return files[i].Name() < files[j].Name()
+	// S.7: a filename outboxIDRe refuses can never be a legitimate queued
+	// alert (OutboxAdd cannot produce that name) and can never be acked
+	// (OutboxAck applies the identical predicate) — S.7's three clauses
+	// for a corrupt outbox entry (skipped, counted, ackable) are mutually
+	// unsatisfiable for it. Worse, lexical eviction below never reaches
+	// it either: a junk name sorts after every "<epoch>-<rand3>.json"
+	// name, so it is never the oldest. Left alone it is immortal and
+	// permanently steals OUTBOX_MAX capacity from real alerts — at
+	// OUTBOX_MAX junk files, every newly queued alert is silently
+	// evicted the instant it's added, behind exit 0. Reclaim these
+	// first, unconditionally, before any well-formed entry is even
+	// considered for eviction.
+	wellFormed := files[:0]
+	for _, f := range files {
+		trimmed := strings.TrimSuffix(f.Name(), ".json")
+		if !strings.HasSuffix(f.Name(), ".json") || !outboxIDRe.MatchString(trimmed) {
+			if err := os.Remove(filepath.Join(outboxDir, f.Name())); err != nil {
+				return fmt.Errorf("state: reclaim corrupt outbox filename %s: %w", f.Name(), err)
+			}
+			continue
+		}
+		wellFormed = append(wellFormed, f)
+	}
+
+	if len(wellFormed) > s.cfg.OutboxMax {
+		sort.Slice(wellFormed, func(i, j int) bool {
+			return wellFormed[i].Name() < wellFormed[j].Name()
 		})
 
-		toDelete := len(files) - s.cfg.OutboxMax
+		toDelete := len(wellFormed) - s.cfg.OutboxMax
 		for i := 0; i < toDelete; i++ {
-			os.Remove(filepath.Join(outboxDir, files[i].Name()))
+			if err := os.Remove(filepath.Join(outboxDir, wellFormed[i].Name())); err != nil {
+				return fmt.Errorf("state: trim outbox entry %s: %w", wellFormed[i].Name(), err)
+			}
 		}
 	}
 	return nil

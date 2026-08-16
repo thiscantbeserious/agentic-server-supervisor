@@ -862,6 +862,66 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 	}
 }
 
+// TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries is
+// main's second amendment: a corrupt outbox FILENAME (not matching
+// outboxIDRe) is immortal under trimOutbox's plain lexical eviction — a
+// junk name like "test-alert.json" sorts after every numeric
+// "<epoch>-<rand3>.json" name, so it is never the oldest and is never
+// evicted, and OutboxAck can never remove it either (outboxIDRe refuses
+// the id). Left alone it permanently consumes OUTBOX_MAX capacity: at
+// OutboxMax junk files, a genuinely new OutboxAdd returns a fresh id and
+// exit 0 while trimOutbox immediately evicts the entry that was JUST
+// added (real entries sort before nothing, junk sorts last) — the exact
+// "success code, alert silently lost" class this component already had
+// to fix once (OutboxTake's false-healthy case). trimOutbox must reclaim
+// non-conforming filenames first, unconditionally, before any real entry
+// is even considered.
+func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	cfg.OutboxMax = 3
+	s := newStore(t, cfg)
+
+	outboxDir := filepath.Join(cfg.StateDir, "outbox")
+	if err := os.MkdirAll(outboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// OUTBOX_MAX junk files, planted directly (OutboxAdd can never
+	// produce these names) — enough on their own to fill the cap under
+	// the old lexical-only eviction.
+	junkNames := []string{"test-alert.json", "test-alert-2.json", "test-alert-3.json"}
+	for _, name := range junkNames {
+		junk, _ := json.Marshal(OutboxEntry{ID: strings.TrimSuffix(name, ".json"), Payload: json.RawMessage(`{}`), Created: 1000})
+		if err := os.WriteFile(filepath.Join(outboxDir, name), junk, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	id, err := s.OutboxAdd([]byte(`{"real":"alert"}`))
+	if err != nil {
+		t.Fatalf("OutboxAdd: %v", err)
+	}
+
+	// The junk must be gone — reclaimed, not merely ignored — and must
+	// never have been counted as capacity.
+	for _, name := range junkNames {
+		if _, err := os.Stat(filepath.Join(outboxDir, name)); !os.IsNotExist(err) {
+			t.Errorf("corrupt filename %s was not reclaimed by trimOutbox, err=%v", name, err)
+		}
+	}
+
+	items, err := s.OutboxTake()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != id {
+		t.Fatalf("OutboxTake() = %+v, want exactly the just-added real alert %q — a success exit with the alert silently evicted is the defect under test", items, id)
+	}
+
+	if err := s.OutboxAck(id); err != nil {
+		t.Errorf("OutboxAck(%s): %v", id, err)
+	}
+}
+
 // CodeRabbit PR #3, most serious: id is an unvalidated positional CLI
 // argument joined onto $STATE_DIR/outbox/ before the exists-check. Without
 // the outboxIDRe guard, "../history/<file>" resolves outside outbox/
@@ -1214,7 +1274,9 @@ func TestErrorPaths(t *testing.T) {
 
 	// Truncated active-alerts file -> treated as absent -> re-notified as new.
 	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
-	os.MkdirAll(alertDir, 0o700)
+	if err := os.MkdirAll(alertDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	corruptKey := dedup.Key("kernel", "corrupt-evidence")
 	if err := os.WriteFile(filepath.Join(alertDir, corruptKey+".json"), []byte("{invalid"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1227,7 +1289,9 @@ func TestErrorPaths(t *testing.T) {
 
 	// Corrupt history file: skipped by History, but still counts for rotation.
 	historyDir := filepath.Join(cfg.StateDir, "history")
-	os.MkdirAll(historyDir, 0o700)
+	if err := os.MkdirAll(historyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(historyDir, "0000000001-000000.json"), []byte("{invalid"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1260,27 +1324,34 @@ func snapshotFS(t *testing.T, root string) map[string]bool {
 	return out
 }
 
+// CodeRabbit: this used to chmod cwdDir 0o555 and lean on that to prove
+// Process "must still succeed" without depending on cwd being writable.
+// Permission bits are not consulted for uid 0 at all, and the Dockerfile
+// builder stage that runs `go test` runs as root — the same ENOTDIR
+// reasoning documented above TestProcess_PropagatesWriteFailures. Unlike
+// that test, though, this one's REAL containment proof was never the
+// permission bit: it's the snapshot diff below, which inspects what got
+// written rather than whether a write was blocked, so it holds
+// identically whether or not the process has privilege to write cwd.
+// Dropping the chmod removes the vacuous-as-root half without weakening
+// the assertion that actually matters.
 func TestWriteContainment(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	s := newStore(t, cfg)
 
-	roDir := t.TempDir()
-	if err := os.Chmod(roDir, 0o555); err != nil {
-		t.Fatal(err)
-	}
+	cwdDir := t.TempDir()
 	origWD, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(roDir); err != nil {
+	if err := os.Chdir(cwdDir); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		os.Chdir(origWD)
-		os.Chmod(roDir, 0o755) // let t.TempDir() clean up
 	})
 
-	// Snapshot the shared parent of cfg.StateDir and roDir (both are
+	// Snapshot the shared parent of cfg.StateDir and cwdDir (both are
 	// t.TempDir() calls from this same test, so they are siblings under a
 	// common per-test root) — walking cfg.StateDir alone would make the
 	// containment check below tautological, since every path found by
@@ -1291,18 +1362,18 @@ func TestWriteContainment(t *testing.T) {
 	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "B", Findings: []report.Finding{finding("alert", "e")}})
 	d, err := s.Process(b)
 	if err != nil {
-		t.Fatalf("Process with a 0o555 working directory must still succeed: %v", err)
+		t.Fatalf("Process must not depend on the working directory: %v", err)
 	}
 	if !d.Notify {
 		t.Fatal("expected a notification")
 	}
 
-	roEntries, err := os.ReadDir(roDir)
+	cwdEntries, err := os.ReadDir(cwdDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(roEntries) != 0 {
-		t.Errorf("Process wrote into the read-only working directory: %v", roEntries)
+	if len(cwdEntries) != 0 {
+		t.Errorf("Process wrote into the working directory: %v", cwdEntries)
 	}
 
 	after := snapshotFS(t, testRoot)
@@ -1400,6 +1471,26 @@ func TestHistory_SkipsCorruptButStillFillsN(t *testing.T) {
 	}
 	if len(hist) != 5 {
 		t.Fatalf("History(5) with the newest of 8 files corrupt: %d entries, want 5 (must dig past the corrupt one into the 6th-newest)", len(hist))
+	}
+}
+
+// CodeRabbit: History is exported, so the CLI's own "n must be a
+// non-negative integer" rejection (cmd/sentinel/state.go) is not a
+// guarantee every caller gets. Before the fix, make([]json.RawMessage, 0,
+// min(n, len(files))) put a negative n straight into make()'s cap
+// argument, which panics rather than errors — a caller-controlled DoS one
+// call removed from a CLI-level input.
+func TestHistory_NegativeNDoesNotPanic(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+	mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "Test", Body: "Body"}))
+
+	hist, err := s.History(-1)
+	if err != nil {
+		t.Fatalf("History(-1): %v", err)
+	}
+	if len(hist) != 0 {
+		t.Errorf("History(-1) = %d entries, want 0", len(hist))
 	}
 }
 

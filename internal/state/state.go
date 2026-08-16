@@ -503,7 +503,10 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 	// exhausted, not after scanning the first n directory positions —
 	// otherwise a single corrupt file among the newest N silently shrinks
 	// the trend window analyze reads.
-	result := make([]json.RawMessage, 0, min(n, len(files)))
+	// n reaching here unvalidated (History is exported; the CLI's own
+	// n<0 rejection is not a guarantee every caller gets) must never
+	// reach make()'s cap argument negative — that panics, not errors.
+	result := make([]json.RawMessage, 0, max(0, min(n, len(files))))
 	for _, f := range files {
 		if len(result) >= n {
 			break
