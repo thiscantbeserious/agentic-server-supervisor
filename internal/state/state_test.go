@@ -1645,3 +1645,40 @@ func TestSchemaAgreement(t *testing.T) {
 func TestCLIExitCodes(t *testing.T) {
 	t.Skip("S.6 exit-code mapping is tested in cmd/sentinel against the real sentinel binary")
 }
+
+// TestTrimOutbox_ReclaimFailureVisibleAtErrorLevel pins the terminal signal of
+// the silent-alert-loss chain, which took six review rounds to surface:
+// a failed reclaim leaves a junk-named file occupying outbox capacity, and at
+// capacity a real alert is evicted while OutboxAdd still returns exit 0. That
+// log line is the ONLY indication it happened, so it must survive the strictest
+// level an operator can reasonably run.
+//
+// It logs at ERROR rather than WARN for exactly that reason (b3febec). Before
+// this test the property had no guardian: mutating Error back to Warn left the
+// whole suite green, which is how the invisibility would have returned.
+//
+// The failure is injected structurally — os.Remove cannot delete a non-empty
+// directory, at any uid — rather than with chmod, which is vacuous as root and
+// CI runs the suite as root (C9).
+func TestTrimOutbox_ReclaimFailureVisibleAtErrorLevel(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	cfg.LogLevel = "ERROR"
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	junk := filepath.Join(cfg.StateDir, "outbox", "junkdir.json")
+	if err := os.MkdirAll(junk, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(junk, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buf := captureStateLog(t)
+	if _, err := s.OutboxAdd([]byte(`{"status":"OK","headline":"q","body":"b","findings":[],"resolved":[]}`)); err != nil {
+		t.Fatalf("OutboxAdd must not fail because a reclaim failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "failed to reclaim corrupt outbox filename") {
+		t.Errorf("reclaim failure is invisible at LOG_LEVEL=ERROR; log was %q", buf.String())
+	}
+}
