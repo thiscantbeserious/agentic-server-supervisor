@@ -357,15 +357,21 @@ Inline, at the deep-dive log call:
 On the embed block — this carries the `prompt/` directory charter:
 
 ```go
-// The prompt/ directory holds every fixed prompt byte: the role document,
-// the prompt skeleton, and the deep-dive response schema. No instruction,
-// boundary paragraph or fence originates in a Go string literal, which is
-// what keeps the prompt auditable as text. The variable payloads are of
-// course marshalled from Go — the facts and finding JSON, the history
-// projection's field names, and the validator's own message quoted in the
-// retry correction. (The one model-facing file outside this directory is
-// report.schema.json, which lives in internal/report because go:embed
-// cannot cross packages.)
+// The prompt/ directory holds everything this package says TO the model:
+// the role document, the prompt skeleton, and the deep-dive response
+// schema. No instruction, boundary paragraph or fence originates in a Go
+// string literal, which is what keeps the prompt auditable as text.
+//
+// The payloads are a different matter and some of their bytes are
+// Go-authored: the history projection's field names, the validator message
+// the correction quotes, and text this package itself wrote into an
+// earlier tick's report — a withheld-recommendation note, a fallback
+// placeholder — which returns here as history evidence. Auditing what the
+// model is told means reading this directory; auditing everything it sees
+// means following the payloads too.
+//
+// (The one model-facing file outside this directory is report.schema.json,
+// which lives in internal/report because go:embed cannot cross packages.)
 //
 // text/template, not html/template: HTML escaping would corrupt the
 // embedded JSON payloads. Both calls share one header define so the fence
