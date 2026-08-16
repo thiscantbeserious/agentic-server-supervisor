@@ -1458,6 +1458,76 @@ func TestProcess_RejectsCraftedKeyPathEscape(t *testing.T) {
 	}
 }
 
+// TestProcess_AllClearDeletesByFilenameNotStoredKey covers the sibling
+// sink t5-review2 found: step (e)'s all-clear delete used to join
+// alert.Key — parsed out of the *stored record's JSON body* — into the
+// unlink path, not the directory entry name it was read from. A record
+// whose body carries "key":"../../victim" (planted by an older build
+// before the step-(d) adoption guard existed, or by hand-editing the
+// volume) steers os.Remove outside $STATE_DIR on the next all-clear that
+// matches its headline. The fix deletes by the os.ReadDir entry name
+// (a single path element, guaranteed by ReadDir) instead.
+func TestProcess_AllClearDeletesByFilenameNotStoredKey(t *testing.T) {
+	parent := t.TempDir()
+	stateDir := filepath.Join(parent, "state")
+	if err := os.MkdirAll(filepath.Join(stateDir, "active-alerts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, time.Unix(1000, 0))
+	cfg.StateDir = stateDir
+	s := newStore(t, cfg)
+
+	// Plant an active-alerts record directly (bypassing Process/step (d)
+	// entirely) whose filename is a legitimate 16-hex key but whose JSON
+	// body claims a path-traversal key — the state a hand-edited or
+	// older-build volume can be in.
+	const filenameKey = "1111111111111111"
+	crafted := ActiveAlert{
+		Key:         "../../victim",
+		Component:   "kernel",
+		Headline:    "doomed headline",
+		Severity:    "alert",
+		FirstSeen:   500,
+		LastSeen:    500,
+		Occurrences: 1,
+		NotifyCount: 1,
+	}
+	raw, err := json.Marshal(crafted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "active-alerts", filenameKey+".json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("setup guard: expected exactly the state dir under parent, got %d entries", len(before))
+	}
+
+	b := marshalReport(t, &report.Report{Status: "OK", Headline: "Resolved", Body: "b", Resolved: []string{"doomed headline"}})
+	d := mustProcess(t, s, b)
+
+	after, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0].Name() != "state" {
+		t.Fatalf("all-clear delete escaped $STATE_DIR via the stored key: parent dir now contains %v", after)
+	}
+
+	if !d.Notify || d.Reason != "all_clear" || len(d.Report.Resolved) != 1 || d.Report.Resolved[0] != "doomed headline" {
+		t.Errorf("all-clear: notify=%v reason=%s resolved=%v, want notify=true reason=all_clear resolved=[doomed headline]",
+			d.Notify, d.Reason, d.Report.Resolved)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "active-alerts", filenameKey+".json")); !os.IsNotExist(err) {
+		t.Errorf("the actual record (by filename %s.json) must be deleted on match, got err=%v", filenameKey, err)
+	}
+}
+
 // literalDedupKey reimplements C6's algorithm from CONTRACTS.md directly —
 // deliberately not calling dedup.Key/EvidenceCore — so a break in either is
 // caught rather than tracked. "evidence2" has no timestamps, digits, or

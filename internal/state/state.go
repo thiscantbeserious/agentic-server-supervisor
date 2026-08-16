@@ -250,7 +250,13 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 					allClear = append(allClear, alert.Headline)
 				}
 			}
-			os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", alert.Key+".json"))
+			// Delete by the directory entry name (guaranteed a single path
+			// element by os.ReadDir), never by alert.Key — that field comes
+			// from the stored record's own JSON body, which may be stale,
+			// hand-edited, or (on an older build, before the step-(d)
+			// adoption guard) attacker-shaped, and can disagree with the
+			// filename it was read from.
+			os.Remove(filepath.Join(s.cfg.StateDir, "active-alerts", af.Name()))
 		}
 	}
 
