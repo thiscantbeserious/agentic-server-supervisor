@@ -65,6 +65,8 @@ sequenceDiagram
 
 **Files read**, all under `$STATE_DIR`: `heartbeat`, `active-alerts/*.json`, `history/*.json`, `outbox/*.json`. Nothing outside `$STATE_DIR` is read except stdin, and nothing outside it is ever written.
 
+**`Loc` and `TickSeq` must be added to `internal/config` as part of T5** — S.2 lists both as consumed, and neither exists yet. `Loc *time.Location` is resolved once in `Load()` from `TZ` (the validation already calls `time.LoadLocation`; keep the result instead of discarding it) — `state` must never call `LoadLocation` per `Process` nor read `os.Getenv("TZ")` itself, because `internal/config` is the single loader (C1). `TickSeq int64` is **not** env-derived: it is set programmatically by `runtime` after `Load()`, and it is the one field in `Config` that is, which S.3(a) already assumes (`cfg.TickSeq` if `> 0`). Touching a T2 package here is correct rather than scope creep: the alternative is state parsing its own environment, which C1 forbids.
+
 **Configuration** arrives as `*config.Config` (`internal/config` is the single loader; a malformed or out-of-range value is fatal there with exit 78, so state contains no env parsing and no "ignore and default" policy). Consumed fields: `StateDir`, `HistoryKeep`, `RenotifyAlertSec`, `RenotifyWatchSec`, `StaleAlertSec`, `HeartbeatHour`, `OutboxMax`, `OutboxSMTPAfter`, `TickInterval` (for `Health`), `Loc` (from `TZ`), `Now` (from `SENTINEL_NOW`, test-only; zero ⇒ `time.Now()`), `TickSeq` (from runtime).
 
 `ponytail: the heartbeat day and hour are evaluated in cfg.Loc. Compose pins TZ=UTC, so "08:00" is 08:00 UTC — 10:00 local on bam in summer. Change TZ, not the code, if the operator wants local mornings.`
