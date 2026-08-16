@@ -32,6 +32,22 @@ var severityRank = map[string]int{"info": 0, "watch": 1, "alert": 2}
 // is recomputed rather than joined into a path (S.3d write containment).
 var validKeyRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
+// truncRunes mirrors internal/analyze's own helper of the same name and
+// truncation (first n runes, no ellipsis) — analyze renders resolved[]
+// entries as a finding's evidence truncated to 80 runes (contracts/
+// analyze.md §6 step 7), so step (e) must apply the identical truncation
+// to the stored evidence before comparing, or a longer stored value would
+// never match its own truncated resolved[] entry. Duplicated rather than
+// imported: analyze is the orchestration layer above state, not a
+// dependency of it, and this is six lines.
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 type Decision struct {
 	Notify          bool          `json:"notify"`
 	Reason          string        `json:"reason"`
@@ -160,6 +176,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				Key:          key,
 				Component:    f.Component,
 				EvidenceCore: dedup.EvidenceCore(f.Evidence),
+				Evidence:     f.Evidence,
 				Headline:     rep.Headline,
 				Severity:     f.Severity,
 				FirstSeen:    now,
@@ -174,6 +191,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			alert.LastSeen = now
 			alert.Occurrences++
 			alert.TickSeqLast = tickSeq
+			alert.Evidence = f.Evidence
 
 			if severityRank[f.Severity] > severityRank[alert.Severity] {
 				alert.Severity = f.Severity
@@ -232,7 +250,15 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			if err != nil || touchedKeys[alert.Key] {
 				continue
 			}
-			if strings.TrimSpace(strings.ToLower(alert.Headline)) != res {
+			// S.3(e) (amended): analyze's resolved[] entries are rendered
+			// from a finding's EVIDENCE truncated to 80 runes (findings
+			// have no headline), never the headline — so matching on
+			// headline alone means an analyzer-produced resolution never
+			// matches anything and every all-clear is silently dropped.
+			// Accept a match on either normalized identifier.
+			headlineMatch := strings.TrimSpace(strings.ToLower(alert.Headline)) == res
+			evidenceMatch := strings.TrimSpace(strings.ToLower(truncRunes(alert.Evidence, 80))) == res
+			if !headlineMatch && !evidenceMatch {
 				continue
 			}
 			// S.3(e): "A key that was never notified is deleted without an
