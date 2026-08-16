@@ -75,7 +75,9 @@ sequenceDiagram
 
 **a) tick_seq** — first of: `cfg.TickSeq` if `> 0`, `report.meta.tick_seq` if present, else `0`. Never written.
 
-**b) history rotation** — the input bytes verbatim to `history/<now %010d>-<tick_seq %06d>.json`, then delete all but the `HISTORY_KEEP` newest by filename sort (lexical == chronological by construction). Unparsable history files count against the cap and are skipped by readers.
+**b) history rotation** — **executed after step (d)**, because it needs that step's post-update records: the input document with **every** finding annotated (`key`, `first_seen`, `occurrences` taken from its active-alert record — notified **and suppressed** alike), all other bytes and the finding order unchanged, written to `history/<now %010d>-<tick_seq %06d>.json`, then delete all but the `HISTORY_KEEP` newest by filename sort (lexical == chronological by construction). Unparsable history files count against the cap and are skipped by readers.
+
+**Not "verbatim", and not `decision.report` either — both are wrong, for different reasons.** `analyze` deliberately zeroes `first_seen`/`occurrences` on the document it hands over (`analyze.go` §6 step 7), so storing the input unchanged persists zeros; `omitempty` then drops them from the HISTORY projection and the LLM gets back the trend window it had before T4 — a key with no growth signal, the exact defect T4 existed to fix, reopened invisibly with T4's own tests still green. Storing `decision.report` instead is worse: it holds only the **notified** findings (rule 1) or none at all (rule 4), so every suppressed finding would look resolved to `computeResolved` on the next tick, and an LLM-free path would start inventing all-clears — precisely what (e) forbids.
 
 **c) stale expiry** (first) — every active alert with `now - last_seen > STALE_ALERT_SEC` is deleted silently, no all-clear.
 
@@ -88,7 +90,7 @@ sequenceDiagram
 | present, `now - last_notified >= window(severity)` | **notify** | `renotify` |
 | otherwise | suppress, `suppressed_count++` | — |
 
-`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. Notified findings are annotated with `key`, `first_seen`, `occurrences`.
+`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. **Every** finding — notified and suppressed — is annotated with `key`, `first_seen` and `occurrences` from its (post-update) record. The notified ones carry the annotations into the outgoing report; all of them carry it into the history write of step (b), which is what makes `analyze`'s trend rule answerable.
 
 **e) resolved / all-clear** — for each entry of `report.resolved[]`: trim + ASCII-lowercase, compare against the identically normalized stored `headline` of every active alert **not touched in step (d) this tick** (S-D7). On match: append the *stored* headline to `all_clear` (deduplicated, first occurrence wins) and delete the key file — which guarantees exactly one all-clear. A string matching nothing is dropped silently; an LLM must not be able to invent an all-clear. A key that was never notified is deleted without an all-clear.
 
@@ -173,7 +175,7 @@ No stdout. Removes exactly one file; unknown id ⇒ exit 5.
 $STATE_DIR/
 ├── heartbeat                   # "YYYY-MM-DD\n" — mtime = liveness
 ├── history/
-│   └── 1755248461-000289.json  # verbatim input report, max HISTORY_KEEP
+│   └── 1755248461-000289.json  # input report, annotated per S.3(b), max HISTORY_KEEP
 ├── active-alerts/
 │   └── 9f2c41ab77de0315.json
 └── outbox/
@@ -296,12 +298,12 @@ type OutboxItem struct { // OutboxTake output
 type Store struct{ /* cfg *config.Config */ }
 
 func New(cfg *config.Config) (*Store, error)          // ErrStateDir → exit 69
-func (s *Store) Process(raw []byte) (*Decision, error) // raw bytes: history stores the input verbatim
+func (s *Store) Process(raw []byte) (*Decision, error) // history stores the input annotated per S.3(b), never verbatim
 func (s *Store) History(n int) ([]json.RawMessage, error)
 func (s *Store) OutboxAdd(raw []byte) (string, error)
 func (s *Store) OutboxTake() ([]OutboxItem, error)
 func (s *Store) OutboxAck(id string) error            // ErrUnknownID → exit 5
-func (s *Store) Health() error                        // heartbeat mtime younger than 3 × TickInterval
+func (s *Store) Health() error                        // nil iff heartbeat mtime younger than 3 × TickInterval; cmd maps any error to exit 1
 
 var (
     ErrStateDir  = errors.New("state dir not writable") // → 69
@@ -316,6 +318,9 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 
 | # | Case | Assertion |
 |---|---|---|
+| S1 | **history annotation — the cross-component assertion (C9)**: one `Process` with one notified and one suppressed finding | the written `history/*.json` carries non-zero `occurrences` **and** `first_seen` on **both** findings, and its name matches `^[0-9]{10}-[0-9]{6}\.json$`. Read the file from disk — asserting on the returned `Decision` proves nothing about what `analyze` will later read |
+| S2 | no stray files in `history/` after several `Process` calls | `os.ReadDir(history/)` contains only `*.json`; a leftover `.tmp-*` evicts a real report from `analyze`'s window, which sorts by name and keeps the newest N |
+| S3 | `Health()` with a fresh heartbeat / stale / missing file | nil, then non-nil, then non-nil; `cmd` maps non-nil to exit 1 |
 | 1 | same WATCH finding, 3 ticks, `Now` +5 min each | exactly 1 notification: tick 1 `notify=true`; ticks 2–3 `notify=false`, `reason="suppressed"`, `suppressed_count=1`, `status="OK"` |
 | 2 | tick 4 with `severity:"alert"` | `notify=true`, `reason="escalation"` — with case 1: T5's AC "exactly 1 notification + 1 escalation" |
 | 3 | WATCH finding at +5 h 59 min / +6 h 1 min | suppressed / `renotify` |
