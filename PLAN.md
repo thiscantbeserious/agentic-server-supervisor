@@ -129,5 +129,11 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
    - agy's findings and what was done with each — including any dismissed, with the reason;
    - **the live evidence**: the container smoke run (command + exit code + result) and the read-only host validation, quoted as output rather than summarized as a claim;
    - what was **not** covered and why (skipped tests, deferred ceilings, anything only T8 can exercise). A gap named in the PR is honest; a gap discovered in the diff is not.
-10. **The user performs the final review and merges.** No TODO reaches `main` without their explicit approval on the PR — not on an agent APPROVE, not on green gates, not on my own verification. `--no-ff`, so `main` carries one merge commit per TODO. If they request changes, it returns to phase 1 on the same branch; the iteration cap does not apply to their rounds.
-11. Task → completed only after the merge. Then wait for their go for the next TODO — a merged PR is not a go for the next one.
+10. **CodeRabbit review loop — a fourth independent gate, run on the PR before the user reads it.** Comment `@coderabbitai full review` on the freshly opened PR, wait for its findings, and treat them like any other gate: triage each one, route real defects to the implementer, fix, push, then comment `@coderabbitai review` to re-run against the new head. Repeat until it reports no actionable findings.
+
+    Triage rather than obey: CodeRabbit does not know this project's contracts, so a finding that contradicts `CONTRACTS.md` is a false positive to be answered in the PR thread, not implemented — and if it turns out the contract is what is wrong, that is a contract amendment and my decision, exactly as with the other gates. Record dismissals with the reason in the thread; a silent dismissal is indistinguishable from an oversight.
+
+    This gate exists for the same reason the agy second opinion does: it reads the diff with no memory of the arguments that produced it. In T4 and T5 the defects that survived adversarial review were the ones where the reviewer's own construction hid them.
+
+11. **The user performs the final review and merges.** No TODO reaches `main` without their explicit approval on the PR — not on an agent APPROVE, not on green gates, not on my own verification. `--no-ff`, so `main` carries one merge commit per TODO. If they request changes, it returns to phase 1 on the same branch; the iteration cap does not apply to their rounds.
+12. Task → completed only after the merge. Then wait for their go for the next TODO — a merged PR is not a go for the next one.

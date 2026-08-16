@@ -25,6 +25,7 @@ import (
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 // version is set at build time in later TODOs (T7 CI); "dev" is the
@@ -100,10 +101,25 @@ func printUsage() {
        sentinel --version`)
 }
 
+// logLevelForSubcommandError re-reads LOG_LEVEL for logSubcommandError:
+// run() never holds a *config.Config (each subcommand loads its own), so a
+// second, cheap config.Load() call is how this stays honoring the
+// configured level rather than hardcoding one — a bare os.Getenv would
+// bypass internal/config as the single loader (C1). LevelInfo is the
+// fallback for the one case that second call can itself fail: reporting
+// that config.Load() failed, which is exactly what logSubcommandError
+// exists to do, so the fallback still gets that message out.
+func logLevelForSubcommandError() slog.Level {
+	if cfg, err := config.Load(); err == nil {
+		return logging.ParseLevel(cfg.LogLevel)
+	}
+	return slog.LevelInfo
+}
+
 // logSubcommandError logs to stderr via the C7 handler. Config errors are
 // reported with the offending variable name only (C7: never the value).
 func logSubcommandError(sub string, err error) {
-	logger := slog.New(logging.New(os.Stderr, slog.LevelInfo)).With("component", sub)
+	logger := slog.New(logging.New(os.Stderr, logLevelForSubcommandError())).With("component", sub)
 	var cerr *config.Error
 	if errors.As(err, &cerr) {
 		logger.Error("configuration error", "var", cerr.Var)
@@ -157,34 +173,7 @@ func runTick(args []string) (int, error) {
 
 // --- analyze --- (cmd/sentinel/analyze.go)
 
-// --- state ---
-
-var stateSubcommands = map[string]bool{
-	"process": true, "history": true, "outbox-add": true, "outbox-take": true, "outbox-ack": true,
-}
-
-func runState(args []string) (int, error) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "sentinel state: missing sub-subcommand (process|history [n]|outbox-add|outbox-take|outbox-ack <id>)")
-		return 64, nil
-	}
-	sub := args[0]
-	if !stateSubcommands[sub] {
-		fmt.Fprintf(os.Stderr, "sentinel state: unknown sub-subcommand %q\n", sub)
-		return 64, nil
-	}
-	if sub == "outbox-ack" && len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "sentinel state outbox-ack: missing <id>")
-		return 64, nil
-	}
-
-	if _, err := config.Load(); err != nil {
-		return exitCodeForConfigErr(err)
-	}
-
-	fmt.Fprintln(os.Stderr, "sentinel state: not yet implemented (internal/state, T5)")
-	return 1, errNotImplemented
-}
+// --- state --- (cmd/sentinel/state.go)
 
 // --- notify ---
 
@@ -222,10 +211,19 @@ func runHealth(args []string) (int, error) {
 		return 64, nil
 	}
 
-	if _, err := config.Load(); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
 		return exitCodeForConfigErr(err)
 	}
 
-	fmt.Fprintln(os.Stderr, "sentinel health: not yet implemented (internal/state heartbeat, T5)")
-	return 1, errNotImplemented
+	store, err := state.New(cfg)
+	if err != nil {
+		return 69, fmt.Errorf("health: %w", err)
+	}
+	if err := store.Health(); err != nil {
+		// C2: health with a stale or missing heartbeat -> exit 1 (pinned,
+		// compose only needs non-zero).
+		return 1, fmt.Errorf("health: %w", err)
+	}
+	return 0, nil
 }

@@ -55,7 +55,8 @@ One exit-code table for the whole binary (sysexits, overriding the per-contract 
 
 | Code | Meaning |
 |---|---|
-| 0 | success, including a suppressed tick and an empty outbox |
+| 0 | success, including a suppressed tick and an empty outbox; `health` = heartbeat fresh |
+| 1 | also: `health` with a stale or missing heartbeat (compose only needs non-zero; pinned so the test is written to the contract) |
 | 1 | internal failure (marshal, stdout write, recovered panic) |
 | 2 | `collect` failed ⇒ fallback report sent |
 | 3 | `analyze` failed ⇒ fallback report sent |
@@ -220,7 +221,7 @@ Never logged: `$AGY_SECRET_DIR` contents, `APPRISE_KEY`, `MAILRISE_PASS`, any `T
 ```go
 collect.Run(ctx, collect.Options{Cfg, DeepComponent}) (*facts.Facts, error)
 analyze.Run(ctx, analyze.Options{Cfg, Facts, Seq}, analyze.Deps) (*report.Report, error)
-state.Process(raw []byte) (*state.Decision, error)   // raw bytes: history stores input verbatim
+state.Process(raw []byte) (*state.Decision, error)   // history stores the input ANNOTATED (state.md S.3b), not verbatim
 notify.Send(ctx, cfg, r report.Report, smtpFallback bool) error
 ```
 

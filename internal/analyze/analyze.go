@@ -71,12 +71,12 @@ func DefaultDeps(cfg *config.Config) Deps {
 // zero value, which defaults to os.Stderr in newLogger.
 var logWriter io.Writer
 
-func newLogger() *slog.Logger {
+func newLogger(level slog.Level) *slog.Logger {
 	w := logWriter
 	if w == nil {
 		w = os.Stderr
 	}
-	return slog.New(logging.New(w, slog.LevelInfo)).With("component", "analyze")
+	return slog.New(logging.New(w, level)).With("component", "analyze")
 }
 
 // agy error classes (D7): distinguished so the fallback names the right
@@ -114,7 +114,7 @@ var (
 // Run never panics and never writes outside the paths in §8.
 func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cfg := o.Cfg
-	logger := newLogger()
+	logger := newLogger(logging.ParseLevel(cfg.LogLevel))
 	pid := os.Getpid()
 
 	var cleanup []string

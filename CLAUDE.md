@@ -4,6 +4,7 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 
 ## Ground Rules
 - **No TODO starts without the user's explicit go.** Feedback is not a go.
+- **Every PR runs the CodeRabbit loop before the user reads it**: comment `@coderabbitai full review`, wait, triage the findings, fix what is real, push, then `@coderabbitai review` again — until it reports nothing actionable. Findings that contradict `CONTRACTS.md` are answered in the thread, not implemented; if the contract turns out to be wrong, that is my amendment to make.
 - **No TODO reaches `main` without the user's explicit approval on its PR.** The reviewer's APPROVE, green gates, and my own verification are all *inputs* to that decision, never a substitute for it. I open the PR and stop; the user reviews and merges. A merged PR is not a go for the next TODO either.
 - **Live validation before proposing a merge** (from T3 on): the code runs in a real Linux container under the production security flags, and its assumptions are checked read-only against `bam`. Fixtures only prove that the code agrees with whoever wrote the fixtures. Anything that cannot be validated without deploying is named as uncovered in the PR, never implied to be covered.
 - **Read-only towards the target server `bam`** (doh@192.168.1.151, key `~/.ssh/sentinel_ed25519`): strictly read commands only; every action there is announced first. Installs/deploys only in T8 after approval.
@@ -24,6 +25,14 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 | Runnability second opinion | `agy` (Gemini) | deliberately different vendor — independent third view |
 
 If a Haiku implementer fails the gate or review twice in a row, escalate that TODO to `sonnet` (spec gap — don't grind).
+
+## Spawning the per-TODO agents
+
+Always spawn with the **named agent types**: `subagent_type: sentinel-implementer` and `subagent_type: sentinel-reviewer` (defined in `.claude/agents/`), named `t<n>-impl` / `t<n>-review`. Override the model per the matrix when a TODO calls for it (T5 was haiku).
+
+The registry loads at **session start**, so a definition added mid-session does not resolve until Claude Code is restarted — the spawn fails with "Agent type not found". Until then the fallback is `general-purpose` with the role file's absolute path as the first instruction, which reproduces the behaviour but not the mechanism. **Say so explicitly when using the fallback**; silently spawning a generic agent looks identical to ignoring the definitions.
+
+When a TODO escalates to a different model, **stop the outgoing implementer before spawning the replacement, and confirm it stopped**. Notifying it is not enough — in T5 the haiku implementer kept editing the shared worktree after the escalation, and its SHA is what reached the reviewer.
 
 ## Agent Communication (Agent Teams)
 

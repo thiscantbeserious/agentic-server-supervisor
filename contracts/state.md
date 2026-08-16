@@ -65,6 +65,8 @@ sequenceDiagram
 
 **Files read**, all under `$STATE_DIR`: `heartbeat`, `active-alerts/*.json`, `history/*.json`, `outbox/*.json`. Nothing outside `$STATE_DIR` is read except stdin, and nothing outside it is ever written.
 
+**`Loc` and `TickSeq` must be added to `internal/config` as part of T5** — S.2 lists both as consumed, and neither exists yet. `Loc *time.Location` is resolved once in `Load()` from `TZ` (the validation already calls `time.LoadLocation`; keep the result instead of discarding it) — `state` must never call `LoadLocation` per `Process` nor read `os.Getenv("TZ")` itself, because `internal/config` is the single loader (C1). `TickSeq int64` is **not** env-derived: it is set programmatically by `runtime` after `Load()`, and it is the one field in `Config` that is, which S.3(a) already assumes (`cfg.TickSeq` if `> 0`). Touching a T2 package here is correct rather than scope creep: the alternative is state parsing its own environment, which C1 forbids.
+
 **Configuration** arrives as `*config.Config` (`internal/config` is the single loader; a malformed or out-of-range value is fatal there with exit 78, so state contains no env parsing and no "ignore and default" policy). Consumed fields: `StateDir`, `HistoryKeep`, `RenotifyAlertSec`, `RenotifyWatchSec`, `StaleAlertSec`, `HeartbeatHour`, `OutboxMax`, `OutboxSMTPAfter`, `TickInterval` (for `Health`), `Loc` (from `TZ`), `Now` (from `SENTINEL_NOW`, test-only; zero ⇒ `time.Now()`), `TickSeq` (from runtime).
 
 `ponytail: the heartbeat day and hour are evaluated in cfg.Loc. Compose pins TZ=UTC, so "08:00" is 08:00 UTC — 10:00 local on bam in summer. Change TZ, not the code, if the operator wants local mornings.`
@@ -75,11 +77,19 @@ sequenceDiagram
 
 **a) tick_seq** — first of: `cfg.TickSeq` if `> 0`, `report.meta.tick_seq` if present, else `0`. Never written.
 
-**b) history rotation** — the input bytes verbatim to `history/<now %010d>-<tick_seq %06d>.json`, then delete all but the `HISTORY_KEEP` newest by filename sort (lexical == chronological by construction). Unparsable history files count against the cap and are skipped by readers.
+**b) history rotation** — **executed after step (d)**, because it needs that step's post-update records: the input document with **every** finding annotated (`key`, `first_seen`, `occurrences` taken from its active-alert record — notified **and suppressed** alike), all other bytes and the finding order unchanged, written to `history/<now %010d>-<tick_seq %06d>.json`, then delete all but the `HISTORY_KEEP` newest by filename sort (lexical == chronological by construction). Unparsable history files count against the cap and are skipped by readers.
+
+**Not "verbatim", and not `decision.report` either — both are wrong, for different reasons.** `analyze` deliberately zeroes `first_seen`/`occurrences` on the document it hands over (`analyze.go` §6 step 7), so storing the input unchanged persists zeros; `omitempty` then drops them from the HISTORY projection and the LLM gets back the trend window it had before T4 — a key with no growth signal, the exact defect T4 existed to fix, reopened invisibly with T4's own tests still green. Storing `decision.report` instead is worse: it holds only the **notified** findings (rule 1) or none at all (rule 4), so every suppressed finding would look resolved to `computeResolved` on the next tick, and an LLM-free path would start inventing all-clears — precisely what (e) forbids.
 
 **c) stale expiry** (first) — every active alert with `now - last_seen > STALE_ALERT_SEC` is deleted silently, no all-clear.
 
-**d) per finding**, in input order. Key = `finding.Key` when non-empty, else `dedup.Key(component, evidence)`; the computed key is written back into the outgoing finding so every emitted document carries one.
+**d) per finding**, in input order. Key = `finding.Key` when non-empty **and matching `^[0-9a-f]{16}$`**, else `dedup.Key(component, evidence)`; the computed key is written back into the outgoing finding so every emitted document carries one.
+
+**The shape check is a containment guard, not a validation nicety, and it must run before any path is built.** The key is joined into `active-alerts/<key>.json`, so a supplied `../../pwned` writes **outside `$STATE_DIR`** — reproduced against the built binary. The exit-5 output validation does not save us: it fires after step (d) has already written the file, so the report is rejected while the write stands, breaking S.2 ("nothing outside it is ever written"), A1 and the C4 whitelist. Recomputing is free because `dedup.Key` output always conforms, and it closes the whole class rather than the reported instance — including `../history/x`, which stays inside `$STATE_DIR` but drops a non-conforming filename into the directory `analyze` sorts and filters, and `..%2f`, which is not decoded and lands as junk.
+
+Reachability is defense in depth rather than a live exploit: `analyze` overwrites `f.Key` on every finding, so today's `tick` pipeline cannot deliver a crafted key. But S-D5 makes `state` contract-bound to *trust* an injected key, `sentinel state process` reads arbitrary stdin as a documented ops path (S.1), and ARCHITECTURE §4 promises that prompt injection's worst case is "wrong text in a report" — a write outside the state volume is strictly worse than the guarantee this system makes.
+
+**A containment test must snapshot the PARENT of `$STATE_DIR`.** One rooted at the state dir cannot observe an escape by construction — the tautology trap this project has already hit twice.
 
 | State of `active-alerts/<key>.json` | Decision | `reason` |
 |---|---|---|
@@ -88,9 +98,15 @@ sequenceDiagram
 | present, `now - last_notified >= window(severity)` | **notify** | `renotify` |
 | otherwise | suppress, `suppressed_count++` | — |
 
-`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. Notified findings are annotated with `key`, `first_seen`, `occurrences`.
+`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. **Every** finding — notified and suppressed — is annotated with `key`, `first_seen` and `occurrences` from its (post-update) record. The notified ones carry the annotations into the outgoing report; all of them carry it into the history write of step (b), which is what makes `analyze`'s trend rule answerable.
 
-**e) resolved / all-clear** — for each entry of `report.resolved[]`: trim + ASCII-lowercase, compare against the identically normalized stored `headline` of every active alert **not touched in step (d) this tick** (S-D7). On match: append the *stored* headline to `all_clear` (deduplicated, first occurrence wins) and delete the key file — which guarantees exactly one all-clear. A string matching nothing is dropped silently; an LLM must not be able to invent an all-clear. A key that was never notified is deleted without an all-clear.
+**e) resolved / all-clear** — for each entry of `report.resolved[]`: trim + ASCII-lowercase and compare against **both** the identically normalized stored `headline` **and** the identically normalized stored `evidence` of every active alert **not touched in step (d) this tick** (S-D7); a match on either identifies the alert.
+
+**Why both, and why this was broken.** `analyze` computes `resolved[]` in Go as the set difference `historyKeys \ currentKeys`, rendered as the past finding's **evidence** truncated to 80 runes (contracts/analyze.md §6 step 7) — because findings have no headline of their own. Matching only on `headline` therefore means an analyzer-produced resolution **never matches anything**, every all-clear is silently dropped, and an alert that has genuinely cleared stays in `active-alerts/` until `STALE_ALERT_SEC` expires it without ever telling the operator it resolved. The two components must agree on what a `resolved[]` entry *is*; until the seam is unified they must both be accepted.
+
+**This is an accommodation with a known cost, and the unification is a T6 decision.** Matching on an 80-rune evidence truncation is a **weaker identity than the `dedup.Key` both components already share**: two alerts whose evidence agrees in the first 80 runes are indistinguishable here, and one `resolved[]` entry can close both — reproduced with two ZFS vdev lines differing at rune ~81. The window is narrow (S-D7 protects any alert still present in this tick's `findings[]`, and an absent one would have been resolved by `analyze`'s own `historyKeys \ currentKeys` anyway), which is why this stands rather than being papered over with an ambiguity check. The real fix is for `analyze` to emit `findings[].key` in `resolved[]` so the match is exact; that retires this clause and the whole collision class with it. On match: append the *stored* headline to `all_clear` (deduplicated, first occurrence wins) and delete **the file this record was read from — the directory entry name from `os.ReadDir`, never a path built from the record's own `key` field** — which guarantees exactly one all-clear. A string matching nothing is dropped silently; an LLM must not be able to invent an all-clear. A key that was never notified is deleted without an all-clear.
+
+**Why the deletion must use the directory entry, not the record's `key`.** "Delete the key file" is ambiguous between "the file named by the record's key" and "the file this record was read from", and the two are identical only while keys are trustworthy — the assumption the S.3(d) guard exists because we cannot make. A stored record containing `"key": "../../victim"` steers `os.Remove` outside `$STATE_DIR`, reproduced against a build carrying the S.3(d) guard: the guard stops such a record being *planted* through step (d), but any record already on a live volume from an older build, or corrupted, or hand-edited, still drives the escape. Deleting by `entry.Name()` costs nothing (it is already in hand from the directory read), needs no validation, and is also the *correct* file when the two disagree. `expireStaleAlerts` already does this.
 
 **f) heartbeat** — due when the `heartbeat` file's content is absent or older than today (in `cfg.Loc`) **and** the local hour is `>= HEARTBEAT_HOUR`. The window is open-ended: a container down until 11:00 still sends that day's heartbeat, and never two on one day. The content is set to today whenever **any** notification is emitted (finding, all-clear or heartbeat). The file is rewritten on every `Process` regardless, so its mtime tracks liveness.
 
@@ -98,7 +114,7 @@ sequenceDiagram
 
 1. `notified` non-empty ⇒ `status` = highest notified severity (`alert→ALERT`, `watch→WATCH`, `info→OK`); `headline`/`body` verbatim from input; `resolved` = `all_clear`; `reason` = the reason of the **first** notified finding in input order.
 2. else `all_clear` non-empty ⇒ `status="OK"`, `headline="Resolved: <first>"` (`+ " (+N more)"` when >1) **truncated to 80 runes** so the schema bound holds; `body` = one `- ` bullet per entry; `reason="all_clear"`.
-3. else heartbeat due ⇒ `status="OK"`, `headline="Daily heartbeat: all clear"`, `body="No open findings. <k> ticks since <RFC3339 UTC of the oldest kept history entry>."` (`k` = number of kept history files), `reason="heartbeat"`, `heartbeat=true`.
+3. else heartbeat due ⇒ `status="OK"`, `headline="Daily heartbeat: all clear"`, `body="No open findings. <k> ticks since <RFC3339 UTC of the oldest kept history entry>."` (`k` = number of kept history files). **When `k == 0` the timestamp is `now`** — i.e. `cfg.Now` when set, else the live clock captured once at the top of `Process`, never a second `time.Now()` call deeper in the code (C9). This case is reachable in production, not theoretical: on a fresh `/state` volume the first heartbeat assembles its body while `history/` is still empty, because the history write happens after step (g), `reason="heartbeat"`, `heartbeat=true`.
 4. else `notify=false`, `reason="suppressed"`, `status="OK"`, `findings=[]`, `resolved=[]`, `headline`/`body` verbatim from input.
 
 Rule 4's `status="OK"` is what keeps a suppressed document schema-valid (`status` = highest finding severity, and there are no findings).
@@ -173,7 +189,7 @@ No stdout. Removes exactly one file; unknown id ⇒ exit 5.
 $STATE_DIR/
 ├── heartbeat                   # "YYYY-MM-DD\n" — mtime = liveness
 ├── history/
-│   └── 1755248461-000289.json  # verbatim input report, max HISTORY_KEEP
+│   └── 1755248461-000289.json  # input report, annotated per S.3(b), max HISTORY_KEEP
 ├── active-alerts/
 │   └── 9f2c41ab77de0315.json
 └── outbox/
@@ -209,6 +225,8 @@ $STATE_DIR/
 
 `payload` is the `decision.report` document verbatim, so a retry re-renders an identical POST.
 
+**A corrupt filename is unreclaimable under the corrupt-content rule, which is why it needs its own.** Those three clauses — skipped, counted, ackable — are mutually unsatisfiable for a name that `outboxIDRe` refuses: no id exists that `OutboxAck` will accept, so the entry can never be removed, yet it keeps consuming the cap forever. `trimOutbox` evicts by lexical filename order, and a junk name sorts after every numeric one, so it is never chosen. Measured on the built binary: 50 junk files, then `outbox-add` on a real ALERT returns a fresh id and **exit 0** while the alert is immediately evicted and `outbox-take` returns nothing — silent alert loss behind a success code, the same false-healthy class this component already had to fix once. Such a file can never be a legitimate queued alert (`OutboxAdd` cannot produce the name), so reclaiming it is the only reading that satisfies S.7's "no alert is lost".
+
 ```go
 // ponytail: no lock file — the tick loop is strictly sequential (ARCHITECTURE §5).
 // Add flock only if ticks ever run in parallel.
@@ -237,7 +255,8 @@ Nothing goes to stdout on a non-zero exit; diagnostics go to stderr through `int
 | Raw alert fails to send | `tick` queues it through the same `OutboxAdd` — no alert is lost |
 | Corrupt `active-alerts/*.json` | deleted, finding treated as new (one extra notification, never a crash) |
 | Corrupt `history/*.json` | skipped by `History`, still counted for rotation |
-| Corrupt `outbox/*.json` | skipped by `OutboxTake`, still counted against `OUTBOX_MAX`, removable by `OutboxAck` |
+| Corrupt `outbox/*.json` **content** (valid `<epoch>-<rand3>.json` name) | skipped by `OutboxTake`, still counted against `OUTBOX_MAX`, removable by `OutboxAck` |
+| Corrupt outbox **filename** (does not match `^[0-9]+-[0-9]{3}\.json$`) | **evicted first by `trimOutbox`, before any well-formed entry**, and never counted as capacity that a real alert could occupy |
 | `meta.collector_errors[]` in facts | not state's concern — arrives as a normal WATCH finding and dedups like any other |
 | `$STATE_DIR` unwritable | exit 69 immediately; `tick` sends the report unfiltered so no alert is lost to a state failure |
 | `resolved[]` naming an unknown or currently-active headline | ignored, no all-clear |
@@ -296,12 +315,12 @@ type OutboxItem struct { // OutboxTake output
 type Store struct{ /* cfg *config.Config */ }
 
 func New(cfg *config.Config) (*Store, error)          // ErrStateDir → exit 69
-func (s *Store) Process(raw []byte) (*Decision, error) // raw bytes: history stores the input verbatim
+func (s *Store) Process(raw []byte) (*Decision, error) // history stores the input annotated per S.3(b), never verbatim
 func (s *Store) History(n int) ([]json.RawMessage, error)
 func (s *Store) OutboxAdd(raw []byte) (string, error)
 func (s *Store) OutboxTake() ([]OutboxItem, error)
 func (s *Store) OutboxAck(id string) error            // ErrUnknownID → exit 5
-func (s *Store) Health() error                        // heartbeat mtime younger than 3 × TickInterval
+func (s *Store) Health() error                        // nil iff heartbeat mtime younger than 3 × TickInterval; cmd maps any error to exit 1
 
 var (
     ErrStateDir  = errors.New("state dir not writable") // → 69
@@ -316,6 +335,9 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 
 | # | Case | Assertion |
 |---|---|---|
+| S1 | **history annotation — the cross-component assertion (C9)**: one `Process` with one notified and one suppressed finding | the written `history/*.json` carries non-zero `occurrences` **and** `first_seen` on **both** findings, and its name matches `^[0-9]{10}-[0-9]{6}\.json$`. Read the file from disk — asserting on the returned `Decision` proves nothing about what `analyze` will later read |
+| S2 | no stray files in `history/` after several `Process` calls | `os.ReadDir(history/)` contains only `*.json`; a leftover `.tmp-*` evicts a real report from `analyze`'s window, which sorts by name and keeps the newest N |
+| S3 | `Health()` with a fresh heartbeat / stale / missing file | nil, then non-nil, then non-nil; `cmd` maps non-nil to exit 1 |
 | 1 | same WATCH finding, 3 ticks, `Now` +5 min each | exactly 1 notification: tick 1 `notify=true`; ticks 2–3 `notify=false`, `reason="suppressed"`, `suppressed_count=1`, `status="OK"` |
 | 2 | tick 4 with `severity:"alert"` | `notify=true`, `reason="escalation"` — with case 1: T5's AC "exactly 1 notification + 1 escalation" |
 | 3 | WATCH finding at +5 h 59 min / +6 h 1 min | suppressed / `renotify` |

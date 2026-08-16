@@ -665,13 +665,37 @@ func TestNetworkBaseline(t *testing.T) {
 		t.Errorf("closed_listeners = %+v, want port 22 present", f4.Network.Data.ClosedListeners)
 	}
 
-	// read-only STATE_DIR: never fatal.
+	// baseline-ports write failure: never fatal.
+	//
+	// T5 fix, carried here because the Dockerfile builder stage re-runs
+	// `go vet`/`go test` and runs as root: a chmod-based injection
+	// (os.Chmod(stateDir, 0o500)) is vacuous under uid 0 — permission
+	// bits are not consulted for root at all, so the write would silently
+	// succeed and this test would assert nothing.
+	//
+	// A directory occupying "baseline-ports" (this package's version of
+	// the ENOTDIR technique used in internal/state) does NOT work here:
+	// collectNetwork reads baseline-ports before it ever writes it, and
+	// a pre-existing directory there fails that READ with something
+	// other than fs.ErrNotExist, which collectNetwork's switch treats as
+	// fatal to the whole section (the `default:` case) rather than
+	// "never write, but try" — a different code path than the one this
+	// test exists to exercise.
+	//
+	// Removing StateDir itself, after config.Load() has already
+	// validated it exists, is root-proof for a structural reason no
+	// uid can route around: os.CreateTemp cannot create a file inside a
+	// directory that is not there, and neither read nor write of any
+	// path under it can produce anything but ENOENT — which IS
+	// fs.ErrNotExist, so readBaseline correctly takes the
+	// "not initialized yet, attempt to write" branch, and it's
+	// writeBaseline's os.CreateTemp that then fails, exercising the
+	// intended code path.
 	roTree := newTree(t)
 	roCfg := newConfig(t, roTree)
-	if err := os.Chmod(roTree.stateDir, 0o500); err != nil {
+	if err := os.RemoveAll(roTree.stateDir); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(roTree.stateDir, 0o700)
 	fr, err := Run(context.Background(), Options{Cfg: roCfg})
 	if err != nil {
 		t.Fatalf("Run must not fail on a read-only STATE_DIR: %v", err)

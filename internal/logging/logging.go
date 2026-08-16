@@ -22,6 +22,24 @@ import (
 
 const componentKey = "component"
 
+// ParseLevel maps a LOG_LEVEL string to its slog.Level. internal/config's
+// Load already restricts LOG_LEVEL to exactly DEBUG/INFO/WARN/ERROR (exit
+// 78 otherwise) — this is a pure mapping of that validated value, not a
+// second validator, so anything else (including "") falls back to
+// LevelInfo rather than erroring again.
+func ParseLevel(s string) slog.Level {
+	switch s {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 type handler struct {
 	mu    *sync.Mutex
 	w     io.Writer
