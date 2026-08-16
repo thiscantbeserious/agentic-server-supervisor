@@ -3,12 +3,15 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
 )
 
 // outboxIDRe is the exact shape OutboxAdd emits (S.4: "<epoch>-<rand3>").
@@ -17,6 +20,14 @@ import (
 // "../history/<file>" resolves outside outbox/ entirely) — reject anything
 // that isn't this literal shape before it ever reaches filepath.Join.
 var outboxIDRe = regexp.MustCompile(`^[0-9]+-[0-9]{3}$`)
+
+// stateLogger is the C7 "component=state" logger, used only for the one
+// WARN case that isn't allowed to surface as a returned error (trimOutbox's
+// best-effort eviction) — every other diagnostic in this package is
+// reported through a returned error instead.
+func stateLogger() *slog.Logger {
+	return slog.New(logging.New(os.Stderr, slog.LevelInfo)).With("component", "state")
+}
 
 // randIntn is a seam over math/rand.Intn so tests can force a deterministic
 // id collision in OutboxAdd without depending on the real PRNG's sequence.
@@ -203,12 +214,20 @@ func (s *Store) trimOutbox() error {
 	// evicted the instant it's added, behind exit 0. Reclaim these
 	// first, unconditionally, before any well-formed entry is even
 	// considered for eviction.
+	// trimOutbox runs after a successful OutboxAdd, as best-effort cap
+	// enforcement — propagating a Remove failure here would fail the add
+	// for a payload that is already safely written, which is strictly
+	// worse than the eviction that didn't happen. Log at WARN instead: a
+	// failing eviction stays visible (C7) without turning a working add
+	// into an error.
+	logger := stateLogger()
+
 	wellFormed := files[:0]
 	for _, f := range files {
 		trimmed := strings.TrimSuffix(f.Name(), ".json")
 		if !strings.HasSuffix(f.Name(), ".json") || !outboxIDRe.MatchString(trimmed) {
 			if err := os.Remove(filepath.Join(outboxDir, f.Name())); err != nil {
-				return fmt.Errorf("state: reclaim corrupt outbox filename %s: %w", f.Name(), err)
+				logger.Warn("failed to reclaim corrupt outbox filename", "file", f.Name(), "err", err.Error())
 			}
 			continue
 		}
@@ -223,7 +242,7 @@ func (s *Store) trimOutbox() error {
 		toDelete := len(wellFormed) - s.cfg.OutboxMax
 		for i := 0; i < toDelete; i++ {
 			if err := os.Remove(filepath.Join(outboxDir, wellFormed[i].Name())); err != nil {
-				return fmt.Errorf("state: trim outbox entry %s: %w", wellFormed[i].Name(), err)
+				logger.Warn("failed to trim outbox entry", "file", wellFormed[i].Name(), "err", err.Error())
 			}
 		}
 	}
