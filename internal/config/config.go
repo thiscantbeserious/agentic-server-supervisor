@@ -105,7 +105,9 @@ type Config struct {
 	LogLevel               string
 	TmpDir                 string
 	TZ                     string
+	Loc                    *time.Location
 	Now                    time.Time
+	TickSeq                int64
 }
 
 // Load reads every C3 variable once from the process environment.
@@ -242,7 +244,9 @@ func Load() (*Config, error) {
 	cfg.TmpDir = loadString("TMPDIR", "/tmp")
 
 	cfg.TZ = loadString("TZ", "UTC")
-	if _, err := time.LoadLocation(cfg.TZ); err != nil {
+	var err error
+	cfg.Loc, err = time.LoadLocation(cfg.TZ)
+	if err != nil {
 		return nil, errf("TZ", "not a valid time zone")
 	}
 
