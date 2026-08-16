@@ -291,6 +291,15 @@ func TestLoad_C3Ranges(t *testing.T) {
 		{"DEEP_WINDOW duration above 24h", map[string]string{"DEEP_WINDOW": "25h"}, "DEEP_WINDOW"},
 		{"AGY_PRINT_TIMEOUT duration above 24h", map[string]string{"AGY_PRINT_TIMEOUT": "25h"}, "AGY_PRINT_TIMEOUT"},
 		{"DEEP_TIMEOUT duration above 24h", map[string]string{"DEEP_TIMEOUT": "25h"}, "DEEP_TIMEOUT"},
+		// C3 (amended, commit c5cab9a): the 24h bound is on the variable,
+		// not on the Go type Config stores it in — these four stay plain
+		// int seconds in Config and only become durations in state/runtime,
+		// but Load must still reject > 86400.
+		{"RAW_ALERT_REPEAT_SECONDS above 86400", map[string]string{"RAW_ALERT_REPEAT_SECONDS": "86401"}, "RAW_ALERT_REPEAT_SECONDS"},
+		{"RENOTIFY_ALERT_SEC above 86400", map[string]string{"RENOTIFY_ALERT_SEC": "86401"}, "RENOTIFY_ALERT_SEC"},
+		{"RENOTIFY_WATCH_SEC above 86400", map[string]string{"RENOTIFY_WATCH_SEC": "999999"}, "RENOTIFY_WATCH_SEC"},
+		{"STALE_ALERT_SEC above 86400", map[string]string{"STALE_ALERT_SEC": "86401"}, "STALE_ALERT_SEC"},
+		{"JOURNAL_MAX_RECORDS zero", map[string]string{"JOURNAL_MAX_RECORDS": "0"}, "JOURNAL_MAX_RECORDS"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

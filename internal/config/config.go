@@ -57,8 +57,11 @@ const maxSecondsBeforeOverflow = int(maxConvertedDuration / time.Second)
 type Config struct {
 	TickInterval           time.Duration
 	TickWindow             time.Duration
+	TickWindowRaw          string // as configured, e.g. "10m" — facts.meta.window echoes this, never TickWindow.String() (C3)
 	DeepWindow             time.Duration
+	DeepWindowRaw          string
 	SectionTimeout         time.Duration
+	JournalMaxRecords      int
 	FactsMaxBytes          int
 	ServicesMaxBytes       int
 	StateDir               string
@@ -112,16 +115,19 @@ func Load() (*Config, error) {
 	if cfg.TickInterval, err = loadSecondsRange("TICK_INTERVAL", 300, 60, 3600); err != nil {
 		return nil, err
 	}
-	if cfg.TickWindow, err = loadDuration("TICK_WINDOW", "10m"); err != nil {
+	if cfg.TickWindow, cfg.TickWindowRaw, err = loadDurationRaw("TICK_WINDOW", "10m"); err != nil {
 		return nil, err
 	}
 	if cfg.TickWindow <= cfg.TickInterval {
 		return nil, errf("TICK_WINDOW", "must be greater than TICK_INTERVAL")
 	}
-	if cfg.DeepWindow, err = loadDuration("DEEP_WINDOW", "24h"); err != nil {
+	if cfg.DeepWindow, cfg.DeepWindowRaw, err = loadDurationRaw("DEEP_WINDOW", "24h"); err != nil {
 		return nil, err
 	}
 	if cfg.SectionTimeout, err = loadSecondsRange("SECTION_TIMEOUT", 10, 1, noMax); err != nil {
+		return nil, err
+	}
+	if cfg.JournalMaxRecords, err = loadIntRange("JOURNAL_MAX_RECORDS", 20000, 1, noMax); err != nil {
 		return nil, err
 	}
 	if cfg.FactsMaxBytes, err = loadIntRange("FACTS_MAX_BYTES", 262144, 1, noMax); err != nil {
@@ -171,19 +177,23 @@ func Load() (*Config, error) {
 	if cfg.RawAlertMaxLines, err = loadIntRange("RAW_ALERT_MAX_LINES", 20, 1, 20); err != nil {
 		return nil, err
 	}
-	if cfg.RawAlertRepeatSeconds, err = loadIntRange("RAW_ALERT_REPEAT_SECONDS", 3600, 1, noMax); err != nil {
+	// These four stay plain int seconds in Config and only become durations
+	// in state/runtime, but C3's 24h bound is on the variable, not on the
+	// Go type Config happens to store it in (commit c5cab9a) — Load bounds
+	// them here so a downstream consumer can't forget to.
+	if cfg.RawAlertRepeatSeconds, err = loadIntRange("RAW_ALERT_REPEAT_SECONDS", 3600, 1, maxSecondsBeforeOverflow); err != nil {
 		return nil, err
 	}
 	if cfg.RawAlertMarkerTTLHours, err = loadIntRange("RAW_ALERT_MARKER_TTL_HOURS", 168, 1, 8760); err != nil {
 		return nil, err
 	}
-	if cfg.RenotifyAlertSec, err = loadIntRange("RENOTIFY_ALERT_SEC", 3600, 1, noMax); err != nil {
+	if cfg.RenotifyAlertSec, err = loadIntRange("RENOTIFY_ALERT_SEC", 3600, 1, maxSecondsBeforeOverflow); err != nil {
 		return nil, err
 	}
-	if cfg.RenotifyWatchSec, err = loadIntRange("RENOTIFY_WATCH_SEC", 21600, 1, noMax); err != nil {
+	if cfg.RenotifyWatchSec, err = loadIntRange("RENOTIFY_WATCH_SEC", 21600, 1, maxSecondsBeforeOverflow); err != nil {
 		return nil, err
 	}
-	if cfg.StaleAlertSec, err = loadIntRange("STALE_ALERT_SEC", 86400, 1, noMax); err != nil {
+	if cfg.StaleAlertSec, err = loadIntRange("STALE_ALERT_SEC", 86400, 1, maxSecondsBeforeOverflow); err != nil {
 		return nil, err
 	}
 	if cfg.HeartbeatHour, err = loadIntRange("HEARTBEAT_HOUR", 8, 0, 23); err != nil {
@@ -301,6 +311,21 @@ func loadDuration(name, def string) (time.Duration, error) {
 		return 0, errf(name, "must be <= 24h once converted to a duration")
 	}
 	return d, nil
+}
+
+// loadDurationRaw is loadDuration plus the exact configured string
+// (C3: "Config exposes the parsed time.Duration and the raw configured
+// string" — meta.window echoes the raw form, "10m" not "10m0s").
+func loadDurationRaw(name, def string) (time.Duration, string, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		raw = def
+	}
+	d, err := loadDuration(name, def)
+	if err != nil {
+		return 0, "", err
+	}
+	return d, raw, nil
 }
 
 func loadBool01(name string, def bool) (bool, error) {

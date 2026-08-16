@@ -153,33 +153,7 @@ func runTick(args []string) (int, error) {
 	return 1, errNotImplemented
 }
 
-// --- collect ---
-
-func runCollect(args []string) (int, error) {
-	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	deep := fs.String("deep", "", "zfs|smart|kernel|ras")
-	if err := fs.Parse(args); err != nil {
-		return 64, err
-	}
-	if fs.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "sentinel collect: unexpected positional argument")
-		return 64, nil
-	}
-	switch *deep {
-	case "", "zfs", "smart", "kernel", "ras":
-	default:
-		fmt.Fprintf(os.Stderr, "sentinel collect: --deep must be one of zfs, smart, kernel, ras, got %q\n", *deep)
-		return 64, nil
-	}
-
-	if _, err := config.Load(); err != nil {
-		return exitCodeForConfigErr(err)
-	}
-
-	fmt.Fprintln(os.Stderr, "sentinel collect: not yet implemented (internal/collect, T3)")
-	return 1, errNotImplemented
-}
+// --- collect --- (cmd/sentinel/collect.go)
 
 // --- analyze ---
 

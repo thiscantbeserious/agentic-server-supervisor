@@ -1,0 +1,58 @@
+#!/bin/sh
+# Hermetic journalctl stub (C9): routes on -D <dir> plus the -k/-p/-t
+# filter flags actually used by collect/journal, and serves a fixture
+# NDJSON file placed by the test inside that directory. Control files in
+# the same directory let a test force a timeout, stderr output, or a
+# non-zero exit without touching this script.
+dir=""
+k=0
+p=""
+t=""
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -D) dir="$arg" ;;
+    -p) p="$arg" ;;
+    -t) t="$arg" ;;
+  esac
+  if [ "$arg" = "-k" ]; then k=1; fi
+  prev="$arg"
+done
+
+if [ -z "$dir" ]; then
+  echo "journalctl: -D directory required" >&2
+  exit 1
+fi
+
+if [ -f "$dir/.sleep" ]; then
+  sleep "$(cat "$dir/.sleep")"
+fi
+if [ -f "$dir/.stderr" ]; then
+  cat "$dir/.stderr" >&2
+fi
+if [ -f "$dir/.exit" ]; then
+  code=$(cat "$dir/.exit")
+  if [ "$code" != "0" ]; then
+    exit "$code"
+  fi
+fi
+
+key=""
+if [ "$k" = "1" ] && [ "$p" = "err" ]; then
+  key="kernel"
+elif [ "$k" = "1" ]; then
+  key="kernel-all"
+elif [ "$t" = "rasdaemon" ]; then
+  key="ras"
+elif [ "$t" = "smartd" ]; then
+  key="smart"
+elif [ "$t" = "zed" ]; then
+  key="zed"
+elif [ "$k" = "0" ] && [ -z "$t" ] && [ "$p" = "err" ]; then
+  key="services"
+fi
+
+if [ -n "$key" ] && [ -f "$dir/$key.jsonl" ]; then
+  cat "$dir/$key.jsonl"
+fi
+exit 0
