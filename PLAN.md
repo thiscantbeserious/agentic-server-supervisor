@@ -59,8 +59,9 @@ Summary of what stays true from v3 (unchanged semantics, now typed):
 
 Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done = V green **+ runnability gate passed + reviewer APPROVE** (protocol §4). All code per CONTRACTS.md — deviations require a contract change first, not silent drift.
 
-- **T1 — notification stack**: compose (apprise + mailrise) + configs + `.env.example` (full C3 table).
+- **T1 — notification stack**: compose (apprise + mailrise) + configs + `.env.example` (full C3 table). **DONE — both paths verified against real Telegram delivery, 2026-08-17.**
   AC: both containers healthy; no secrets in git. V: `curl POST /notify/sentinel` → Telegram; `swaks --to omv@mailrise.xyz --server localhost:8025 --auth-user …` → Telegram.
+  Two traps the first bring-up found, both documented in `deploy/README.md`: `mailrise.conf` must be 0644 (uid 999 cannot read 0600, and `restart: unless-stopped` reports `Up` while it crash-loops), and the apprise key must be registered via `POST /add/<key>` — a hand-written `/config/<key>.cfg` is ignored and `notify` then returns **204**, a 2xx that sends nothing.
 - **T2 — shared foundation**: `go.mod`, `cmd/sentinel` skeleton (dispatch, exit-code map, `--version`), `internal/config`, `internal/logging`, `internal/facts`, `internal/report`, `internal/dedup` with embedded schemas.
   AC: config validation exits 78 naming the variable; `report.Validate` rejects the negative fixtures; `dedup.Key` matches the C6 vectors incl. the ZFS CKSUM case. V: `go test ./internal/...` (foundation packages).
 - **T3 — collect**: `internal/journal` + `internal/collect` per contract (sections, timeouts, isolation, truncation, `--deep`).
@@ -78,6 +79,10 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
   AC: container starts unprivileged; journal reading works via group_add; write attempts on every ro mount fail; empirical checks of the unverified points (ARCHITECTURE §2.6): `sensors -j` returns values, rasdaemon path readable, tmpfs/DNS ok, ZED events under `-t zed`; `sentinel health` drives the compose healthcheck; install-host.sh twice without error; Actions run green, pull from GHCR works. V: `go test -tags container ./test/...` on a Linux host.
 - **T8 — target server rollout `bam`** (= OMV host): packages, smartd/ZED mail paths, `docker compose pull` from GHCR, 24 h trial run. Does NOT run autonomously — every action on the host is announced first.
   AC: tick loop runs; heartbeat arrives; injected error ⇒ Telegram < 6 min; `smartctl -M test` mail ⇒ Telegram; `zpool scrub` ⇒ ZED event in the next report; no spam. V: `test/rollout-checklist.md`.
+  **Credential hygiene carried from T1 — do before rollout, not during:**
+  1. **Rotate the bot token.** The token used for T1's local verification was pasted into a chat transcript, so treat it as compromised: `/revoke` in @BotFather, then update `mailrise.conf` (both the `sentinel:` and `omv:` blocks) and re-run the apprise `POST /add/sentinel`.
+  2. **Set a real `MAILRISE_SMTP_PASS`.** Local verification ran on a throwaway. It must match in **both** `.env` and `mailrise.conf` — they are read by different processes and neither warns when they disagree.
+  3. **Delete any `/config/<key>.cfg` in the apprise volume.** apprise ignores it while it looks authoritative; the local volume still holds one from T1 diagnosis.
 - **T9 (optional, later)** — ZeroClaw investigator (upstream) reacting to ALERT, read-only whitelist. Own branch, only after 2 weeks of stable operation.
 
 **Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8. (T3–T6 need T2; T6 needs T1.)
