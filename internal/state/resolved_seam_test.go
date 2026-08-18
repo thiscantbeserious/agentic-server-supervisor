@@ -12,27 +12,26 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// TestResolvedSeam_AnalyzeEvidenceClosesStateAlert is main's T4 defect,
-// CodeRabbit-found: S.3(e) used to compare report.resolved[] only against
-// the stored HEADLINE, but analyze renders every resolved[] entry from a
-// past finding's EVIDENCE truncated to 80 runes (findings have no
-// headline of their own — contracts/analyze.md §6 step 7). The two
-// components disagreed about what a resolved[] entry IS, so an
-// analyzer-produced resolution matched nothing and every all-clear was
-// silently dropped.
+// TestResolvedSeam_AnalyzeKeyClosesStateAlert is the cross-package proof
+// for the resolved[] seam (contracts/analyze.md §6 step 7, contracts/
+// state.md S.3(e)): analyze renders every resolved[] entry as the
+// finding's 16-hex dedup.Key, and state matches it against the stored
+// `key` of every active alert with exact string equality (after a
+// ^[0-9a-f]{16}$ shape guard). The two components must agree on what a
+// resolved[] entry IS, or an analyzer-produced resolution matches nothing
+// and every all-clear is silently dropped — exactly the bug the old
+// evidence/headline dual-match was patching around.
 //
 // Hand-writing a resolved[] string here would just re-encode whichever
-// side's assumption happens to be convenient — exactly how this bug
-// shipped invisibly the first time, since headline-matching and
-// evidence-matching both look correct in isolation. Instead this drives
+// side's assumption happens to be convenient. Instead this drives
 // analyze's real Run() (only its RunAgy exec seam is stubbed, per C9) over
 // two ticks sharing one $STATE_DIR: tick 1 goes through state.Process and
-// establishes the alert (so active-alerts/ holds real stored evidence,
-// not a fixture); tick 2 goes through analyze.Run, which reads that same
+// establishes the alert (so active-alerts/ holds a real stored key, not a
+// fixture); tick 2 goes through analyze.Run, which reads that same
 // history and computes resolved[] as the real production code would
 // when the finding stops recurring; that report's bytes — never
 // constructed by hand — are then fed into the SAME store's Process.
-func TestResolvedSeam_AnalyzeEvidenceClosesStateAlert(t *testing.T) {
+func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 	stateDir := t.TempDir()
 	const evidence = "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
 
@@ -122,11 +121,11 @@ func TestResolvedSeam_AnalyzeEvidenceClosesStateAlert(t *testing.T) {
 	if len(rep2.Resolved) != 1 {
 		t.Fatalf("analyze.Run: resolved = %v, want exactly one entry (the smart finding dropped out)", rep2.Resolved)
 	}
-	// Setup guard: this must be the evidence-shaped entry the whole test
-	// exists to exercise, not a headline (which would make the test
-	// vacuous — matching headline-shaped input never touched the bug).
-	if rep2.Resolved[0] != evidence {
-		t.Fatalf("setup guard: resolved[0] = %q, want the untruncated fixture evidence %q (analyze's own truncation is exercised separately in internal/analyze)", rep2.Resolved[0], evidence)
+	// Setup guard: this must be the 16-hex key the whole test exists to
+	// exercise, not a headline or evidence snippet (which would make the
+	// test vacuous — matching those shapes never touched the seam).
+	if rep2.Resolved[0] != key {
+		t.Fatalf("setup guard: resolved[0] = %q, want the tick-1 alert's own key %q", rep2.Resolved[0], key)
 	}
 
 	b2, err := json.Marshal(rep2)
@@ -135,12 +134,12 @@ func TestResolvedSeam_AnalyzeEvidenceClosesStateAlert(t *testing.T) {
 	}
 
 	// --- tick 3: feed analyze's REAL output back into the SAME state
-	// store. Before the S.3(e) fix, this resolved[] entry (evidence-
-	// shaped) would match nothing — the alert would still be sitting in
+	// store. If state's key-matching regressed, this resolved[] entry
+	// would match nothing — the alert would still be sitting in
 	// active-alerts/ right now. ---
 	d3 := mustProcess(t, store, b2)
 	if _, ok := store.loadAlert(key); ok {
-		t.Errorf("alert %s still open after analyze's real resolved[] output — S.3(e) evidence-matching regressed", key)
+		t.Errorf("alert %s still open after analyze's real resolved[] output — S.3(e) key-matching regressed", key)
 	}
 	if d3.Reason != "all_clear" || len(d3.Report.Resolved) != 1 {
 		t.Errorf("tick 3: reason=%s resolved=%v, want reason=all_clear with exactly the one closed headline", d3.Reason, d3.Report.Resolved)

@@ -113,12 +113,18 @@ func newestHistory(hist []report.Report) *report.Report {
 }
 
 // computeResolved returns which of the previous report's findings are gone
-// this tick, as evidence snippets. Computed in Go, overwriting whatever the
-// model emitted: set arithmetic over data we already hold does not belong
-// in a probabilistic component. Only the newest report is compared —
-// anything older was already announced resolved. Entries are truncated to
-// the schema's length bound and empty results skipped, since one overlong
-// or empty entry would invalidate the whole report.
+// this tick, as their 16-hex dedup.Key (contracts/analyze.md §6 step 7,
+// CONTRACTS.md C5/C6). Computed in Go, overwriting whatever the model
+// emitted: set arithmetic over data we already hold does not belong in a
+// probabilistic component. Only the newest report is compared — anything
+// older was already announced resolved.
+//
+// Keys, not evidence: evidence used to be truncated to 80 runes because
+// findings have no headline of their own, which made two alerts agreeing
+// in their first 80 runes indistinguishable and forced `state` to match on
+// headline-or-evidence to compensate. The key is exact, already computed
+// in this step, and needs no truncation — dedup.Key's output is always
+// 16 hex chars, well under the schema's 80-rune resolved[] bound.
 func computeResolved(newest *report.Report, current []report.Finding) []string {
 	if newest == nil {
 		return []string{}
@@ -134,11 +140,7 @@ func computeResolved(newest *report.Report, current []report.Finding) []string {
 		if f.Key == "" || currentKeys[f.Key] {
 			continue
 		}
-		ev := truncRunes(f.Evidence, 80)
-		if ev == "" {
-			continue
-		}
-		out = append(out, ev)
+		out = append(out, f.Key)
 	}
 	sort.Strings(out)
 	if len(out) > 20 {

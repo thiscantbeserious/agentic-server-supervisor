@@ -1203,18 +1203,21 @@ func TestRun_ResolvedOverwritesModelOutput(t *testing.T) {
 	if strings.Contains(rep.Resolved[0], "this-is-not-a-real-resolution") {
 		t.Fatalf("model-supplied resolved value survived: %v", rep.Resolved)
 	}
-	if !strings.Contains(rep.Resolved[0], "Currently unreadable") {
-		t.Fatalf("Resolved does not contain the actually-resolved finding's evidence: %v", rep.Resolved)
+	// contracts/analyze.md §6 step 7: resolved[] carries the 16-hex
+	// dedup.Key of the finding that dropped out, not its evidence text.
+	if rep.Resolved[0] != goneKey {
+		t.Fatalf("Resolved[0] = %q, want the gone finding's key %q", rep.Resolved[0], goneKey)
 	}
 }
 
-// TestRun_ResolvedOver80Runes_TruncatesTo80NotRejected guards a real error:
-// report.schema.json's resolved[] maxLength is
-// 80, not the 120 an earlier contract draft specified. Truncating to 120
-// on an evidence line over 80 runes (typical for a real kernel/ZED line —
-// the previous test's 76-rune fixture never exercised this) makes
-// report.Validate reject the WHOLE document, not just the resolved entry.
-func TestRun_ResolvedOver80Runes_TruncatesTo80NotRejected(t *testing.T) {
+// TestRun_ResolvedIsKeyRegardlessOfEvidenceLength guards contracts/
+// analyze.md §6 step 7: resolved[] carries the finding's 16-hex dedup.Key,
+// never its evidence — so an evidence line's length (this fixture is 94
+// runes, well over the schema's 80-rune resolved[] maxLength) has no
+// bearing on whether the emitted entry validates. Before the key-based
+// migration this evidence would have had to be truncated to fit; a key
+// never approaches that bound.
+func TestRun_ResolvedIsKeyRegardlessOfEvidenceLength(t *testing.T) {
 	cfg := newTestConfig(t)
 	histDir := filepath.Join(cfg.StateDir, "history")
 	if err := os.MkdirAll(histDir, 0o700); err != nil {
@@ -1252,15 +1255,11 @@ func TestRun_ResolvedOver80Runes_TruncatesTo80NotRejected(t *testing.T) {
 	if len(rep.Resolved) != 1 {
 		t.Fatalf("Resolved = %v, want exactly one entry", rep.Resolved)
 	}
-	if n := len([]rune(rep.Resolved[0])); n > 80 {
-		t.Fatalf("Resolved[0] is %d runes, exceeds the schema's maxLength 80: %q", n, rep.Resolved[0])
+	if rep.Resolved[0] != goneKey {
+		t.Fatalf("Resolved[0] = %q, want the gone finding's key %q (long evidence must not leak in)", rep.Resolved[0], goneKey)
 	}
-	// report.Validate is the assertion that matters: a 120-rune truncation
-	// bound would have produced an 81-95 rune entry here that passes this
-	// package's own construction but fails schema validation on the WHOLE
-	// document — this is what main's error actually broke.
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
-		t.Fatalf("Validate() error (a >80-rune resolved entry rejects the whole report): %v", verr)
+		t.Fatalf("Validate() error: %v", verr)
 	}
 }
 
