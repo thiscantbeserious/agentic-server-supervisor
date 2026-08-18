@@ -83,14 +83,18 @@ func TruncRunes(s string, max int, ellipsis string) string
 #### N.3.3 Body assembly (deterministic, in this order)
 
 1. Sanitized `body`, newlines preserved.
-2. If `findings` is non-empty: blank line, `**Findings**`, then one block per finding in array order:
+2. If `findings` is non-empty: blank line, then one block per finding in array order. The `**Findings**` header is emitted **only when there is more than one finding** — with a single finding it labels a list of one and costs a line on a phone screen.
    ```
    - **<SEVERITY> · <component>** — <explanation>
      `<evidence line 1>`
-     _Analysis:_ <analysis>              ← only when non-empty after sanitizing
+     _Analysis:_ <analysis>              ← alert severity only, and only when non-empty
      _Recommendation:_ <recommendation>  ← only when non-empty after sanitizing
    ```
-   `<SEVERITY>` = `strings.ToUpper(severity)`. Evidence: split on `\n`, first 3 lines, each sanitized and cut to 200 runes, each on its own indented backticked line. `explanation`, `analysis`, `recommendation`, `component` are collapsed to one line.
+   `<SEVERITY>` = `strings.ToUpper(severity)`. `explanation`, `analysis`, `recommendation`, `component` are collapsed to one line.
+
+   **`analysis` is rendered for `alert` findings only.** It is the longest field in the payload and it explains *why this is or is not serious* — which an operator needs when woken at 3am for an alert, and does not need for a watch they will read over coffee. A watch finding still carries its evidence and its recommendation, so nothing actionable is lost. This is a deliberate cut for readability on a phone: the full analysis remains in the report document, in history, and in the next tick's prompt.
+
+   **Evidence is rendered verbatim inside a code span and is NOT passed through `Sanitize`.** Split on `\n`, first 3 lines, each cut to 200 runes, each on its own indented backticked line. Inside a code span every markdown metacharacter is already literal, so the only character that can break the parser is a backtick — replace `` ` `` with `'` in evidence and change nothing else. Stripping `_` there corrupted the one field the analyze contract guarantees is "copied verbatim from FACTS": `cksum_errors=1` reached the operator as `cksumerrors=1`, which does not match what they will grep for in their own logs. Control characters and invalid UTF-8 are still removed.
 3. If `resolved` is non-empty: blank line, `**Resolved**`, then `- <item>` per sanitized entry.
 4. Truncate to `cfg.NotifyBodyMax` runes; if it was cut, append `\n\n_…truncated_`.
 
@@ -103,6 +107,33 @@ func Sanitize(s string) string
 ```
 
 One `strings.Map`: drop `` ` `` `_` `*` `[` `]`, map every `unicode.IsControl` rune except `\n` to a space, drop invalid UTF-8 (`utf8.RuneError`). Helper `oneLine(s string) string` collapses `\n` and runs of spaces — applied to every field except `body`.
+
+#### N.3.6 Plain-text body (the SMTP path)
+
+```go
+// BuildTextBody renders the same report as N.3.3 with no markdown syntax,
+// for delivery over SMTP where nothing declares the body's format.
+func BuildTextBody(cfg *config.Config, r report.Report) string
+```
+
+Same content and same order as N.3.3, same `NotifyBodyMax` truncation, with the markup removed rather than reformatted:
+
+```
+<body>
+
+FINDINGS                          ← only when there is more than one finding
+- WATCH · zfs — <explanation>
+    <evidence line 1>
+    Analysis: <analysis>          ← alert severity only
+    Recommendation: <recommendation>
+
+RESOLVED
+- <item>
+```
+
+No `**`, no `_`, no backticks, no leading `- ` on the evidence lines — evidence is indented four spaces instead, which reads as a block in a mail client and in Telegram alike.
+
+**Nothing in this body needs sanitizing for a parser, because no parser is claimed.** Only control characters and invalid UTF-8 are removed; `_`, `*`, `[`, `]` and backticks are all passed through unchanged, so evidence over SMTP is byte-identical to what the collector saw. That is a property worth having on the LLM-free path specifically: when everything else is failing, the message an operator gets is the raw truth.
 
 #### N.3.4 Example (the ARCHITECTURE §2.7 CKSUM benchmark)
 
@@ -166,7 +197,9 @@ flowchart TB
 1. `net.DialTimeout` with `cfg.NotifyTimeout` + `smtp.NewClient` on `net.JoinHostPort(MailriseHost, MailrisePort)`.
 2. `c.Auth(plainAuthNoTLS{user, pass, host})` — a ~15-line local `smtp.Auth` implementing PLAIN without stdlib's TLS requirement. `ponytail: mailrise is a LAN-only plaintext listener (mailrise.conf tls: off); switch to smtp.PlainAuth over STARTTLS when the listener gets a cert.`
 3. `c.Mail(MailFrom)`, `c.Rcpt(MailTo)`, `c.Data()`.
-4. Message with CRLF endings: `From:`, `To:`, `Subject:` (`mime.QEncoding.Encode("utf-8", title)`), `Date:` (RFC1123Z), `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, blank line, then `payload.Body` verbatim.
+4. Message with CRLF endings: `From:`, `To:`, `Subject:` (`mime.QEncoding.Encode("utf-8", title)`), `Date:` (RFC1123Z), `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, blank line, then **the plain-text body (N.3.6), never `payload.Body`**.
+
+   `payload.Body` is markdown, and it renders as markdown only because the JSON payload carries `format: markdown` alongside it. Over SMTP there is no such field: mailrise forwards the text as it stands and the operator receives literal `**Findings**` and `_Analysis:_`. Verified live 2026-08-18. This is the LLM-free path — the one that must be readable when the supervisor is down — so it is the last place an unreadable message is acceptable.
 5. `c.Quit()`.
 
 ### N.6 Filesystem contract
