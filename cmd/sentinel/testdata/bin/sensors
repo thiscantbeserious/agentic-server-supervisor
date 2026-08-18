@@ -1,0 +1,21 @@
+#!/bin/sh
+# Hermetic sensors stub (C9), controlled entirely via env vars so a test
+# can t.Setenv per case without touching this script.
+if [ -n "$SENSORS_SLEEP" ]; then
+  sleep "$SENSORS_SLEEP"
+fi
+if [ -n "$SENSORS_STDERR" ]; then
+  echo "$SENSORS_STDERR" >&2
+fi
+if [ -n "$SENSORS_EXIT" ] && [ "$SENSORS_EXIT" != "0" ]; then
+  exit "$SENSORS_EXIT"
+fi
+if [ -n "$SENSORS_BAD_JSON" ]; then
+  echo "not json"
+  exit 0
+fi
+if [ -n "$SENSORS_FIXTURE" ] && [ -f "$SENSORS_FIXTURE" ]; then
+  cat "$SENSORS_FIXTURE"
+  exit 0
+fi
+echo '{}'

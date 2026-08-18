@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -267,6 +270,111 @@ func TestTickOnceRunsStartupPreflight(t *testing.T) {
 	if code != 78 {
 		t.Fatalf("code = %d, stderr = %q, want 78 (StartupPreflight must run before a --once tick, not only inside Loop)", code, stderr)
 	}
+}
+
+// fullTickEnv is baseEnv plus everything a REAL `tick --once` needs to run
+// to completion against the real binary: a stubbed journalctl/sensors on
+// PATH (testdata/bin, same self-contained stubs internal/collect and
+// internal/runtime already use), a non-empty journal dir so
+// StartupPreflight's readable-and-non-empty check passes, and a local
+// httptest recorder standing in for apprise so notify.Send actually
+// succeeds instead of timing out against a real network.
+func fullTickEnv(t *testing.T, stateDir string) []string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubBin := filepath.Join(wd, "testdata", "bin")
+
+	hostProc := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hostProc, "uptime"), []byte("1234.5 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journalDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(journalDir, ".keep"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	apprise := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(apprise.Close)
+
+	return []string{
+		"PATH=" + stubBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"STATE_DIR=" + stateDir,
+		"TMPDIR=" + t.TempDir(),
+		"HOST_ROOT=" + t.TempDir(),
+		"HOST_PROC=" + hostProc,
+		"HOST_JOURNAL_DIR=" + journalDir,
+		"HOST_JOURNAL_VOLATILE_DIR=" + t.TempDir(),
+		"HOST_RASDAEMON=" + t.TempDir(),
+		"AGY_HOME=" + t.TempDir(),
+		"AGY_SECRET_DIR=" + t.TempDir(),
+		"AGY_BIN=agy-does-not-exist", // agy missing -> analyze falls back; tick must still complete
+		"SENTINEL_HOSTNAME=bam",
+		"APPRISE_URL=" + apprise.URL,
+		"MAILRISE_USER=u",
+		"MAILRISE_PASS=changeme", // never actually used (this test only exercises the apprise path); matches TestNoSecretsInRepo's placeholder exemption
+	}
+}
+
+// TestTickOnceAllocatesTickSeq is main's ruling on t6-review's escalated
+// defect: R3.1's tick-seq counter is scoped to the sentinel-tick COMMAND
+// ("owned exclusively by tick"), not to --loop — the old code hardcoded
+// seq=1 for every --once invocation, so an operator debugging against the
+// live /state volume on bam would silently write seq-1 records into
+// active-alerts the loop was tracking at seq 400+, corrupting the trend
+// data analyze reads back out of history/. This MUST drive the real
+// binary: internal/runtime's own table (E12) calls Tick() directly with a
+// supplied seq, so the seam where main decides what to pass is invisible
+// to every in-process test.
+func TestTickOnceAllocatesTickSeq(t *testing.T) {
+	bin := buildSentinel(t)
+	stateDir := t.TempDir()
+	env := fullTickEnv(t, stateDir)
+
+	// agy isn't on PATH (AGY_BIN points nowhere), so analyze legitimately
+	// falls back and the tick reports exit 3 (C2: "3 | analyze failed").
+	// That's an expected, valid outcome here — a usage/config-error code
+	// (64/65/69/78) would mean the run never reached a real tick at all,
+	// which is what actually matters for this test.
+	stdout1, stderr1, code1 := runBin(t, bin, env, "tick", "--once")
+	if code1 == 64 || code1 == 65 || code1 == 69 || code1 == 78 {
+		t.Fatalf("run 1: code = %d (usage/config error, tick never ran), stderr = %q", code1, stderr1)
+	}
+	seq1 := tickSeqFromStdout(t, stdout1)
+	if seq1 != 1 {
+		t.Fatalf("run 1: meta.tick_seq = %d, want 1 (stdout=%s)", seq1, stdout1)
+	}
+
+	stdout2, stderr2, code2 := runBin(t, bin, env, "tick", "--once")
+	if code2 == 64 || code2 == 65 || code2 == 69 || code2 == 78 {
+		t.Fatalf("run 2: code = %d (usage/config error, tick never ran), stderr = %q", code2, stderr2)
+	}
+	seq2 := tickSeqFromStdout(t, stdout2)
+	if seq2 != 2 {
+		t.Fatalf("run 2: meta.tick_seq = %d, want 2 — the counter must advance across separate --once invocations (stdout=%s)", seq2, stdout2)
+	}
+
+	if _, err := os.Stat(filepath.Join(stateDir, "tick-seq")); err != nil {
+		t.Errorf("$STATE_DIR/tick-seq must exist after a --once run: %v", err)
+	}
+}
+
+func tickSeqFromStdout(t *testing.T, stdout string) int64 {
+	t.Helper()
+	var doc struct {
+		Meta struct {
+			TickSeq int64 `json:"tick_seq"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &doc); err != nil {
+		t.Fatalf("stdout is not the expected report JSON: %v (stdout=%q)", err, stdout)
+	}
+	return doc.Meta.TickSeq
 }
 
 func TestTZDataEmbedded(t *testing.T) {

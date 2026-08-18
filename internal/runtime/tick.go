@@ -85,6 +85,15 @@ func nowFor(cfg *config.Config) time.Time {
 // notify, and the outbox drain (R3.2).
 func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult {
 	logger := newTickLogger(cfg)
+	if seq == 0 {
+		// R3.1: "$STATE_DIR/tick-seq ... owned exclusively by tick ...
+		// read, incremented and written atomically before step 1." The
+		// counter is scoped to the sentinel-tick COMMAND, not to --loop —
+		// R3.1 draws no --once/--loop distinction. Loop() already
+		// allocates its own seq before calling Tick, so it never passes
+		// 0 here; this branch exists for a direct --once invocation.
+		seq = nextTickSeq(cfg, logger)
+	}
 	cfg.TickSeq = seq // S.2: state reads this, runtime is the sole writer
 	clock := nowFor(cfg)
 
@@ -118,18 +127,21 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	// 1b. raw-alert scan — before analysis, dispatched immediately (design
 	// principle 4): a crashing or quota-blocked agy must never delay or
 	// swallow a critical kernel event.
-	if rawRep, n, scanFailed := scanRawAlerts(cfg, f, clock); rawRep != nil {
+	rawRep, n, scanFailed := scanRawAlerts(cfg, f, clock)
+	if scanFailed {
+		// R3.3 (amended 64e57f3): the exit code is NOT suppressed even
+		// when the scan-failure NOTIFICATION is throttled by its marker
+		// (rawRep may be nil below) — "fails loud, never silent" is kept
+		// where it cannot be muted: the exit code, the log line, and
+		// sentinel health. Only the human channel is throttled.
+		result.ExitCode = maxCode(result.ExitCode, 2)
+	}
+	if rawRep != nil {
 		if _, verr := report.Validate(mustMarshalR(rawRep)); verr != nil {
 			logger.Error("raw report failed validation, replacing", "error", verr)
 			rawRep = minimalValidationFailureAlert(cfg, seq, verr)
 		}
 		result.RawAlerts = n
-		if scanFailed {
-			// The safety path fails loud: a failed scan is visible in the
-			// exit code regardless of whether the alert about it was
-			// itself delivered (R3.3).
-			result.ExitCode = maxCode(result.ExitCode, 2)
-		}
 		if err := d.NotifySend(ctx, cfg, *rawRep, false); err != nil {
 			raw, _ := json.Marshal(rawRep)
 			result.ExitCode = maxCode(result.ExitCode, 4)

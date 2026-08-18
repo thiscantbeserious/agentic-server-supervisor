@@ -469,6 +469,47 @@ func TestTick_KernelSectionError(t *testing.T) {
 	}
 }
 
+// TestTick_KernelSectionErrorThrottledButExitCodeNever is the contract
+// amendment at 64e57f3: a persistently broken kernel scan must not spam
+// the human channel (288 Telegram messages/day at the default
+// TICK_INTERVAL), but "fails loud, never silent" must survive for
+// whatever CANNOT be muted by an operator — the exit code. Two
+// assertions, and the second is the one that matters: a test covering
+// only the throttle would let someone silence the failure entirely.
+func TestTick_KernelSectionErrorThrottledButExitCodeNever(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	f := factsKernelSectionError("journalctl -k exited 1")
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return f, nil }
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	res1 := Tick(context.Background(), cfg, 1, d)
+	if res1.ExitCode == 0 {
+		t.Fatal("tick 1: ExitCode = 0, want non-zero")
+	}
+	firstCount := rec.count()
+	if firstCount == 0 {
+		t.Fatal("tick 1: no notification sent for the first occurrence")
+	}
+
+	// Second consecutive failing tick, well inside RAW_ALERT_REPEAT_SECONDS
+	// (default 3600s) — must NOT notify again...
+	cfg.Now = tick0.Add(1 * time.Minute)
+	res2 := Tick(context.Background(), cfg, 2, d)
+	if rec.count() != firstCount {
+		t.Errorf("tick 2: apprise received %d requests, want still %d (the human channel must be throttled)", rec.count(), firstCount)
+	}
+	// ...but the exit code must NEVER be suppressed — this is the
+	// assertion that actually keeps the safety path "loud, never silent".
+	if res2.ExitCode == 0 {
+		t.Error("tick 2: ExitCode = 0, want non-zero — throttling the notification must not throttle the exit code")
+	}
+}
+
 // --- E9: raw_alert_delivery_fails ---
 
 func TestTick_RawAlertDeliveryFails(t *testing.T) {

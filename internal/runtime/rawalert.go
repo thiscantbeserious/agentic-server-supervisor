@@ -61,6 +61,12 @@ func kernelScanFailed(f *facts.Facts) (bool, string) {
 
 const rawAlertsDir = "raw-alerts"
 
+// scanFailedMarkerKey is R3.3's "reserved key scan-failed" — the one
+// marker in the raw-alerts/ directory not shaped like a dedup.Key,
+// deliberately: it identifies "the scan itself is broken" rather than any
+// one candidate, and must never collide with a real kernel-message key.
+const scanFailedMarkerKey = "scan-failed"
+
 func markerPath(stateDir, key string) string {
 	return filepath.Join(stateDir, rawAlertsDir, key)
 }
@@ -219,6 +225,19 @@ func scanRawAlerts(cfg *config.Config, f *facts.Facts, now time.Time) (rep *repo
 	sweepMarkers(cfg.StateDir, now, time.Duration(cfg.RawAlertMarkerTTLHours)*time.Hour)
 
 	if failed, reason := kernelScanFailed(f); failed {
+		// R3.3 (amended 64e57f3): the scan-failure alert is marker-
+		// suppressed like any other raw alert, under the reserved key
+		// "scan-failed" — but scanFailed is still true, unconditionally,
+		// so the exit code stays non-zero on EVERY failing tick even on
+		// a tick where the human channel is throttled. "Fails loud,
+		// never silent" holds for the exit code, the log line and
+		// sentinel health; only the notification is throttled, because
+		// alert fatigue loses events as effectively as a swallowed alert.
+		repeat := time.Duration(cfg.RawAlertRepeatSeconds) * time.Second
+		if isSuppressed(cfg.StateDir, scanFailedMarkerKey, now, repeat) {
+			return nil, 0, true
+		}
+		writeMarker(cfg.StateDir, scanFailedMarkerKey, now)
 		rep := buildScanFailedReport(cfg, cfg.TickSeq, reason)
 		return rep, len(rep.Findings), true
 	}

@@ -184,8 +184,10 @@ func runTick(args []string) (int, error) {
 		return code, fmt.Errorf("tick: %w", err)
 	}
 
-	seq := int64(1) // --once has no persistent counter across invocations (that's --loop's tick-seq file, R3.1)
-	res := runtime.Tick(context.Background(), cfg, seq, deps)
+	// R3.1's tick-seq counter is scoped to the sentinel-tick command, not
+	// to --loop — seq 0 tells Tick to allocate the next one from
+	// $STATE_DIR/tick-seq itself, same file --loop advances.
+	res := runtime.Tick(context.Background(), cfg, 0, deps)
 	if res.Report != nil {
 		b, merr := json.Marshal(res.Report)
 		if merr != nil {
