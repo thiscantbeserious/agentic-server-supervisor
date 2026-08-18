@@ -45,14 +45,13 @@ fi
 # R2's runtime journal-readable preflight: an unfiltered "-n1" query (no
 # -k/-p/-t), used with "-o json" so an empty journal (real journalctl:
 # "-- No entries --" on stdout, exit 0) is discriminated from a real
-# record — a plain exit-code-only check would pass on both. A per-test
-# ".n1empty" control file simulates that empty-but-healthy-exit case;
-# otherwise a synthetic journal-export JSON record proves the query path
-# works end to end.
+# record — a plain exit-code-only check would pass on both. The
+# empty/unreadable case is exercised by hand-rolled per-test stubs in
+# internal/runtime/journalcheck_test.go, not by this shared fixture; here
+# a synthetic journal-export JSON record simply proves the query path
+# (arg routing, dir handling) works end to end for the many OTHER tests
+# that go through the full StartupPreflight and just need it to pass.
 if [ -n "$n" ]; then
-  if [ -f "$dir/.n1empty" ]; then
-    exit 0
-  fi
   echo '{"MESSAGE":"synthetic boot entry","PRIORITY":"6","__REALTIME_TIMESTAMP":"1000000000000"}'
   exit 0
 fi

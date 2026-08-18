@@ -180,7 +180,7 @@ func runTick(args []string) (int, error) {
 	// R2: "Startup sequence (--loop, and once before the single tick in
 	// --once)" — preflight, the read-only lint, and agy-home seeding run
 	// here too, not only inside Loop().
-	if code, err := runtime.StartupPreflight(cfg); err != nil {
+	if code, err := runtime.StartupPreflight(context.Background(), cfg); err != nil {
 		return code, fmt.Errorf("tick: %w", err)
 	}
 

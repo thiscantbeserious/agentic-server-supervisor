@@ -216,7 +216,7 @@ func assertBinDirReadOnly(logger warner) {
 // (config.Load) and step 6 (signal.NotifyContext, --loop only) are the
 // caller's job. Returns the C2 exit code: 69 for a state-dir failure, 78
 // for any other preflight failure, 0 on success.
-func StartupPreflight(cfg *config.Config) (int, error) {
+func StartupPreflight(ctx context.Context, cfg *config.Config) (int, error) {
 	logger := newLogger(cfg)
 
 	if err := preflight(cfg); err != nil {
@@ -237,7 +237,23 @@ func StartupPreflight(cfg *config.Config) (int, error) {
 	// prove journalctl can actually read journal CONTENT through it. Run
 	// before the first tick so a stale JOURNAL_GID fails loud at startup
 	// instead of silently reporting all-clear forever.
-	if err := checkJournalReadable(context.Background(), cfg); err != nil {
+	//
+	// ctx is deliberately NOT the shutdown-signal context both callers
+	// hold (Loop's sigCtx, --once's request context): wiring a
+	// SIGTERM-cancellable context in here would make a real SIGTERM
+	// arriving during preflight report exit 78 ("context canceled") from
+	// checkJournalReadable's own exec.CommandContext, instead of the
+	// exit 0 R2 contracts for a signal-driven shutdown ("--loop
+	// terminates only with 0 (signal), 78 (config/mount preflight) ...").
+	// checkJournalReadable already self-bounds via cfg.SectionTimeout (or
+	// its own 10s default), so the accepted cost of NOT threading shutdown
+	// cancellation through is a startup tail of at most that timeout —
+	// comfortably inside the 15s stop_grace_period compose sets. Both
+	// current callers pass context.Background() for exactly this reason;
+	// ctx stays a parameter (rather than being dropped) so a future
+	// caller with a different tradeoff, or a test that wants to bound the
+	// whole preflight call itself, still can.
+	if err := checkJournalReadable(ctx, cfg); err != nil {
 		var pferr *preflightError
 		if errors.As(err, &pferr) {
 			logger.Error("journal not readable", "path", pferr.path, "reason", pferr.reason)
@@ -257,7 +273,7 @@ func StartupPreflight(cfg *config.Config) (int, error) {
 func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 	logger := newLogger(cfg)
 
-	if code, err := StartupPreflight(cfg); err != nil {
+	if code, err := StartupPreflight(context.Background(), cfg); err != nil {
 		return code, err
 	}
 

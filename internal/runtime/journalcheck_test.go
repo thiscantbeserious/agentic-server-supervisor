@@ -12,10 +12,12 @@ package runtime
 // byte-empty-vs-non-empty stdout, not about section routing.
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -160,12 +162,35 @@ func TestStartupPreflight_JournalUnreadable_Exit78(t *testing.T) {
 	withStubJournalctlOnPath(t, `exit 0`) // exits clean, emits nothing: the GID-drift symptom
 	cfg := testConfig(t, tick0)
 
-	code, err := StartupPreflight(cfg)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	code, err := StartupPreflight(context.Background(), cfg)
 	if code != 78 {
 		t.Errorf("code = %d, want 78", code)
 	}
 	if err == nil {
 		t.Error("err = nil, want non-nil naming the journal readability failure")
+	}
+
+	// Reviewer defect 1 (round 1): PLAN.md's T7 obligation is two clauses,
+	// not one — "log ERROR naming the likely cause (JOURNAL_GID /
+	// group_add / the /host/journal mount) AND exit 78". Every prior
+	// assertion here covered only the exit code; deleting the log line
+	// entirely, or stripping the cause hint from it, left the suite green.
+	// Assert on the emitted line itself: ERROR level, and it names at
+	// least one of the three named causes (substring on the cause token,
+	// not the whole sentence, so a prose rewrite doesn't trip this).
+	logText := logBuf.String()
+	if !strings.Contains(logText, "ERROR") {
+		t.Errorf("stderr does not contain an ERROR line: %q", logText)
+	}
+	if !strings.Contains(logText, "journal not readable") {
+		t.Errorf("stderr does not name the journal-readable failure: %q", logText)
+	}
+	if !strings.Contains(logText, "JOURNAL_GID") {
+		t.Errorf("stderr does not name JOURNAL_GID as a likely cause: %q", logText)
 	}
 }
 
@@ -175,7 +200,7 @@ func TestStartupPreflight_JournalReadable_Passes(t *testing.T) {
 	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
 	cfg := testConfig(t, tick0)
 
-	code, err := StartupPreflight(cfg)
+	code, err := StartupPreflight(context.Background(), cfg)
 	if code != 0 || err != nil {
 		t.Errorf("StartupPreflight() = %d, %v, want 0, nil", code, err)
 	}
