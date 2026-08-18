@@ -124,6 +124,18 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
   1. **Rotate the bot token.** The token used for T1's local verification was pasted into a chat transcript, so treat it as compromised: `/revoke` in @BotFather, then update `mailrise.conf` (both the `sentinel:` and `omv:` blocks) and re-run the apprise `POST /add/sentinel`.
   2. **Set a real `MAILRISE_SMTP_PASS`.** Local verification ran on a throwaway. It must match in **both** `.env` and `mailrise.conf` — they are read by different processes and neither warns when they disagree.
   3. **Delete any `/config/<key>.cfg` in the apprise volume.** apprise ignores it while it looks authoritative; the local volume still holds one from T1 diagnosis.
+- **T10 (optional, later) — mute**: suppress notifications for a chosen window without stopping the supervisor.
+  **Build after T8's 24h trial, not before.** The trial is the data that says whether mute is needed, which durations matter, and what should bypass one. If the trial yields four messages a day the answer is "not needed"; if it yields forty, the interesting question is why, and a mute button would be treating the symptom.
+
+  **Three designs, in cost order:**
+  1. **Host CLI (recommended start).** `sentinel mute 6h` writes `$STATE_DIR/mute-until` as RFC3339; `state` reads it and suppresses notification while active; `sentinel mute --status` and `sentinel unmute` round it out. No token, no inbound channel, roughly one state file and a check in `Process`.
+  2. **Telegram command — has a security cost that must be stated.** Accepting `/mute 6h` from Telegram means `sentinel` polls `getUpdates`, which means giving the bot token to the process that parses attacker-controlled log text. That is the one boundary the whole notification design is built around (ARCHITECTURE §3: `notify` is the only component that knows what the notification service is, and it holds no credential). **Do not take this option.**
+  3. **Separate poller container.** A fourth service in the compose stack holds the token, polls `getUpdates`, and writes the same `mute-until` file to the shared volume. `sentinel` stays token-free and only reads the file. Gets phone-side control while keeping the boundary; costs one more container. Option 1 is a prerequisite either way, since both write the same file.
+
+  **The open design question, which the trial should answer:** what bypasses a mute? A mute that hides a dying disk is how people lose pools. The instinct is that `alert` severity always gets through while `watch`/`info` and the heartbeat are suppressed, with the muted state named in the message so the operator knows it is overriding — but that is a guess about how noisy `bam` actually is, and the trial replaces the guess.
+
+  **Whatever the rule, the exit code and `sentinel health` must never be muted** — same principle as the raw-alert scan-failure throttle (runtime R3.3): quiet in the channel a human reads, loud everywhere a machine looks.
+
 - **T9 (optional, later)** — ZeroClaw investigator (upstream) reacting to ALERT, read-only whitelist. Own branch, only after 2 weeks of stable operation.
 
 **Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8. (T3–T6 need T2; T6 needs T1.)
