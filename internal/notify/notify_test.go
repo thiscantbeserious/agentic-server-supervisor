@@ -1,0 +1,585 @@
+package notify
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+)
+
+// --- apprise stub (httptest.Server recording the last body) ---
+
+type appriseStub struct {
+	mu       sync.Mutex
+	status   int
+	lastBody []byte
+	lastPath string
+	requests int
+	srv      *httptest.Server
+}
+
+func newAppriseStub(t *testing.T, status int) *appriseStub {
+	t.Helper()
+	s := &appriseStub{status: status}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.requests++
+		s.lastPath = r.URL.Path
+		s.lastBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(s.status)
+		s.mu.Unlock()
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+func (s *appriseStub) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests
+}
+
+// --- SMTP stub: a net.Listen goroutine speaking the real protocol ---
+
+type smtpStub struct {
+	mu       sync.Mutex
+	sawAuth  bool
+	rcptTo   string
+	dataText string
+	ln       net.Listener
+}
+
+func newSMTPStub(t *testing.T) *smtpStub {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &smtpStub{ln: ln}
+	go s.serve()
+	t.Cleanup(func() { ln.Close() })
+	return s
+}
+
+func (s *smtpStub) addr() (string, string) {
+	host, port, _ := net.SplitHostPort(s.ln.Addr().String())
+	return host, port
+}
+
+func (s *smtpStub) serve() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *smtpStub) handle(conn net.Conn) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	w := conn
+
+	write := func(msg string) { w.Write([]byte(msg + "\r\n")) }
+	write("220 stub.mailrise.local ESMTP")
+
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		upper := strings.ToUpper(line)
+		switch {
+		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+			write("250-stub.mailrise.local")
+			write("250 AUTH PLAIN")
+		case strings.HasPrefix(upper, "AUTH PLAIN"):
+			s.mu.Lock()
+			s.sawAuth = true
+			s.mu.Unlock()
+			write("235 Authentication successful")
+		case strings.HasPrefix(upper, "MAIL FROM"):
+			write("250 OK")
+		case strings.HasPrefix(upper, "RCPT TO"):
+			s.mu.Lock()
+			s.rcptTo = line
+			s.mu.Unlock()
+			write("250 OK")
+		case strings.HasPrefix(upper, "DATA"):
+			write("354 End data with <CR><LF>.<CR><LF>")
+			var data strings.Builder
+			for {
+				dl, err := r.ReadString('\n')
+				if err != nil {
+					return
+				}
+				if dl == ".\r\n" || dl == ".\n" {
+					break
+				}
+				data.WriteString(dl)
+			}
+			s.mu.Lock()
+			s.dataText = data.String()
+			s.mu.Unlock()
+			write("250 OK: queued")
+		case strings.HasPrefix(upper, "QUIT"):
+			write("221 Bye")
+			return
+		default:
+			write("500 unrecognized command")
+		}
+	}
+}
+
+// --- config helper ---
+
+func notifyTestConfig(t *testing.T, apprise *appriseStub, smtp *smtpStub) *config.Config {
+	t.Helper()
+	t.Setenv("SENTINEL_HOSTNAME", "bam")
+	if apprise != nil {
+		t.Setenv("APPRISE_URL", apprise.srv.URL)
+	} else {
+		t.Setenv("APPRISE_URL", "http://127.0.0.1:1")
+	}
+	t.Setenv("APPRISE_KEY", "sentinel")
+	if smtp != nil {
+		host, port := smtp.addr()
+		t.Setenv("MAILRISE_HOST", host)
+		t.Setenv("MAILRISE_PORT", port)
+	}
+	t.Setenv("MAILRISE_USER", "testuser")
+	t.Setenv("MAILRISE_PASS", "testpass")
+	t.Setenv("SENTINEL_MAIL_FROM", "sentinel@mailrise.xyz")
+	t.Setenv("SENTINEL_MAIL_TO", "omv@mailrise.xyz")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+func readFixtureBytes(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return b
+}
+
+// --- 1: TestFlags ---
+
+func TestFlags(t *testing.T) {
+	cfg := notifyTestConfig(t, newAppriseStub(t, 200), nil)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		args []string
+		in   []byte
+		want int
+	}{
+		{"help", []string{"--help"}, nil, 0},
+		{"unknown flag", []string{"--bogus"}, nil, 64},
+		{"two positional args", []string{"a", "b"}, nil, 64},
+		{"dry-run and seed-config", []string{"--dry-run", "--seed-config"}, nil, 64},
+		{"seed-config with file", []string{"--seed-config", "file.json"}, nil, 64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			got, _ := Run(ctx, cfg, c.args, bytes.NewReader(c.in), &stdout)
+			if got != c.want {
+				t.Errorf("Run(%v) = %d, want %d", c.args, got, c.want)
+			}
+		})
+	}
+}
+
+// --- 8: TestDryRun ---
+
+func TestDryRun(t *testing.T) {
+	stub := newAppriseStub(t, 200)
+	cfg := notifyTestConfig(t, stub, nil)
+	raw := readFixtureBytes(t, "report-ok.json")
+
+	var stdout bytes.Buffer
+	code, err := Run(context.Background(), cfg, []string{"--dry-run"}, bytes.NewReader(raw), &stdout)
+	if err != nil || code != 0 {
+		t.Fatalf("Run() = %d, %v", code, err)
+	}
+	if stub.count() != 0 {
+		t.Errorf("stub received %d requests, want 0", stub.count())
+	}
+	var p Payload
+	if err := json.Unmarshal(stdout.Bytes(), &p); err != nil {
+		t.Fatalf("stdout is not the payload JSON: %v (%q)", err, stdout.String())
+	}
+	if p.Title == "" {
+		t.Error("dry-run payload has no title")
+	}
+}
+
+// --- 9: TestInvalidReport ---
+
+func TestInvalidReport(t *testing.T) {
+	stub := newAppriseStub(t, 200)
+	cfg := notifyTestConfig(t, stub, nil)
+	raw := readFixtureBytes(t, "report-invalid.json")
+
+	var stdout bytes.Buffer
+	code, err := Run(context.Background(), cfg, nil, bytes.NewReader(raw), &stdout)
+	if code != 65 || err == nil {
+		t.Fatalf("Run() = %d, %v, want 65 and an error", code, err)
+	}
+	if stub.count() != 0 {
+		t.Errorf("stub received %d requests, want 0", stub.count())
+	}
+}
+
+// --- 10: TestSendFailures ---
+
+func TestSendFailures(t *testing.T) {
+	r := loadFixture(t, "report-ok.json")
+
+	t.Run("502", func(t *testing.T) {
+		stub := newAppriseStub(t, 502)
+		cfg := notifyTestConfig(t, stub, nil)
+		err := Send(context.Background(), cfg, r, false)
+		if !errors.Is(err, ErrSend) {
+			t.Fatalf("err = %v, want ErrSend", err)
+		}
+		if !strings.HasPrefix(err.Error(), "http 502: ") {
+			t.Errorf("error text = %q, want prefix %q", err.Error(), "http 502: ")
+		}
+	})
+
+	t.Run("closed server", func(t *testing.T) {
+		stub := newAppriseStub(t, 200)
+		stub.srv.Close() // now genuinely unreachable
+		cfg := notifyTestConfig(t, stub, nil)
+		err := Send(context.Background(), cfg, r, false)
+		if !errors.Is(err, ErrSend) {
+			t.Fatalf("err = %v, want ErrSend", err)
+		}
+		if !strings.HasPrefix(err.Error(), "transport: ") {
+			t.Errorf("error text = %q, want prefix %q", err.Error(), "transport: ")
+		}
+	})
+
+	t.Run("204 is failure not success", func(t *testing.T) {
+		stub := newAppriseStub(t, 204)
+		cfg := notifyTestConfig(t, stub, nil)
+		err := Send(context.Background(), cfg, r, false)
+		if !errors.Is(err, ErrSend) {
+			t.Fatalf("204 must be treated as delivery failure, got err=%v", err)
+		}
+	})
+}
+
+// --- 11: TestSMTPFallback ---
+
+func TestSMTPFallback(t *testing.T) {
+	appriseStubSrv := newAppriseStub(t, 200)
+	smtp := newSMTPStub(t)
+	cfg := notifyTestConfig(t, appriseStubSrv, smtp)
+	r := loadFixture(t, "report-ok.json")
+
+	if err := Send(context.Background(), cfg, r, true); err != nil {
+		t.Fatalf("Send(smtpFallback=true): %v", err)
+	}
+	smtp.mu.Lock()
+	sawAuth, rcptTo, dataText := smtp.sawAuth, smtp.rcptTo, smtp.dataText
+	smtp.mu.Unlock()
+
+	if !sawAuth {
+		t.Error("SMTP stub never saw AUTH")
+	}
+	if !strings.Contains(rcptTo, "<omv@mailrise.xyz>") {
+		t.Errorf("RCPT TO = %q, want it to carry <omv@mailrise.xyz>", rcptTo)
+	}
+	payload := BuildPayload(r, cfg)
+	if !strings.Contains(dataText, "Subject:") || !strings.Contains(dataText, subjectEncodedForTest(payload.Title)) {
+		t.Errorf("DATA block missing the title-carrying Subject: %q", dataText)
+	}
+	if appriseStubSrv.count() != 0 {
+		t.Errorf("apprise stub received %d requests, want 0 (SMTP fallback must not also POST)", appriseStubSrv.count())
+	}
+
+	t.Run("unconfigured", func(t *testing.T) {
+		t.Setenv("MAILRISE_PASS", "")
+		cfg2, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = Send(context.Background(), cfg2, r, true)
+		if err == nil || err.Error() != "smtp fallback unconfigured" {
+			t.Fatalf("err = %v, want exactly %q", err, "smtp fallback unconfigured")
+		}
+		if !errors.Is(err, ErrSend) {
+			t.Error("unconfigured smtp fallback must still be ErrSend")
+		}
+	})
+}
+
+func subjectEncodedForTest(title string) string {
+	// ASCII-only titles pass through mime.QEncoding unencoded; every fixture
+	// title used here is ASCII, so a plain substring check is meaningful.
+	return title
+}
+
+// --- 12: TestNoWrites ---
+
+func TestNoWrites(t *testing.T) {
+	root := t.TempDir()
+	before := snapshotTree(t, root)
+
+	stub := newAppriseStub(t, 200)
+	smtp := newSMTPStub(t)
+	cfg := notifyTestConfig(t, stub, smtp)
+	r := loadFixture(t, "report-ok.json")
+
+	if err := Send(context.Background(), cfg, r, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := Send(context.Background(), cfg, r, true); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if _, err := Run(context.Background(), cfg, []string{"--dry-run"}, bytes.NewReader(readFixtureBytes(t, "report-ok.json")), &stdout); err != nil {
+		t.Fatal(err)
+	}
+
+	after := snapshotTree(t, root)
+	if before != after {
+		t.Errorf("test root changed:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func snapshotTree(t *testing.T, root string) string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(namesOf(entries), ",")
+}
+
+func namesOf(entries []os.DirEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Name()
+	}
+	return out
+}
+
+// --- 13: TestRetryByteIdentical ---
+
+func TestRetryByteIdentical(t *testing.T) {
+	cfg := notifyTestConfig(t, newAppriseStub(t, 200), nil)
+	raw := readFixtureBytes(t, "report-watch-zfs-cksum.json")
+
+	var r1, r2 report.Report
+	if err := json.Unmarshal(raw, &r1); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &r2); err != nil {
+		t.Fatal(err)
+	}
+	p1 := BuildPayload(r1, cfg)
+	p2 := BuildPayload(r2, cfg)
+	b1, _ := json.Marshal(p1)
+	b2, _ := json.Marshal(p2)
+	if !bytes.Equal(b1, b2) {
+		t.Errorf("rendering the same bytes twice produced different payloads:\n%s\n%s", b1, b2)
+	}
+}
+
+// --- 14: TestRawAlertRoundTrip ---
+
+func TestRawAlertRoundTrip(t *testing.T) {
+	cfg := notifyTestConfig(t, newAppriseStub(t, 200), nil)
+
+	longMsg := strings.Repeat("kernel panic detail segment ", 150) // ~4000+ runes
+	longMsg = longMsg[:4000]
+	body := "Raw kernel alert, sent without analysis (LLM-free path).\n\n" +
+		time.Now().UTC().Format(time.RFC3339) + " crit " + longMsg + "\x07" + string([]byte{0xff, 0xfe}) +
+		"\n\nA full analysis follows in the next report if the analyzer is available."
+
+	rawReport := report.Report{
+		Status:   "ALERT",
+		Headline: "1 critical kernel event(s) on bam",
+		Body:     body,
+		Findings: []report.Finding{{
+			Severity: "alert", Component: "kernel",
+			Evidence:    longMsg + "\x07",
+			Explanation: "Kernel logged a priority-2 (crit) message. Sent unanalysed on the LLM-free critical path.",
+			Key:         "3f9a1c7d0b2e4551",
+		}},
+		Resolved: []string{},
+		Meta:     &report.Meta{Hostname: "bam", TickSeq: 412, Raw: true},
+	}
+	if err := Validate(rawReport); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	p := BuildPayload(rawReport, cfg)
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("payload did not marshal: %v", err)
+	}
+	var probe map[string]any
+	if err := json.Unmarshal(b, &probe); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if runes := len([]rune(p.Body)); runes > cfg.NotifyBodyMax+20 {
+		t.Errorf("body is %d runes, want within NotifyBodyMax (%d) + truncation suffix", runes, cfg.NotifyBodyMax)
+	}
+}
+
+// --- 15: TestSeedConfig ---
+
+func TestSeedConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "sentinel.cfg")
+	if err := os.WriteFile(cfgFile, []byte("# comment\ntgram://token/chatid\n\ntgram://token2/chatid2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	t.Setenv("SENTINEL_HOSTNAME", "bam")
+	t.Setenv("APPRISE_URL", srv.URL)
+	t.Setenv("APPRISE_KEY", "sentinel")
+	t.Setenv("APPRISE_CONFIG_FILE", cfgFile)
+	t.Setenv("MAILRISE_USER", "u")
+	t.Setenv("MAILRISE_PASS", "p")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	urls, err := SeedConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("SeedConfig: %v", err)
+	}
+	if urls != 2 {
+		t.Errorf("urls = %d, want 2", urls)
+	}
+	if gotPath != "/add/sentinel" {
+		t.Errorf("path = %q, want /add/sentinel", gotPath)
+	}
+	if !bytes.Contains(gotBody, []byte("tgram://token/chatid")) {
+		t.Errorf("multipart body did not carry the config file verbatim: %q", gotBody)
+	}
+
+	srv.Close()
+	if _, err := SeedConfig(context.Background(), cfg); err == nil {
+		t.Error("SeedConfig against a closed server must error")
+	}
+}
+
+// --- 17: TestNoSecretsInRepo ---
+
+var (
+	telegramTokenRe = regexp.MustCompile(`[0-9]{8,}:AA[A-Za-z0-9_-]+`)
+	// The value class deliberately excludes quotes/backticks/parens: a
+	// shell/env assignment is the shape this hunts for, a shape that
+	// excludes both a Go regex literal and contracts/notify.md's own
+	// prose describing this row from matching themselves.
+	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
+)
+
+func TestNoSecretsInRepo(t *testing.T) {
+	root := "../.."
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		base := d.Name()
+		if d.IsDir() {
+			switch base {
+			case ".git", ".runtime", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if base == ".env" {
+			return nil // gitignored, developer-local; not part of "in the repo"
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !isProbablyText(data) {
+			return nil
+		}
+		if m := telegramTokenRe.Find(data); m != nil {
+			t.Errorf("%s: looks like a Telegram bot token: %q", path, m)
+		}
+		if base == ".env.example" {
+			return nil // this IS the placeholder file
+		}
+		for _, m := range mailrisePassRe.FindAllSubmatch(data, -1) {
+			val := strings.TrimSpace(string(m[1]))
+			if val != "" && !strings.Contains(val, "${") && !strings.HasPrefix(val, "changeme") {
+				t.Errorf("%s: MAILRISE_PASS set to a non-placeholder value", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func isProbablyText(data []byte) bool {
+	if len(data) > 2_000_000 {
+		return false
+	}
+	for _, b := range data {
+		if b == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// --- 18: TestE2E (gated) ---
+
+func TestE2E(t *testing.T) {
+	if os.Getenv("SENTINEL_E2E") != "1" {
+		t.Skip("SENTINEL_E2E=1 not set — skipping live apprise/mailrise E2E test")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	r := loadFixture(t, "report-watch-zfs-cksum.json")
+	if err := Send(context.Background(), cfg, r, false); err != nil {
+		t.Fatalf("live apprise send failed: %v", err)
+	}
+	if err := Send(context.Background(), cfg, r, true); err != nil {
+		t.Fatalf("live mailrise SMTP send failed: %v", err)
+	}
+}

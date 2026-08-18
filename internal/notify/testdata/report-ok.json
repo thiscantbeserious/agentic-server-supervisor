@@ -1,0 +1,15 @@
+{
+  "status": "OK",
+  "headline": "All systems normal",
+  "body": "Nothing to report. Kernel, ZFS, SMART and sensors are all clean.",
+  "findings": [
+    {
+      "severity": "info",
+      "component": "meta",
+      "evidence": "no anomalies in the last 10m window",
+      "explanation": "All monitored checks were clean this tick."
+    }
+  ],
+  "resolved": [],
+  "meta": { "hostname": "bam", "tick_seq": 100 }
+}

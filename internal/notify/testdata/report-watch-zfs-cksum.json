@@ -1,0 +1,18 @@
+{
+  "status": "WATCH",
+  "headline": "1 checksum error on seagate-zvtazeam-crypt (hotstore mirror)",
+  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.",
+  "findings": [
+    {
+      "severity": "watch",
+      "component": "zfs",
+      "evidence": "zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1",
+      "explanation": "ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.",
+      "analysis": "Single event, first occurrence, redundancy intact (mirror partner 0 errors), SMART for this disk clean. Consistent with a transient bit error, not with a failing device. Blast radius: none, the block was repaired from the mirror.",
+      "recommendation": "Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
+      "key": "3f9c1a7e40b2d558"
+    }
+  ],
+  "resolved": [],
+  "meta": { "hostname": "bam", "tick_seq": 412 }
+}
