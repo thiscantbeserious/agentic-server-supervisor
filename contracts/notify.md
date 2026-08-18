@@ -153,12 +153,15 @@ Same skeleton, same order, same `GAP` separators, same `NotifyBodyMax` truncatio
 
 #### N.3.4 Example (the ARCHITECTURE §2.7 CKSUM benchmark)
 
+> **This example is normative and must be updated whenever N.3.3 changes.** It went stale three rounds running during T6 and was implemented around each time; it is the block a reader copies, so a stale one reproduces itself.
+
+
 Input report — the state contract's `decision.report` for the WATCH case, with `meta: {"hostname": "bam", "tick_seq": 412}`. Resulting payload (`key`, `first_seen`, `occurrences`, `meta.tick_seq` ignored; backticks and brackets stripped from all report text):
 
 ```json
 {
   "title": "[WATCH] bam: 1 checksum error on seagate-zvtazeam-crypt (hotstore mirror)",
-  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n**WATCH zfs:** ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\nEvidence: `zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\nRecommendation: Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
+  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n\u2800\n**WATCH zfs:**\nZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\n\u2800\n**Evidence:**\n`zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\n\u2800\n**Recommendation:**\nWait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
   "type": "warning",
   "format": "markdown"
 }
