@@ -767,6 +767,20 @@ var (
 	// shell/env assignment is the shape this hunts for, a shape that
 	// excludes both a Go regex literal and contracts/notify.md's own
 	// prose describing this row from matching themselves.
+	//
+	// ANY tracked file assigning this variable a value — including a
+	// docker/compose "-e" arg inside a Go test file — is scanned by this,
+	// REGARDLESS of build tags: TestNoSecretsInRepo reads the repo as
+	// text via `git ls-files`, not via what the Go compiler includes, so
+	// a `//go:build container`-tagged file is just as visible here as a
+	// compiled one. Wherever this variable's value appears anywhere in
+	// the repo (fixtures, test env, docs), it MUST either contain the
+	// two characters dollar-brace or start with the word "changeme" —
+	// nothing else passes. (Deliberately not written as a literal
+	// assignment in this comment: it would match its own pattern.) This
+	// has been tripped twice by the same mistake (T6 round 4, T7's
+	// container test file); use the "changeme" placeholder so it doesn't
+	// happen a third time.
 	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
 )
 

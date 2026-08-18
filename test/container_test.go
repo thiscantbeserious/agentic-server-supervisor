@@ -631,7 +631,7 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 		"-e", "HOST_JOURNAL_VOLATILE_DIR=/host/journal",
 		"-e", "HOST_PROC=/hp", "-v", hostProc + ":/hp",
 		"-e", "TICK_INTERVAL=60",
-		"-e", "MAILRISE_USER=u", "-e", "MAILRISE_PASS=p",
+		"-e", "MAILRISE_USER=u", "-e", "MAILRISE_PASS=changeme",
 		"--group-add", gid,
 	}
 	if selinux {
