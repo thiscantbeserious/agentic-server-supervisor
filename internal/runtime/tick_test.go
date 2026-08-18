@@ -19,6 +19,7 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 var tick0 = time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)
@@ -273,6 +274,55 @@ func TestTick_AnalyzeFails(t *testing.T) {
 	}
 }
 
+// TestTick_StateFailureBlanksResolvedKeys is round-1 review blocker 2,
+// amended into R3.8: on the rc-5 (state-failure) path the report is sent
+// UNFILTERED — but "unfiltered" excludes resolved[]. Every other path
+// relies on state.md S.3(e) to translate each 16-hex key into the stored
+// alert's headline before a human ever sees it (the whole point of the
+// 3c078d7 resolved[] migration is that an operator never sees a raw key).
+// state did not run here, so nothing performs that substitution — a
+// bypassed report must have resolved[] blanked, not forwarded as hex.
+// There was no test at all for the rc-5 path before this one.
+func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	analyzed := watchReport()
+	analyzed.Resolved = []string{"f3dae427610efc88", "a2044be91cc7d380"}
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = stubAnalyzeReturning(analyzed)
+	d.StateProcess = func(raw []byte) (*state.Decision, error) {
+		return nil, errors.New("state dir unwritable")
+	}
+
+	res := Tick(context.Background(), cfg, 1, d)
+	if res.ExitCode != 5 {
+		t.Errorf("ExitCode = %d, want 5", res.ExitCode)
+	}
+	if res.Report == nil || len(res.Report.Resolved) != 0 {
+		t.Fatalf("Report.Resolved = %v, want empty — rc-5 must blank resolved[] rather than forward raw keys", res.Report)
+	}
+	reqs := rec.all()
+	if len(reqs) != 1 {
+		t.Fatalf("apprise received %d requests, want 1", len(reqs))
+	}
+	var p struct{ Body string }
+	json.Unmarshal(reqs[0].body, &p)
+	if strings.Contains(p.Body, "f3dae427610efc88") || strings.Contains(p.Body, "a2044be91cc7d380") {
+		t.Errorf("delivered body still carries a raw resolved key: %q", p.Body)
+	}
+	// "Unfiltered" still means findings/status/body reach the operator —
+	// only resolved[] is blanked (delivery beats dedup stays true for
+	// everything except the all-clear list state can no longer substantiate).
+	if !strings.Contains(p.Body, analyzed.Findings[0].Evidence) {
+		t.Error("findings were lost on the rc-5 path too, not just resolved[]")
+	}
+}
+
 // --- E7: apprise_503 ---
 
 func TestTick_Apprise503(t *testing.T) {
@@ -295,6 +345,39 @@ func TestTick_Apprise503(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("outbox has %d files, want exactly 1", len(entries))
+	}
+}
+
+// TestTick_DrainFailureContributesToExitCode is round-1 review item 3: a
+// drain that fails every item previously left rc 0 — visible only in a
+// WARN log line an operator running --once may never tail. The exit code
+// is the machine-readable signal; a stuck outbox must move it.
+func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 503) // every POST fails, including the drain's
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	// Seed the outbox directly so the drain has something to retry and
+	// fail, regardless of whatever this tick's own report does.
+	if _, err := store.OutboxAdd([]byte(`{"status":"ALERT","headline":"h","body":"b","findings":[],"resolved":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	res := Tick(context.Background(), cfg, 1, d)
+	if res.ExitCode != 4 {
+		t.Errorf("ExitCode = %d, want 4 (a failed outbox retry must be visible in the exit code)", res.ExitCode)
+	}
+	entries, err := os.ReadDir(filepath.Join(cfg.StateDir, "outbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Error("outbox is empty — the seeded item must still be present (retry failed, never acked)")
 	}
 }
 

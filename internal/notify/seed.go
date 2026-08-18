@@ -50,7 +50,11 @@ func SeedConfig(ctx context.Context, cfg *config.Config) (int, error) {
 	client := &http.Client{Timeout: cfg.NotifyTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("transport: %w", err)
+		// A *url.Error's Error() embeds the full request URL, whose last
+		// path segment is APPRISE_KEY — redact before this can reach a
+		// caller's log line (C7, same defect class as notify.go's
+		// postApprise).
+		return 0, fmt.Errorf("transport: %s", redact(cfg, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

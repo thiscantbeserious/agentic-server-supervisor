@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -294,6 +295,82 @@ func TestSendFailures(t *testing.T) {
 	})
 }
 
+// TestAppriseKeyNeverLeaks is round-1 review blocker 1: APPRISE_KEY sits
+// in the URL path of every apprise request, so both a deliberate message
+// (the 204 case) and an incidental one (a *url.Error's Error() embeds the
+// full request URL) can leak it into a returned error or a log line (C7 /
+// N.3.5, amended at a0ff50f to require redaction at every site that logs,
+// wraps, or returns an error that can reach a caller). A distinctive
+// non-default key is required: the default ("sentinel") is indistinguishable
+// from ordinary log text and would make this test pass vacuously.
+func TestAppriseKeyNeverLeaks(t *testing.T) {
+	const secretKey = "kEyThatMustNotLeak9999"
+	r := loadFixture(t, "report-ok.json")
+
+	cases := []struct {
+		name       string
+		makeConfig func(t *testing.T) *config.Config
+	}{
+		{"204", func(t *testing.T) *config.Config {
+			return notifyTestConfig(t, newAppriseStub(t, 204), nil)
+		}},
+		{"non-2xx", func(t *testing.T) *config.Config {
+			return notifyTestConfig(t, newAppriseStub(t, 502), nil)
+		}},
+		{"transport refused", func(t *testing.T) *config.Config {
+			stub := newAppriseStub(t, 200)
+			stub.srv.Close()
+			return notifyTestConfig(t, stub, nil)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := c.makeConfig(t)
+			cfg.AppriseKey = secretKey
+
+			var logBuf bytes.Buffer
+			logWriter = &logBuf
+			defer func() { logWriter = nil }()
+
+			err := Send(context.Background(), cfg, r, false)
+			if err == nil {
+				t.Fatal("expected a delivery error")
+			}
+			if strings.Contains(err.Error(), secretKey) {
+				t.Errorf("returned error leaks APPRISE_KEY: %q", err.Error())
+			}
+			if strings.Contains(logBuf.String(), secretKey) {
+				t.Errorf("stderr log leaks APPRISE_KEY: %q", logBuf.String())
+			}
+		})
+	}
+
+	t.Run("seed-config transport", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgFile := filepath.Join(dir, "sentinel.cfg")
+		if err := os.WriteFile(cfgFile, []byte("tgram://x/y\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("SENTINEL_HOSTNAME", "bam")
+		t.Setenv("APPRISE_URL", "http://127.0.0.1:1")
+		t.Setenv("APPRISE_KEY", secretKey)
+		t.Setenv("APPRISE_CONFIG_FILE", cfgFile)
+		t.Setenv("MAILRISE_USER", "u")
+		t.Setenv("MAILRISE_PASS", "p")
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, serr := SeedConfig(context.Background(), cfg)
+		if serr == nil {
+			t.Fatal("expected a transport error against an unreachable apprise")
+		}
+		if strings.Contains(serr.Error(), secretKey) {
+			t.Errorf("SeedConfig error leaks APPRISE_KEY: %q", serr.Error())
+		}
+	})
+}
+
 // --- 11: TestSMTPFallback ---
 
 func TestSMTPFallback(t *testing.T) {
@@ -513,43 +590,48 @@ var (
 	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
 )
 
+// TestNoSecretsInRepo scans TRACKED content only (N.9: "no secrets in
+// git"), via `git ls-files` — not the working tree. A file the operator
+// created locally (deploy/mailrise/mailrise.conf, gitignored, holding a
+// live-stack token from real T1 verification) is not "in git" no matter
+// what it contains; walking the filesystem instead of git's own index
+// would flag the operator's own untracked config and make this check the
+// kind that gets deleted within a week.
 func TestNoSecretsInRepo(t *testing.T) {
 	root := "../.."
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	out, err := exec.Command("git", "-C", root, "ls-files").Output()
+	if err != nil {
+		t.Fatalf("git ls-files: %v", err)
+	}
+
+	for _, rel := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if rel == "" {
+			continue
 		}
-		base := d.Name()
-		if d.IsDir() {
-			switch base {
-			case ".git", ".runtime", "node_modules":
-				return filepath.SkipDir
-			}
-			return nil
+		base := filepath.Base(rel)
+		if base == ".env.example" {
+			// This IS the placeholder file — its documentation values (a
+			// token-shaped example, MAILRISE_PASS=changeme) legitimately
+			// match both detectors below. The exemption must run BEFORE
+			// either check, not after the first one: checking token shape
+			// first and only then exempting leaves the token check itself
+			// still firing on this file's own placeholder.
+			continue
 		}
-		if base == ".env" {
-			return nil // gitignored, developer-local; not part of "in the repo"
-		}
-		data, err := os.ReadFile(path)
-		if err != nil || !isProbablyText(data) {
-			return nil
+		path := filepath.Join(root, rel)
+		data, rerr := os.ReadFile(path)
+		if rerr != nil || !isProbablyText(data) {
+			continue
 		}
 		if m := telegramTokenRe.Find(data); m != nil {
-			t.Errorf("%s: looks like a Telegram bot token: %q", path, m)
-		}
-		if base == ".env.example" {
-			return nil // this IS the placeholder file
+			t.Errorf("%s: looks like a Telegram bot token: %q", rel, m)
 		}
 		for _, m := range mailrisePassRe.FindAllSubmatch(data, -1) {
 			val := strings.TrimSpace(string(m[1]))
 			if val != "" && !strings.Contains(val, "${") && !strings.HasPrefix(val, "changeme") {
-				t.Errorf("%s: MAILRISE_PASS set to a non-placeholder value", path)
+				t.Errorf("%s: MAILRISE_PASS set to a non-placeholder value", rel)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 

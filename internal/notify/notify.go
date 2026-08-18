@@ -49,6 +49,20 @@ func wrapErr(target error, format string, args ...any) error {
 	return &sentinelErr{msg: fmt.Sprintf(format, args...), target: target}
 }
 
+// redact strips cfg.AppriseKey out of an error's text before it can reach
+// a log line or a returned error string (C7: "Never logged: ... APPRISE_KEY").
+// APPRISE_KEY sits in the URL path of every apprise request, so both a
+// deliberate message (the 204 case) and an incidental one (a *url.Error's
+// Error() embeds the full request URL) can leak it; one redactor at every
+// call site is the root-cause fix rather than three separate ones.
+func redact(cfg *config.Config, err error) string {
+	msg := err.Error()
+	if cfg.AppriseKey == "" {
+		return msg
+	}
+	return strings.ReplaceAll(msg, cfg.AppriseKey, "<APPRISE_KEY>")
+}
+
 // logWriter lets tests capture the exact C7 lines this package emits; the
 // zero value means stderr.
 var logWriter io.Writer
@@ -114,16 +128,16 @@ func Send(ctx context.Context, cfg *config.Config, r report.Report, smtpFallback
 			return wrapErr(ErrSend, "smtp fallback unconfigured")
 		}
 		if err := sendMail(ctx, cfg, payload); err != nil {
-			logger.Error("post failed", "transport", err.Error())
-			return wrapErr(ErrSend, "%v", err)
+			logger.Error("post failed", "transport", redact(cfg, err))
+			return wrapErr(ErrSend, "%s", redact(cfg, err))
 		}
 		logger.Info("sent", "status", r.Status, "host", cfg.Hostname, "path", "smtp")
 		return nil
 	}
 
 	if err := postApprise(ctx, cfg, payload); err != nil {
-		logger.Error("post failed", "error", err.Error())
-		return wrapErr(ErrSend, "%v", err)
+		logger.Error("post failed", "error", redact(cfg, err))
+		return wrapErr(ErrSend, "%s", redact(cfg, err))
 	}
 	logger.Info("sent", "status", r.Status, "host", cfg.Hostname, "path", "apprise")
 	return nil
@@ -131,12 +145,11 @@ func Send(ctx context.Context, cfg *config.Config, r report.Report, smtpFallback
 
 // postApprise is N.3.1: POST ${APPRISE_URL}/notify/${APPRISE_KEY}.
 //
-// A 204 is deliberately NOT treated as success even though it is inside
-// the 200..299 range the contract's flowchart labels "ok": verified
-// against the real apprise-api on 2026-08-16, 204 means the key is not
-// registered and nothing was sent at all — the one status code where
-// "2xx" and "delivered" disagree. Treating it as success would silently
-// drop every notification, including retries out of the outbox.
+// N.3.1: "204 No Content is a FAILURE, despite being 2xx." apprise returns
+// 204 when the configuration key is not registered — nothing was sent,
+// to anyone, while every log line would say "sent" if 204 were treated
+// like every other 2xx. The same rule applies on the retry path: a 204
+// must never OutboxAck.
 func postApprise(ctx context.Context, cfg *config.Config, payload Payload) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -158,7 +171,9 @@ func postApprise(ctx context.Context, cfg *config.Config, payload Payload) error
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent {
-		return fmt.Errorf("http 204: apprise key %q not registered, nothing sent", cfg.AppriseKey)
+		// C7 forbids logging APPRISE_KEY — "apprise key not registered"
+		// carries the same operational meaning without naming it.
+		return fmt.Errorf("http 204: apprise key not registered, nothing sent")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))

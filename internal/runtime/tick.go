@@ -162,17 +162,32 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	decision, serr := d.StateProcess(raw)
 	if serr != nil {
 		// S.7 / R3.8: a state failure must never lose an alert — send the
-		// report unfiltered.
+		// report unfiltered. "Unfiltered" still excludes resolved[]: on
+		// every other path state.md S.3(e) replaces each entry with the
+		// stored headline before a human ever sees it (the whole point of
+		// the 3c078d7 key migration is that an operator never sees a raw
+		// key). state never ran here, so nothing performs that
+		// substitution — blank resolved[] rather than let the analyzer's
+		// bare 16-hex keys reach Telegram. A dropped all-clear list on an
+		// already-degraded tick is strictly better than unreadable hex,
+		// and "delivery beats dedup" still holds for findings/status/body.
+		degraded := *rep
+		degraded.Resolved = []string{}
+		degradedRaw, merr2 := json.Marshal(degraded)
+		if merr2 != nil {
+			degradedRaw = raw // defensive: marshal of a struct we just unmarshal-shaped cannot fail in practice
+		}
+
 		result.ExitCode = maxCode(result.ExitCode, 5)
-		result.Report = rep
-		if err := d.NotifySend(ctx, cfg, *rep, false); err != nil {
-			d.OutboxAdd(raw)
+		result.Report = &degraded
+		if err := d.NotifySend(ctx, cfg, degraded, false); err != nil {
+			d.OutboxAdd(degradedRaw)
 			result.Queued = true
 			result.ExitCode = maxCode(result.ExitCode, 4)
 		} else {
 			result.Notified = true
 		}
-		drainOutbox(ctx, cfg, d, logger)
+		drainOutbox(ctx, cfg, d, logger, &result)
 		return result
 	}
 
@@ -189,7 +204,7 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	}
 
 	// 5. outbox drain — once per tick, last (R3.2).
-	drainOutbox(ctx, cfg, d, logger)
+	drainOutbox(ctx, cfg, d, logger, &result)
 
 	return result
 }
@@ -207,10 +222,14 @@ func deliverAndDrain(ctx context.Context, cfg *config.Config, d Deps, logger *sl
 	} else {
 		result.Notified = true
 	}
-	drainOutbox(ctx, cfg, d, logger)
+	drainOutbox(ctx, cfg, d, logger, result)
 }
 
-func drainOutbox(ctx context.Context, cfg *config.Config, d Deps, logger *slog.Logger) {
+// drainOutbox is R3.2 step 5. A failed retry is visible in result.ExitCode
+// (rc 4, "notify failed"), not only in the WARN log line — an operator
+// running --once must see a stuck outbox in the exit code, the
+// machine-readable signal, not only in logs they may not be tailing.
+func drainOutbox(ctx context.Context, cfg *config.Config, d Deps, logger *slog.Logger, result *TickResult) {
 	items, err := d.OutboxTake()
 	if err != nil {
 		logger.Warn("outbox take failed", "error", err)
@@ -224,6 +243,7 @@ func drainOutbox(ctx context.Context, cfg *config.Config, d Deps, logger *slog.L
 		}
 		if err := d.NotifySend(ctx, cfg, rep, item.FallbackSMTP); err != nil {
 			logger.Warn("outbox retry failed", "id", item.ID, "error", err)
+			result.ExitCode = maxCode(result.ExitCode, 4)
 			continue
 		}
 		if err := d.OutboxAck(item.ID); err != nil {
