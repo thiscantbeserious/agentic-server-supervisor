@@ -83,7 +83,22 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
 
 So a stale or wrong value — `.env` copied to another host, the gid changed by a distro upgrade, `group_add` silently ineffective — produces a container that starts cleanly, reads an empty journal, and reports all-clear indefinitely. An empty journal is indistinguishable from a quiet system, which makes this the quietest possible failure of a component whose entire job is noticing things.
 
-**T7 adds to R2's startup sequence:** run `journalctl -n1`, unfiltered and without a priority filter, before the first tick. Any running Linux host has journal entries, so zero entries or a non-zero exit means misconfiguration rather than silence — log `ERROR` naming the likely cause (`JOURNAL_GID` / `group_add` / the `/host/journal` mount) and exit `78`, consistent with every other config failure. Loud at startup beats silent forever.
+**T7 adds to R2's startup sequence**, before the first tick:
+
+```
+journalctl -D $HOST_JOURNAL_DIR -n1 --no-pager -o json     # and/or the volatile dir
+```
+
+Zero bytes of stdout ⇒ log `ERROR` naming the likely cause (`JOURNAL_GID`, `group_add`, or the `/host/journal` mount) and exit `78`, consistent with every other config failure. A readable journal on any running host yields at least one JSON record.
+
+**Two details, both measured in `debian:trixie-slim` + `systemd` on 2026-08-19 — the exact R1 runtime base — and both of which make the obvious implementations vacuous:**
+
+1. **The exit code proves nothing, and neither does non-empty stdout.** With no journal present at all — bare, and with `-D <empty dir>` — `journalctl -n1 --no-pager` **exits 0** and prints `-- No entries --` to stdout. A check on the exit code passes on a blind container; so does a check that stdout is non-empty. **`-o json` is what discriminates**: 0 bytes when there is nothing to read, a JSON record when there is. Assert on the byte count of the JSON form, never on the exit code and never on the human-readable output.
+2. **`-D` is required.** An earlier wording said "run `journalctl -n1`, unfiltered". Taken literally that reads `/var/log/journal` and `/run/log/journal`, which R4 does not mount at those paths — preflight would fail on every host and the container would never start. "Unfiltered" means no `-p`, `--since` or `-u`; it does not mean no `-D`.
+
+**One readable directory of the two is sufficient**, consistent with R2 step 2's existing mount check, which already accepts at least one of persistent/volatile.
+
+R8 case C2 already asserts the build-time half; this extends it to the running host, where the value actually drifts. Where no host journal exists — a developer Mac — the check's test must **skip loudly**, never pass.
 
 R8 case C2 already asserts `journalctl -D /host/journal -n1` exits `0` with the gid and non-zero without it, so the check is verified at build time; this extends the same assertion to the running host, which is where the value can drift.
 
