@@ -60,7 +60,7 @@ POST ${APPRISE_URL}/notify/${APPRISE_KEY}
 Content-Type: application/json
 ```
 
-`net/http` with `http.Client{Timeout: cfg.NotifyTimeout}` and `http.NewRequestWithContext`. `client.Do` error = transport failure; status outside `200..299` = HTTP failure, first 200 bytes of the body (`io.LimitReader`) go into the returned error.
+`net/http` with `http.Client{Timeout: cfg.NotifyTimeout}` and `http.NewRequestWithContext`. `client.Do` error = transport failure; status outside `200..299` = HTTP failure, first 200 bytes of the body (`io.LimitReader`) go into the returned error. **`204 No Content` is a FAILURE, despite being 2xx.** apprise returns 204 when the configuration key is not registered: nothing was sent anywhere, to anyone. Verified against the live stack 2026-08-17 — 200 means delivered, 424 means Telegram refused it, 204 means the key does not exist. Treating any 2xx as success is the single worst defect available in this component: every notification is silently dropped while every log line says `sent`. The same rule applies on the retry path — a 204 must never `OutboxAck`.
 
 Payload — exactly four string fields, all always present, produced by `json.Marshal` (never string concatenation):
 
@@ -121,6 +121,8 @@ Input report — the state contract's `decision.report` for the WATCH case, with
 
 stdout carries machine output only: the `MarshalIndent`ed payload + `\n` under `--dry-run`, nothing otherwise. Everything else is `slog` on stderr with component `notify`: `sent` (`status`, `host`, `path=apprise|smtp`), `post failed` (`http=<code>` or `transport=<err>`), `seeded` (`urls=<n>`). Never logged: `MAILRISE_PASS`, `APPRISE_KEY`, the contents of the seeded config, report or prompt text.
 
+**`<err>` must be redacted before it is logged or returned.** A `net/http` transport error is a `*url.Error` carrying the full request URL, whose last path segment is `${APPRISE_KEY}` — so logging the error verbatim publishes the key into retained container logs on every apprise outage, and these two sentences would otherwise be mutually unsatisfiable. Strip the URL (or replace the key segment) in the error text at every site that logs it, wraps it, or returns it to a caller that will. The same applies to any status message built by interpolating the endpoint.
+
 ### N.4 Exit codes (subset of the binary-wide table)
 
 | Code | When |
@@ -142,8 +144,8 @@ flowchart TB
     val -- yes --> mode{"smtpFallback?"}
     mode -- no --> post["POST /notify/{key}"]
     mode -- yes --> smtp["SMTP to mailrise"]
-    post -- "2xx" --> ok["nil — exit 0"]
-    post -- "transport / non-2xx" --> err["error — exit 4"]
+    post -- "2xx except 204" --> ok["nil — exit 0"]
+    post -- "transport / non-2xx / 204" --> err["error — exit 4"]
     smtp -- ok --> ok
     smtp -- "fail / unconfigured" --> err
     err --> q["tick: state.OutboxAdd(payload)"]

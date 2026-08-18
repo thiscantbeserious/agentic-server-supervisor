@@ -120,7 +120,9 @@ Step 1b runs **before** analysis and its notification is dispatched immediately,
 
 `tick` authors **only** the collector fallback. When `analyze.Run` returns `(*report.Report, error)` with a non-nil error, that report is already a valid fallback carrying its own stable key (C8) — `tick` passes it through `state` unchanged and records exit code `3`. `tick` never builds an analyzer fallback.
 
-The outbox drain runs once per tick, in the order shown, and is the only retry path. `state` owns `outbox/`; `notify` only sends.
+The outbox drain runs once per tick, in the order shown, and is the only retry path. `state` owns `outbox/`; `notify` only sends. **This order is authoritative; contracts/state.md S.1's diagram is illustrative and does not override it.** Draining after the add is deliberate — a payload queued by this tick's failed send is retried by this same tick rather than waiting a full interval.
+
+One consequence to know before tuning: `OutboxTake` increments and persists `attempts` on every take, so a tick that fails advances the counter twice — once for the immediate drain of the payload it just queued, once on the next tick. `OUTBOX_SMTP_AFTER=3` therefore reaches the mailrise fallback in roughly two ticks, not three. This is a faster fallback to the LLM-free path, which is the safe direction, but the configured number is not the number of ticks an operator would predict from its name.
 
 Every document `tick` authors (collector fallback, raw alert) passes `report.Validate` before it reaches `notify`. A document that fails validation is logged at `ERROR` and replaced by a minimal valid ALERT with the validation error as evidence — the system never drops an alert because of its own marshaling bug.
 
@@ -202,7 +204,7 @@ Truncation of `facts.json` to `FACTS_MAX_BYTES` belongs to `collect`; `runtime` 
 | Apprise down | `notify.Send` error ⇒ `state.OutboxAdd(payload)` — `state` is the only outbox writer. Exit `4`. Retry is step 5's take/send/ack drain; after `OUTBOX_SMTP_AFTER` failures `state` marks the item and `tick` calls `notify.Send(..., smtpFallback=true)`, which delivers via mailrise SMTP. |
 | `facts.json` over budget | `collect`'s concern; `tick` logs `WARN tick facts truncated`. |
 | Collector section failed | `WARN` with the section names, tick proceeds. |
-| `state` fails | report is sent unfiltered (delivery beats dedup), exit `5`. |
+| `state` fails | report is sent unfiltered (delivery beats dedup), exit `5` — **except `resolved[]`, which is emptied first.** `analyze` emits `resolved[]` as 16-hex dedup keys and `state` is what substitutes the stored headline (state S.3(e)); bypassing `state` therefore forwards raw keys to a human, who reads `- f3dae427610efc88` and learns nothing. Emptying is correct rather than lossy: a resolution is an all-clear, and on the one path where `state` is broken we do not know which alerts genuinely closed. Delivery beats dedup applies to findings, not to all-clears we can no longer substantiate. |
 | Tick overlap | impossible by construction — sequential loop, single goroutine. |
 
 #### R3.9 Filesystem contract

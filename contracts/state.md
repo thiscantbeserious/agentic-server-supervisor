@@ -19,6 +19,9 @@
 
 ### S.1 CLI
 
+> **Tick ordering is owned by contracts/runtime.md R3.2, not by this diagram.** Where the two disagree, R3.2 wins: the outbox drain runs *after* `Process` and `notify.Send`, so a payload queued by a failed send is retried within the same tick. This diagram shows which calls exist and who owns them, not when they run in a tick.
+
+
 ```
 sentinel state process             # stdin → decision.json on stdout
 sentinel state history [n]         # default 5 → JSON array on stdout
