@@ -113,7 +113,8 @@ Everything else is passed to the prompt as the verbatim facts document.
     },
     "resolved": {
       "type": "array", "maxItems": 20,
-      "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+      "items": { "type": "string", "minLength": 1, "maxLength": 80,
+        "description": "From analyze: the 16-hex key of a finding present in history but absent now. From state onward: the stored headline of the alert that closed. Not model-authored." }
     },
     "meta": {
       "type": "object",
@@ -340,9 +341,11 @@ flowchart TD
 6. **Failure ⇒ fallback** per §5; return it with a non-nil error.
 7. **Inject keys, meta and resolved.** Drop any model-supplied `key`, `first_seen`, `occurrences` and `meta`; set `f.Key = dedup.Key(f.Component, f.Evidence)` for every finding (D5) and `rep.Meta = &report.Meta{Hostname: cfg.Hostname, TickSeq: o.Seq}` (D9).
 
-   **`resolved` is computed in Go and overwrites whatever the model emitted.** It is the set difference `historyKeys \ currentKeys`: every key present in the newest history document but absent from this tick's findings, rendered as the past finding's `evidence` truncated to **80 runes** (findings have no headline of their own — the old instruction "list its headline" pointed at a field that does not exist). Entries whose evidence is empty are skipped. Sorted for determinism, capped at the schema's 20 items.
+   **`resolved` is computed in Go and overwrites whatever the model emitted.** It is the set difference `historyKeys \ currentKeys`: every key present in the newest history document but absent from this tick's findings, emitted as **the key itself** — the 16-hex `dedup.Key` value, matching `^[0-9a-f]{16}$`. Keys are already unique and already shared with `state`, so no truncation and no emptiness check apply. Sorted for determinism, capped at the schema's 20 items.
 
-   The 80 is the schema's own `resolved[]` `maxLength`, not a stylistic choice: an earlier draft of this section said 120, which makes `report.Validate` **reject the whole report** as soon as a resolved finding carries a typical kernel or ZED line. `minLength: 1` likewise forbids the empty string, so empty evidence must be skipped rather than emitted.
+   **This field is an identifier, not prose, and only on the analyzer's side of the seam.** `state` matches each entry against its stored alerts and emits the *stored headline* in the report it hands to `notify` (state S.3(e)), so the operator never sees a key. The schema permits both because one `resolved[]` field carries an identifier before `state` and human text after it.
+
+   **Why keys rather than the evidence text this field used to carry.** Evidence was truncated to 80 runes to fit the schema, which made the resolve seam the only one in the system identified by something other than the key every other seam uses. Two alerts whose evidence agreed in the first 80 runes were indistinguishable, and one entry could close both — reproduced with two ZFS vdev lines differing at rune ~81. It also forced `state` to match against headline *and* evidence to compensate. The key is exact, already computed in this very step, and retires both the collision class and that dual-match accommodation.
 
    Resolution detection is pure set arithmetic over data `analyze` already holds — it injects the current keys in this very step and parses the history keys in step 2. Asking a probabilistic component to compute a set difference invites both hallucinated resolutions and missed ones, and the old contract had to add a policing rule ("do not list anything you did not see in HISTORY") to compensate.
 
