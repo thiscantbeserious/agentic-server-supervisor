@@ -145,7 +145,23 @@ Same skeleton, same order, same `GAP` separators, same `NotifyBodyMax` truncatio
 
 **Verified live 2026-08-18:** mailrise selects the notification format from the mail's `Content-Type`, so `text/html` renders bold and monospace on Telegram exactly as the apprise path does. An earlier plain-text version of this section produced a correctly readable but unformatted message; this replaces it.
 
-**Escaping — this is the part that must not be got wrong.** Every report-derived string on this path (`headline`, `body`, `explanation`, `analysis`, `recommendation`, `resolved[]`, `evidence` and the hostname) passes through `html.EscapeString` **before** any tag is added, and nothing passes through `Sanitize`. Kernel evidence routinely contains `<` and `>` — `sd 0:0:0:0: [sda]`, `<mce>` — and an unescaped one truncates or mangles the message.
+**Escaping — this is the part that must not be got wrong.** Every report-derived string on this path (`headline`, `body`, `explanation`, `analysis`, `recommendation`, `resolved[]`, `evidence` and the hostname) passes through `stripUnsafe` and then `html.EscapeString`, **before** any tag is added:
+
+```go
+// stripUnsafe removes what may never appear in the wire body regardless of
+// markup: invalid UTF-8, and control characters other than '\n'. It is the
+// non-markdown half of Sanitize, extracted so both paths can share it.
+func stripUnsafe(s string) string
+
+prose:    func(s string) string { return html.EscapeString(stripUnsafe(s)) },
+evidence: func(s string) string { return html.EscapeString(stripUnsafe(s)) },
+```
+
+Kernel evidence routinely contains `<` and `>` — `sd 0:0:0:0: [sda]`, `<mce>` — and an unescaped one truncates or mangles the message.
+
+**`Sanitize`'s markdown stripping is what this path drops — not its other two guarantees.** An earlier wording of this section said "nothing passes through `Sanitize`", which silently discarded the invalid-UTF-8 and control-character removal that `Sanitize` also performed. Reproduced at 1197e26: evidence containing `\x00`, `\x07` and `\xff\xfe` produced a body that was not valid UTF-8 and carried a NUL, in a message declaring `charset=utf-8`. **RFC 5321 §2.3.1 forbids NUL in DATA**, so mailrise or any conforming hop may reject or truncate it — and SMTP is reached only after apprise has already failed. A crafted kernel line could therefore kill the last remaining channel at the moment it is the only one left, which exceeds ARCHITECTURE §4's guarantee that a successful injection costs "wrong text in a report".
+
+`stripUnsafe` costs nothing in fidelity: it removes only bytes that cannot legally appear in a UTF-8 SMTP body at all. `cksum_errors=1` and `<mce>` survive it untouched, which is the property this section exists to protect.
 
 **Escaping preserves fidelity where stripping destroyed it.** `html.EscapeString` is lossless and reversible: `cksum_errors=1` stays `cksum_errors=1`, and a `<` arrives as a `<` in the rendered client even though the wire carries `&lt;`. That is strictly better than the markdown path's constraint, and it is why adding a parser to the fallback route is an acceptable trade here — the property being protected is that the operator reads exactly what the collector saw, and escaping keeps it.
 
