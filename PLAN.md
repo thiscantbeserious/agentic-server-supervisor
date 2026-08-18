@@ -77,6 +77,35 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
   2. **`analyze` should emit `findings[].key` inside `resolved[]`.** Today `resolved[]` carries evidence truncated to 80 runes, so the resolve seam is identified by a *different* value from the one every other seam uses — `state` matches it against both headline and evidence to compensate (contracts/state.md S.3(e)). Two findings whose evidence agrees in its first 80 runes collide, and the truncation itself can produce a value matching nothing. Switching to the 16-hex key retires both the collision class and the dual-match workaround. This is a contract amendment to analyze §6 and state S.3(e) together — neither alone.
 - **T7 — image + CI + install-host.sh**: Dockerfile (builder + debian-slim), compose `sentinel` service (C4 mounts, group_add, read_only), GHCR workflow (`go vet` + `go test ./...` + build + push latest/SHA), `install-host.sh`, `test/container_test.go`.
   AC: container starts unprivileged; journal reading works via group_add; write attempts on every ro mount fail; empirical checks of the unverified points (ARCHITECTURE §2.6): `sensors -j` returns values, rasdaemon path readable, tmpfs/DNS ok, ZED events under `-t zed`; `sentinel health` drives the compose healthcheck; install-host.sh twice without error; Actions run green, pull from GHCR works. V: `go test -tags container ./test/...` on a Linux host.
+### Read-only survey of `bam`, 2026-08-18
+
+Measured before T7 so the image is written against the host as it is, not as assumed. Read-only throughout; nothing installed, written or restarted.
+
+| Assumption | Measured |
+|---|---|
+| Debian 13 | trixie, systemd 257, kernel 7.1.3+deb13-amd64 |
+| **`JOURNAL_GID=999`** | **holds** — `systemd-journal:x:999` |
+| smartmontools | installed (`/usr/sbin/smartd`, `/usr/sbin/smartctl`) |
+| lm-sensors | **not installed** — `install-host.sh` installs it |
+| rasdaemon | **not installed** — `install-host.sh` installs it |
+| msmtp | **not installed** — `install-host.sh` installs it |
+| ZFS pools | `cache` 928G and `hotstore` 16.4T, both `ONLINE` |
+| `zfs-zed` | **active** — ZFS events already reach the journal |
+| docker compose | v5.5.0 |
+
+The gid is the one that had to hold. A wrong `JOURNAL_GID` gives the unprivileged container an empty journal, and an empty journal reads as healthy — the quietest failure this system has.
+
+**`smartd` is running but monitoring zero devices.** Verbatim from the host journal:
+
+```
+smartd[2658]: Configuration file /etc/smartd.conf parsed but has no entries
+smartd[2658]: Monitoring 0 ATA/SATA, 0 SCSI/SAS and 0 NVMe devices
+```
+
+So `bam` has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install-host.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
+
+**Care with `command -v` on this host:** the login PATH omits `/usr/sbin`, so `smartd`, `smartctl` and `rasdaemon` all appear absent when they are not. Check with `dpkg-query` or an absolute path. This produced a wrong reading during the survey itself.
+
 - **T8 — target server rollout `bam`** (= OMV host): packages, smartd/ZED mail paths, `docker compose pull` from GHCR, 24 h trial run. Does NOT run autonomously — every action on the host is announced first.
   AC: tick loop runs; heartbeat arrives; injected error ⇒ Telegram < 6 min; `smartctl -M test` mail ⇒ Telegram; `zpool scrub` ⇒ ZED event in the next report; no spam. V: `test/rollout-checklist.md`.
   **Credential hygiene carried from T1 — do before rollout, not during:**
