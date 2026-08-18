@@ -77,6 +77,47 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
   2. **`analyze` should emit `findings[].key` inside `resolved[]`.** Today `resolved[]` carries evidence truncated to 80 runes, so the resolve seam is identified by a *different* value from the one every other seam uses — `state` matches it against both headline and evidence to compensate (contracts/state.md S.3(e)). Two findings whose evidence agrees in its first 80 runes collide, and the truncation itself can produce a value matching nothing. Switching to the 16-hex key retires both the collision class and the dual-match workaround. This is a contract amendment to analyze §6 and state S.3(e) together — neither alone.
 - **T7 — image + CI + install-host.sh**: Dockerfile (builder + debian-slim), compose `sentinel` service (C4 mounts, group_add, read_only), GHCR workflow (`go vet` + `go test ./...` + build + push latest/SHA), `install-host.sh`, `test/container_test.go`.
   AC: container starts unprivileged; journal reading works via group_add; write attempts on every ro mount fail; empirical checks of the unverified points (ARCHITECTURE §2.6): `sensors -j` returns values, rasdaemon path readable, tmpfs/DNS ok, ZED events under `-t zed`; `sentinel health` drives the compose healthcheck; install-host.sh twice without error; Actions run green, pull from GHCR works. V: `go test -tags container ./test/...` on a Linux host.
+### T7 obligation: preflight must verify the journal is readable
+
+`JOURNAL_GID` is discovered once, by `install-host.sh` step 6 (`getent group systemd-journal | cut -d: -f3`), and compose refuses to start without it. That is sound at install time. **Nothing re-verifies it at runtime**, and R2's preflight does not read the journal at all — it checks config, the filesystem, `/usr/local/bin` writability, agy seeding and the state directories.
+
+So a stale or wrong value — `.env` copied to another host, the gid changed by a distro upgrade, `group_add` silently ineffective — produces a container that starts cleanly, reads an empty journal, and reports all-clear indefinitely. An empty journal is indistinguishable from a quiet system, which makes this the quietest possible failure of a component whose entire job is noticing things.
+
+**T7 adds to R2's startup sequence:** run `journalctl -n1`, unfiltered and without a priority filter, before the first tick. Any running Linux host has journal entries, so zero entries or a non-zero exit means misconfiguration rather than silence — log `ERROR` naming the likely cause (`JOURNAL_GID` / `group_add` / the `/host/journal` mount) and exit `78`, consistent with every other config failure. Loud at startup beats silent forever.
+
+R8 case C2 already asserts `journalctl -D /host/journal -n1` exits `0` with the gid and non-zero without it, so the check is verified at build time; this extends the same assertion to the running host, which is where the value can drift.
+
+Deliberately not in T6: `internal/runtime` was reviewed and approved without it, and reopening an approved branch to add behaviour is how an approval stops meaning anything. T7 re-verifies the runtime inside the image and owns C2, so it is the natural home.
+
+### Read-only survey of `bam`, 2026-08-18
+
+Measured before T7 so the image is written against the host as it is, not as assumed. Read-only throughout; nothing installed, written or restarted.
+
+| Assumption | Measured |
+|---|---|
+| Debian 13 | trixie, systemd 257, kernel 7.1.3+deb13-amd64 |
+| **`JOURNAL_GID=999`** | **holds** — `systemd-journal:x:999` |
+| smartmontools | installed (`/usr/sbin/smartd`, `/usr/sbin/smartctl`) |
+| lm-sensors | **not installed** — `install-host.sh` installs it |
+| rasdaemon | **not installed** — `install-host.sh` installs it |
+| msmtp | **not installed** — `install-host.sh` installs it |
+| ZFS pools | `cache` 928G and `hotstore` 16.4T, both `ONLINE` |
+| `zfs-zed` | **active** — ZFS events already reach the journal |
+| docker compose | v5.5.0 |
+
+The gid is the one that had to hold. A wrong `JOURNAL_GID` gives the unprivileged container an empty journal, and an empty journal reads as healthy — the quietest failure this system has.
+
+**`smartd` is running but monitoring zero devices.** Verbatim from the host journal:
+
+```
+smartd[2658]: Configuration file /etc/smartd.conf parsed but has no entries
+smartd[2658]: Monitoring 0 ATA/SATA, 0 SCSI/SAS and 0 NVMe devices
+```
+
+So `bam` has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install-host.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
+
+**Care with `command -v` on this host:** the login PATH omits `/usr/sbin`, so `smartd`, `smartctl` and `rasdaemon` all appear absent when they are not. Check with `dpkg-query` or an absolute path. This produced a wrong reading during the survey itself.
+
 - **T8 — target server rollout `bam`** (= OMV host): packages, smartd/ZED mail paths, `docker compose pull` from GHCR, 24 h trial run. Does NOT run autonomously — every action on the host is announced first.
   AC: tick loop runs; heartbeat arrives; injected error ⇒ Telegram < 6 min; `smartctl -M test` mail ⇒ Telegram; `zpool scrub` ⇒ ZED event in the next report; no spam. V: `test/rollout-checklist.md`.
   **Credential hygiene carried from T1 — do before rollout, not during:**
