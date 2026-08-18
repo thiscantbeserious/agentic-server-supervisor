@@ -8,12 +8,17 @@ dir=""
 k=0
 p=""
 t=""
+n=""
 prev=""
 for arg in "$@"; do
   case "$prev" in
     -D) dir="$arg" ;;
     -p) p="$arg" ;;
     -t) t="$arg" ;;
+    -n) n="$arg" ;;
+  esac
+  case "$arg" in
+    -n1) n=1 ;;
   esac
   if [ "$arg" = "-k" ]; then k=1; fi
   prev="$arg"
@@ -35,6 +40,21 @@ if [ -f "$dir/.exit" ]; then
   if [ "$code" != "0" ]; then
     exit "$code"
   fi
+fi
+
+# R2's runtime journal-readable preflight: an unfiltered "-n1" query (no
+# -k/-p/-t), used with "-o json" so an empty journal (real journalctl:
+# "-- No entries --" on stdout, exit 0) is discriminated from a real
+# record — a plain exit-code-only check would pass on both. A per-test
+# ".n1empty" control file simulates that empty-but-healthy-exit case;
+# otherwise a synthetic journal-export JSON record proves the query path
+# works end to end.
+if [ -n "$n" ]; then
+  if [ -f "$dir/.n1empty" ]; then
+    exit 0
+  fi
+  echo '{"MESSAGE":"synthetic boot entry","PRIORITY":"6","__REALTIME_TIMESTAMP":"1000000000000"}'
+  exit 0
 fi
 
 key=""

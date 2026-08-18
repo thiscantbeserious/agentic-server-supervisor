@@ -115,6 +115,7 @@ func contains(s, sub string) bool {
 // --- E18: shutdown ---
 
 func TestLoop_Shutdown(t *testing.T) {
+	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
 	cfg := testConfig(t, tick0)
 	rec := newAppriseRecorder(t, 200)
 	cfg.AppriseURL = rec.srv.URL

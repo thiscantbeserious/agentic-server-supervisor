@@ -3,10 +3,13 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -74,6 +77,71 @@ func preflight(cfg *config.Config) error {
 func dirReadableNonEmpty(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	return err == nil && len(entries) > 0
+}
+
+// checkJournalReadable is the T7 obligation recorded in PLAN.md above the
+// T8 entry: R2's filesystem preflight (dirReadableNonEmpty above) proves
+// the configured journal directory exists and has files in it — it does
+// NOT prove journald will hand the unprivileged sentinel user any journal
+// CONTENT. A stale JOURNAL_GID, an ineffective group_add, or a wrong
+// HOST_JOURNAL_DIR mount all leave that filesystem-level check green while
+// journalctl itself reads nothing, and an empty journal is indistinguishable
+// from a quiet system — the quietest possible failure of a component whose
+// job is noticing things.
+//
+// Measured against real journalctl in debian:trixie-slim (the R1 runtime
+// base) before writing this: "journalctl -n1 --no-pager" on an empty or
+// unreadable journal exits 0 and prints "-- No entries --\n" to STDOUT, not
+// stderr — so neither "exit code only" nor "stdout non-empty" discriminates
+// a real record from that sentinel line. "-o json" does: an empty journal
+// under -o json writes zero bytes. This function therefore queries with
+// "-o json" and treats non-zero exit OR zero-byte stdout as failure.
+//
+// Queries HOST_JOURNAL_DIR first, then HOST_JOURNAL_VOLATILE_DIR — the
+// same "at least one readable" tolerance the filesystem check above uses
+// (a fresh boot can legitimately have an empty persistent journal with
+// only the volatile one populated) — and fails only if neither yields a
+// record.
+func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
+	timeout := cfg.SectionTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	var lastReason string
+	for _, dir := range []string{cfg.HostJournalDir, cfg.HostJournalVolatileDir} {
+		if dir == "" {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, timeout)
+		cmd := exec.CommandContext(cctx, "journalctl", "-D", dir, "-n1", "-o", "json", "--no-pager")
+		out, err := cmd.Output()
+		cancel()
+		if err != nil {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 failed: %v", dir, err)
+			continue
+		}
+		trimmed := bytes.TrimSpace(out)
+		if len(trimmed) == 0 {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 returned zero entries", dir)
+			continue
+		}
+		// Defense in depth beyond "-o json": if journalctl ever falls back
+		// to its human-readable "-- No entries --" sentinel line (that is
+		// what a real, unreadable/empty journal prints WITHOUT -o json —
+		// -o json is what makes that case zero bytes instead), a
+		// non-empty-but-non-JSON line must still be rejected rather than
+		// accepted as a real record.
+		if !json.Valid(trimmed) {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 returned non-JSON output", dir)
+			continue
+		}
+		return nil // a real record from at least one directory
+	}
+	return &preflightError{
+		cfg.HostJournalDir,
+		lastReason + " — check JOURNAL_GID, group_add, or the /host/journal mount",
+	}
 }
 
 type warner interface{ Warn(string, ...any) }
@@ -160,6 +228,19 @@ func StartupPreflight(cfg *config.Config) (int, error) {
 		var pferr *preflightError
 		if errors.As(err, &pferr) {
 			logger.Error("startup preflight failed", "path", pferr.path, "reason", pferr.reason)
+		}
+		return 78, err
+	}
+
+	// T7 obligation (PLAN.md, above the T8 entry): the directory-level
+	// check above proves the mount exists and is listable; it does not
+	// prove journalctl can actually read journal CONTENT through it. Run
+	// before the first tick so a stale JOURNAL_GID fails loud at startup
+	// instead of silently reporting all-clear forever.
+	if err := checkJournalReadable(context.Background(), cfg); err != nil {
+		var pferr *preflightError
+		if errors.As(err, &pferr) {
+			logger.Error("journal not readable", "path", pferr.path, "reason", pferr.reason)
 		}
 		return 78, err
 	}
