@@ -1,0 +1,16 @@
+{
+  "status": "ALERT",
+  "headline": "Analyzer unavailable",
+  "body": "The LLM analyzer could not produce a valid report (reason: analyzer exited non-zero). Raw kernel emerg and crit lines from this tick are listed below, unprocessed.",
+  "findings": [
+    {
+      "severity": "alert",
+      "component": "meta",
+      "evidence": "kernel: nvme0n1: I/O error, dev nvme0n1, sector 12345",
+      "explanation": "Analyzer unavailable (analyzer exited non-zero). Raw high-priority kernel lines are reported unfiltered so no hardware event is lost.",
+      "key": "a2044be91cc7d380"
+    }
+  ],
+  "resolved": [],
+  "meta": { "hostname": "bam", "tick_seq": 7 }
+}

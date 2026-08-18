@@ -2,21 +2,23 @@
 // the one exit-code map (C2). This is the ONLY file in the codebase that
 // calls os.Exit; every runX function below returns (int, error) instead.
 //
-// collect/analyze/state/notify/tick/health are wired here as clearly
-// marked not-yet-implemented stubs — they parse their flags correctly
-// (usage errors still exit 64) but do not call into runtime logic, because
-// the packages that provide it (internal/collect, internal/analyze,
-// internal/state, internal/notify, internal/runtime) are out of scope for
-// this TODO (T2).
+// Every subcommand is fully wired: collect/analyze/state (T3-T5) and
+// notify/tick/health (T6) all call into their owning package
+// (internal/collect, internal/analyze, internal/state, internal/notify,
+// internal/runtime) rather than parsing flags into a stub.
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	// Embeds the IANA time zone database so config.Load's TZ validation
 	// (time.LoadLocation) never depends on system zoneinfo being present —
@@ -25,16 +27,14 @@ import (
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/notify"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/runtime"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 // version is set at build time in later TODOs (T7 CI); "dev" is the
 // unreleased-binary default.
 var version = "dev"
-
-// errNotImplemented marks a subcommand whose backing package does not
-// exist yet in this TODO.
-var errNotImplemented = errors.New("not yet implemented")
 
 func main() {
 	os.Exit(guard(os.Stderr, func() int { return run(os.Args[1:]) }))
@@ -165,8 +165,39 @@ func runTick(args []string) (int, error) {
 		cfg.StateDir = *stateDir // flag wins over $STATE_DIR (C2)
 	}
 
-	fmt.Fprintf(os.Stderr, "sentinel tick: not yet implemented (internal/runtime, T6) state_dir=%s\n", cfg.StateDir)
-	return 1, errNotImplemented
+	store, err := state.New(cfg)
+	if err != nil {
+		return 69, fmt.Errorf("tick: %s: %w", cfg.StateDir, err)
+	}
+	deps := runtime.DefaultDeps(cfg, store)
+
+	if *loop {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		return runtime.Loop(ctx, cfg, deps)
+	}
+
+	// R2: "Startup sequence (--loop, and once before the single tick in
+	// --once)" — preflight, the read-only lint, and agy-home seeding run
+	// here too, not only inside Loop().
+	if code, err := runtime.StartupPreflight(cfg); err != nil {
+		return code, fmt.Errorf("tick: %w", err)
+	}
+
+	// R3.1's tick-seq counter is scoped to the sentinel-tick command, not
+	// to --loop — seq 0 tells Tick to allocate the next one from
+	// $STATE_DIR/tick-seq itself, same file --loop advances.
+	res := runtime.Tick(context.Background(), cfg, 0, deps)
+	if res.Report != nil {
+		b, merr := json.Marshal(res.Report)
+		if merr != nil {
+			return 1, fmt.Errorf("tick: marshal stdout document: %w", merr)
+		}
+		if _, werr := fmt.Fprintln(os.Stdout, string(b)); werr != nil {
+			return 1, fmt.Errorf("tick: write stdout: %w", werr)
+		}
+	}
+	return res.ExitCode, res.Err
 }
 
 // --- collect --- (cmd/sentinel/collect.go)
@@ -178,24 +209,11 @@ func runTick(args []string) (int, error) {
 // --- notify ---
 
 func runNotify(args []string) (int, error) {
-	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Bool("dry-run", false, "print the payload instead of sending it")
-	fs.Bool("seed-config", false, "write the apprise config volume and exit")
-	if err := fs.Parse(args); err != nil {
-		return 64, err
-	}
-	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "sentinel notify: at most one positional argument (file)")
-		return 64, nil
-	}
-
-	if _, err := config.Load(); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
 		return exitCodeForConfigErr(err)
 	}
-
-	fmt.Fprintln(os.Stderr, "sentinel notify: not yet implemented (internal/notify, T6)")
-	return 1, errNotImplemented
+	return notify.Run(context.Background(), cfg, args, os.Stdin, os.Stdout)
 }
 
 // --- health ---
@@ -216,14 +234,11 @@ func runHealth(args []string) (int, error) {
 		return exitCodeForConfigErr(err)
 	}
 
-	store, err := state.New(cfg)
+	// C2: health with a stale or missing heartbeat -> exit 1 (pinned,
+	// compose only needs non-zero).
+	code, err := runtime.Health(cfg)
 	if err != nil {
-		return 69, fmt.Errorf("health: %w", err)
+		return code, fmt.Errorf("health: %w", err)
 	}
-	if err := store.Health(); err != nil {
-		// C2: health with a stale or missing heartbeat -> exit 1 (pinned,
-		// compose only needs non-zero).
-		return 1, fmt.Errorf("health: %w", err)
-	}
-	return 0, nil
+	return code, nil
 }

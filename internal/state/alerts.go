@@ -11,13 +11,6 @@ type ActiveAlert struct {
 	Key          string `json:"key"`
 	Component    string `json:"component"`
 	EvidenceCore string `json:"evidence_core"`
-	// Evidence is the finding's raw (untruncated) evidence text, updated
-	// on every occurrence (not just at creation, unlike Headline) — S.3(e)
-	// resolved-matching compares against analyze's resolved[] entries,
-	// which are always rendered from the MOST RECENT history tick's
-	// evidence, so a stale evidence string here would silently reopen the
-	// resolved[]/headline mismatch S.3(e) was amended to fix.
-	Evidence     string `json:"evidence"`
 	Headline     string `json:"headline"`
 	Severity     string `json:"severity"`
 	FirstSeen    int64  `json:"first_seen"`

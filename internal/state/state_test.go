@@ -459,7 +459,7 @@ func TestProcess_NotifyRuleCarriesResolvedFromSameTick(t *testing.T) {
 		Headline: "New alert",
 		Body:     "b",
 		Findings: []report.Finding{finding("alert", "brand new evidence")}, // notifies -> rule 1
-		Resolved: []string{"Load average elevated on bam"},                 // unrelated alert clears same tick
+		Resolved: []string{dedup.Key("kernel", "load high")},               // unrelated alert clears same tick
 	})
 	d1 := mustProcess(t, s, b1)
 	if !d1.Notify || d1.Reason == "" {
@@ -482,8 +482,9 @@ func TestProcess_AllClear(t *testing.T) {
 		t.Fatal("initial notify failed")
 	}
 
+	key := dedup.Key("kernel", "evidence")
 	cfg.Now = time.Unix(2000, 0)
-	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "Resolved", Body: "irrelevant, overwritten by rule 2", Resolved: []string{"Test headline"}})
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "Resolved", Body: "irrelevant, overwritten by rule 2", Resolved: []string{key}})
 	d2 := mustProcess(t, s, b2)
 	if !d2.Notify || d2.Reason != "all_clear" || len(d2.Report.Resolved) != 1 || d2.Report.Resolved[0] != "Test headline" {
 		t.Errorf("all-clear: notify=%v reason=%s resolved=%v, want notify=true reason=all_clear resolved=[Test headline]",
@@ -494,23 +495,44 @@ func TestProcess_AllClear(t *testing.T) {
 	}
 
 	cfg.Now = time.Unix(3000, 0)
-	b3 := marshalReport(t, &report.Report{Status: "OK", Headline: "Still clear", Body: "body", Resolved: []string{"Test headline"}})
+	b3 := marshalReport(t, &report.Report{Status: "OK", Headline: "Still clear", Body: "body", Resolved: []string{key}})
 	d3 := mustProcess(t, s, b3)
 	if d3.Notify {
-		t.Errorf("second all-clear on the same headline: notify=%v, want false (key already gone)", d3.Notify)
+		t.Errorf("second all-clear on the same key: notify=%v, want false (key already gone)", d3.Notify)
 	}
 }
 
 // --- case 6 ---
 
-func TestProcess_ResolvedUnknownHeadline(t *testing.T) {
+func TestProcess_ResolvedUnknownKey(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	s := newStore(t, cfg)
 
-	b1 := marshalReport(t, &report.Report{Status: "OK", Headline: "Empty", Body: "body", Resolved: []string{"Unknown headline"}})
+	b1 := marshalReport(t, &report.Report{Status: "OK", Headline: "Empty", Body: "body", Resolved: []string{dedup.Key("kernel", "never seen")}})
 	d1 := mustProcess(t, s, b1)
 	if d1.Notify || len(d1.Report.Resolved) != 0 {
 		t.Errorf("unknown resolved: notify=%v resolved=%v, want false []", d1.Notify, d1.Report.Resolved)
+	}
+}
+
+// TestProcess_ResolvedNonHexEntryDropped is S.9 case 6's other half: a
+// non-hex resolved[] entry (never a valid dedup.Key) is dropped silently,
+// never matched against anything and never an error (S.3e).
+func TestProcess_ResolvedNonHexEntryDropped(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test headline", Body: "b", Findings: []report.Finding{finding("alert", "evidence")}})
+	mustProcess(t, s, b1)
+
+	cfg.Now = time.Unix(2000, 0)
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "Empty", Body: "body", Resolved: []string{"not-a-hex-key"}})
+	d2 := mustProcess(t, s, b2)
+	if d2.Notify || len(d2.Report.Resolved) != 0 {
+		t.Errorf("non-hex resolved entry: notify=%v resolved=%v, want false [] (dropped, not matched)", d2.Notify, d2.Report.Resolved)
+	}
+	if _, ok := s.loadAlert(dedup.Key("kernel", "evidence")); !ok {
+		t.Error("the real alert must survive an unrelated non-hex resolved[] entry")
 	}
 }
 
@@ -541,7 +563,7 @@ func TestProcess_NeverNotifiedAlertResolvesWithoutAllClear(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b", Resolved: []string{"Never told the operator"}})
+	b := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b", Resolved: []string{unnotified.Key}})
 	d := mustProcess(t, s, b)
 	if d.Notify || len(d.Report.Resolved) != 0 {
 		t.Errorf("resolving a never-notified alert: notify=%v resolved=%v, want false [] (no all-clear for something never surfaced)", d.Notify, d.Report.Resolved)
@@ -566,10 +588,10 @@ func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
 	}
 
 	// f1 persists but within the renotify window (suppressed, still
-	// "touched" in step d); resolved names the shared headline, which must
-	// close only f2 (S-D7), even though f1 is not in the notified list.
+	// "touched" in step d); resolved names f2's key, which must close only
+	// f2 (S-D7), even though f1 is not in the notified list.
 	cfg.Now = time.Unix(2000, 0)
-	b2 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Shared headline", Body: "body", Findings: []report.Finding{f1}, Resolved: []string{"Shared headline"}})
+	b2 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Shared headline", Body: "body", Findings: []report.Finding{f1}, Resolved: []string{dedup.Key("kernel", "evidence2")}})
 	d2 := mustProcess(t, s, b2)
 	if len(d2.Report.Resolved) != 1 {
 		t.Errorf("resolved: %d entries, want exactly 1 (S-D7)", len(d2.Report.Resolved))
@@ -580,6 +602,49 @@ func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts"))
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), dedup.Key("kernel", "evidence1")) {
 		t.Errorf("surviving active-alert should be f1's key, got %v", entries)
+	}
+}
+
+// TestProcess_ResolvedByKeyDistinguishesEvidenceCollidingIn80Runes is S.9
+// case 7's addendum: the old evidence-truncated-to-80-runes match could
+// not tell apart two alerts whose evidence agreed in its first 80 runes —
+// resolving one would close both. Key-based matching must distinguish
+// them, since dedup.Key hashes the full (masked) evidence, not a prefix.
+func TestProcess_ResolvedByKeyDistinguishesEvidenceCollidingIn80Runes(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	prefix := strings.Repeat("x", 80)
+	evA := prefix + "-vdev-a"
+	evB := prefix + "-vdev-b"
+	if evA[:80] != evB[:80] {
+		t.Fatalf("test setup: fixtures must agree in their first 80 runes")
+	}
+	fA := finding("alert", evA)
+	fB := finding("alert", evB)
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "H", Body: "b", Findings: []report.Finding{fA, fB}})
+	d1 := mustProcess(t, s, b1)
+	if !d1.Notify || d1.ActiveCount != 2 {
+		t.Fatalf("initial: notify=%v active=%d, want true 2", d1.Notify, d1.ActiveCount)
+	}
+	keyA := dedup.Key("kernel", evA)
+	keyB := dedup.Key("kernel", evB)
+	if keyA == keyB {
+		t.Fatalf("test setup: fixtures must produce distinct keys")
+	}
+
+	// Neither finding recurs this tick; resolve only keyA.
+	cfg.Now = time.Unix(2000, 0)
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "H", Body: "b", Resolved: []string{keyA}})
+	d2 := mustProcess(t, s, b2)
+	if len(d2.Report.Resolved) != 1 {
+		t.Fatalf("resolved: %v, want exactly 1", d2.Report.Resolved)
+	}
+	if _, ok := s.loadAlert(keyA); ok {
+		t.Error("keyA must be closed")
+	}
+	if _, ok := s.loadAlert(keyB); !ok {
+		t.Error("keyB must survive — resolving keyA must not also close it")
 	}
 }
 
@@ -595,8 +660,11 @@ func TestProcess_AllClearHeadlineTruncate(t *testing.T) {
 	mustProcess(t, s, b1)
 
 	cfg.Now = time.Unix(2000, 0)
-	// All 3 findings absent this tick, all sharing the resolved headline.
-	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "irrelevant", Body: "body", Resolved: []string{headline}})
+	// All 3 findings absent this tick, resolved by their own keys — output
+	// still collapses to the one shared stored headline (dedup, first wins).
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "irrelevant", Body: "body", Resolved: []string{
+		dedup.Key("kernel", "e1"), dedup.Key("kernel", "e2"), dedup.Key("kernel", "e3"),
+	}})
 	d2 := mustProcess(t, s, b2)
 	if !d2.Notify || d2.Reason != "all_clear" {
 		t.Fatalf("notify=%v reason=%s, want notify=true reason=all_clear", d2.Notify, d2.Reason)
