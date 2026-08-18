@@ -132,8 +132,8 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		}
 		if err := d.NotifySend(ctx, cfg, *rawRep, false); err != nil {
 			raw, _ := json.Marshal(rawRep)
-			d.OutboxAdd(raw)
 			result.ExitCode = maxCode(result.ExitCode, 4)
+			queueOrLog(d, logger, &result, raw, "raw alert")
 		}
 	}
 
@@ -181,9 +181,8 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		result.ExitCode = maxCode(result.ExitCode, 5)
 		result.Report = &degraded
 		if err := d.NotifySend(ctx, cfg, degraded, false); err != nil {
-			d.OutboxAdd(degradedRaw)
-			result.Queued = true
 			result.ExitCode = maxCode(result.ExitCode, 4)
+			queueOrLog(d, logger, &result, degradedRaw, "state-failure report")
 		} else {
 			result.Notified = true
 		}
@@ -195,9 +194,8 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	if decision.Notify {
 		payload, _ := json.Marshal(decision.Report)
 		if err := d.NotifySend(ctx, cfg, decision.Report, false); err != nil {
-			d.OutboxAdd(payload)
-			result.Queued = true
 			result.ExitCode = maxCode(result.ExitCode, 4)
+			queueOrLog(d, logger, &result, payload, "tick report")
 		} else {
 			result.Notified = true
 		}
@@ -216,13 +214,35 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 func deliverAndDrain(ctx context.Context, cfg *config.Config, d Deps, logger *slog.Logger, rep *report.Report, result *TickResult) {
 	raw, _ := json.Marshal(rep)
 	if err := d.NotifySend(ctx, cfg, *rep, false); err != nil {
-		d.OutboxAdd(raw)
-		result.Queued = true
 		result.ExitCode = maxCode(result.ExitCode, 4)
+		queueOrLog(d, logger, result, raw, "collector fallback")
 	} else {
 		result.Notified = true
 	}
 	drainOutbox(ctx, cfg, d, logger, result)
+}
+
+// queueOrLog attempts to enqueue raw to the outbox after a failed
+// delivery. R3.8/S.7's invariant is "no alert is lost" via OutboxAdd — but
+// that invariant has an unhandled edge: state.Process (S.3d) has already
+// committed LastNotified/NotifyCount to active-alerts/<key>.json by the
+// time this runs, so if NotifySend AND OutboxAdd both fail, the finding
+// sits suppressed for the renotify window with nothing in the outbox and
+// no trace anywhere — worse than an ordinary "queued, will retry"
+// failure, and indistinguishable from one in the exit code before this
+// fix. Neither CONTRACTS.md nor contracts/runtime.md/state.md defines a
+// code for this double failure, so this reuses rc 5 (the "state failed"
+// family — OutboxAdd is a state write) rather than inventing one; it
+// still outranks the plain rc 4 a successful queue reports, which is the
+// distinguishing signal an operator needs.
+func queueOrLog(d Deps, logger *slog.Logger, result *TickResult, raw []byte, what string) {
+	if _, err := d.OutboxAdd(raw); err != nil {
+		logger.Error("alert lost: delivery failed and outbox enqueue also failed", "what", what, "error", err)
+		result.ExitCode = maxCode(result.ExitCode, 5)
+		result.Queued = false
+		return
+	}
+	result.Queued = true
 }
 
 // drainOutbox is R3.2 step 5. A failed retry is visible in result.ExitCode

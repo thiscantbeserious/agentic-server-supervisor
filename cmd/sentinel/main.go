@@ -2,12 +2,10 @@
 // the one exit-code map (C2). This is the ONLY file in the codebase that
 // calls os.Exit; every runX function below returns (int, error) instead.
 //
-// collect/analyze/state/notify/tick/health are wired here as clearly
-// marked not-yet-implemented stubs — they parse their flags correctly
-// (usage errors still exit 64) but do not call into runtime logic, because
-// the packages that provide it (internal/collect, internal/analyze,
-// internal/state, internal/notify, internal/runtime) are out of scope for
-// this TODO (T2).
+// Every subcommand is fully wired: collect/analyze/state (T3-T5) and
+// notify/tick/health (T6) all call into their owning package
+// (internal/collect, internal/analyze, internal/state, internal/notify,
+// internal/runtime) rather than parsing flags into a stub.
 package main
 
 import (
@@ -37,10 +35,6 @@ import (
 // version is set at build time in later TODOs (T7 CI); "dev" is the
 // unreleased-binary default.
 var version = "dev"
-
-// errNotImplemented marks a subcommand whose backing package does not
-// exist yet in this TODO.
-var errNotImplemented = errors.New("not yet implemented")
 
 func main() {
 	os.Exit(guard(os.Stderr, func() int { return run(os.Args[1:]) }))
@@ -181,6 +175,13 @@ func runTick(args []string) (int, error) {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
 		return runtime.Loop(ctx, cfg, deps)
+	}
+
+	// R2: "Startup sequence (--loop, and once before the single tick in
+	// --once)" — preflight, the read-only lint, and agy-home seeding run
+	// here too, not only inside Loop().
+	if code, err := runtime.StartupPreflight(cfg); err != nil {
+		return code, fmt.Errorf("tick: %w", err)
 	}
 
 	seq := int64(1) // --once has no persistent counter across invocations (that's --loop's tick-seq file, R3.1)

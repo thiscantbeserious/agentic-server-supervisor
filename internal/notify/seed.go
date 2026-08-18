@@ -40,8 +40,8 @@ func SeedConfig(ctx context.Context, cfg *config.Config) (int, error) {
 		return 0, err
 	}
 
-	url := strings.TrimRight(cfg.AppriseURL, "/") + "/add/" + cfg.AppriseKey
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+	endpoint := strings.TrimRight(cfg.AppriseURL, "/") + "/add/" + cfg.AppriseKey
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &buf)
 	if err != nil {
 		return 0, err
 	}
@@ -50,13 +50,18 @@ func SeedConfig(ctx context.Context, cfg *config.Config) (int, error) {
 	client := &http.Client{Timeout: cfg.NotifyTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		// A *url.Error's Error() embeds the full request URL, whose last
-		// path segment is APPRISE_KEY — redact before this can reach a
-		// caller's log line (C7, same defect class as notify.go's
-		// postApprise).
-		return 0, fmt.Errorf("transport: %s", redact(cfg, err))
+		// unwrapURLErr: a *url.Error's Error() embeds the full request
+		// URL, whose last path segment is APPRISE_KEY — never let it into
+		// a returned/logged error (C7, same fix as notify.go's postApprise).
+		return 0, fmt.Errorf("transport: %w", unwrapURLErr(err))
 	}
 	defer resp.Body.Close()
+	// N.3.1's 204 rule applies here too: a 204 means apprise did not
+	// register the key, which is precisely the failure SeedConfig exists
+	// to prevent — the one caller that must never mistake it for success.
+	if resp.StatusCode == http.StatusNoContent {
+		return 0, fmt.Errorf("http 204: apprise did not accept the config")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 		return 0, fmt.Errorf("http %d: %s", resp.StatusCode, body)

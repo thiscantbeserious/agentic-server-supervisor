@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -323,6 +324,46 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 	}
 }
 
+// TestTick_NotifyAndOutboxBothFail is main's round-3 item 3 (agy-found):
+// state.Process (S.3d) has already committed LastNotified/NotifyCount to
+// active-alerts/<key>.json by the time notify runs, so if NotifySend AND
+// OutboxAdd both fail, the finding sits suppressed for the renotify
+// window with nothing queued and no trace anywhere — worse than an
+// ordinary "queued, will retry" failure, and before this fix,
+// indistinguishable from one in the exit code (both were rc 4). This
+// drives OutboxAdd itself to fail (a read-only outbox dir) and asserts
+// the distinct rc 5 plus an ERROR log line, and that Queued correctly
+// reports false rather than the stale "true" the old code always set
+// regardless of whether the enqueue actually succeeded.
+func TestTick_NotifyAndOutboxBothFail(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 503)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = stubAnalyzeReturning(watchReport())
+	d.OutboxAdd = func(raw []byte) (string, error) {
+		return "", errors.New("outbox dir unwritable")
+	}
+
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	res := Tick(context.Background(), cfg, 1, d)
+	if res.ExitCode != 5 {
+		t.Errorf("ExitCode = %d, want 5 (distinct from a successfully-queued rc 4)", res.ExitCode)
+	}
+	if res.Queued {
+		t.Error("Queued = true, want false — OutboxAdd itself failed, nothing was actually queued")
+	}
+	if !strings.Contains(logBuf.String(), "alert lost") {
+		t.Errorf("stderr does not name the double failure at ERROR: %q", logBuf.String())
+	}
+}
+
 // --- E7: apprise_503 ---
 
 func TestTick_Apprise503(t *testing.T) {
@@ -352,11 +393,26 @@ func TestTick_Apprise503(t *testing.T) {
 // drain that fails every item previously left rc 0 — visible only in a
 // WARN log line an operator running --once may never tail. The exit code
 // is the machine-readable signal; a stuck outbox must move it.
+// TestTick_DrainFailureContributesToExitCode is round-2 review item 2: the
+// first version of this test was vacuous — it passed even with the fix
+// deleted from drainOutbox, because at tick0 the daily heartbeat is due,
+// so step 4 ALSO notifies, ALSO hits the 503 recorder, and ALSO queues —
+// setting rc 4 by itself before the drain ever runs. Seeding today's
+// heartbeat makes step (f) not due, so with no findings state suppresses,
+// step 4 sends nothing, and the drain is the ONLY thing that can move the
+// exit code. The setup guard (!Queued && !Notified) fails loudly if this
+// isolation ever breaks again instead of quietly going vacuous.
 func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
 	cfg := testConfig(t, tick0)
 	rec := newAppriseRecorder(t, 503) // every POST fails, including the drain's
 	cfg.AppriseURL = rec.srv.URL
 	store := newStore(t, cfg)
+
+	// tick0 is 2026-08-15: seed today's heartbeat so step (f) is not due
+	// and this tick's own report has nothing to notify about.
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "heartbeat"), []byte("2026-08-15\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Seed the outbox directly so the drain has something to retry and
 	// fail, regardless of whatever this tick's own report does.
@@ -369,6 +425,10 @@ func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
 	d.AnalyzeRun = stubAnalyzeReturning(okReport())
 
 	res := Tick(context.Background(), cfg, 1, d)
+	if res.Queued || res.Notified {
+		t.Fatalf("setup guard failed: Queued=%v Notified=%v — this tick's own report must send nothing, "+
+			"or rc 4 could come from step 4 again instead of the drain", res.Queued, res.Notified)
+	}
 	if res.ExitCode != 4 {
 		t.Errorf("ExitCode = %d, want 4 (a failed outbox retry must be visible in the exit code)", res.ExitCode)
 	}
@@ -705,5 +765,87 @@ func TestTick_RawKeyMatchesDedup(t *testing.T) {
 	want := dedup.Key("kernel", msg)
 	if cands[0].Key != want {
 		t.Errorf("key = %q, want %q", cands[0].Key, want)
+	}
+}
+
+// TestCandidates_NewestFirst is round-3's accept-or-defer item, accepted:
+// R3.3 requires "newest first". facts.Entry order is oldest-first (the
+// journal/collect convention Candidates walks backwards over), so this
+// locks in that Candidates actually reverses it rather than assuming the
+// reviewer's manual probe stays true forever.
+func TestCandidates_NewestFirst(t *testing.T) {
+	entries := []facts.Entry{
+		critEntry("2026-08-15T09:00:00Z", "oldest"),
+		critEntry("2026-08-15T09:01:00Z", "middle"),
+		critEntry("2026-08-15T09:02:00Z", "newest"),
+	}
+	cands := Candidates(factsWithKernelEntries(entries), 2)
+	if len(cands) != 3 {
+		t.Fatalf("candidates = %d, want 3", len(cands))
+	}
+	got := []string{cands[0].Entry.Message, cands[1].Entry.Message, cands[2].Entry.Message}
+	want := []string{"newest", "middle", "oldest"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate[%d] = %q, want %q (order = %v, want %v)", i, got[i], want[i], got, want)
+		}
+	}
+}
+
+// TestSweepMarkers_ExpiresOldOnly is round-3's accept-or-defer item,
+// accepted: R3.3's TTL sweep must delete a marker older than
+// RAW_ALERT_MARKER_TTL_HOURS and leave a fresh one untouched.
+func TestSweepMarkers_ExpiresOldOnly(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	// sweepMarkers reads mtime, not content — writeMarker stamps the file
+	// with the real wall clock, so the age comparison must be pinned
+	// explicitly via os.Chtimes (same pattern TestHealth uses for the
+	// heartbeat file, C9: never rely on real wall-clock timing in a test).
+	oldAge := tick0.Add(-200 * time.Hour)
+	freshAge := tick0.Add(-1 * time.Hour)
+	if err := writeMarker(cfg.StateDir, "oldkey1234567890", oldAge); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(markerPath(cfg.StateDir, "oldkey1234567890"), oldAge, oldAge); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(cfg.StateDir, "freshkey123456789", freshAge); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(markerPath(cfg.StateDir, "freshkey123456789"), freshAge, freshAge); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepMarkers(cfg.StateDir, tick0, 168*time.Hour) // default RAW_ALERT_MARKER_TTL_HOURS
+
+	if _, err := os.Stat(markerPath(cfg.StateDir, "oldkey1234567890")); !os.IsNotExist(err) {
+		t.Error("marker older than the TTL must be removed")
+	}
+	if _, err := os.Stat(markerPath(cfg.StateDir, "freshkey123456789")); err != nil {
+		t.Errorf("marker within the TTL must survive: %v", err)
+	}
+}
+
+// TestMinimalValidationFailureAlert is round-3's accept-or-defer item,
+// accepted: R3.2's "never drops an alert because of its own marshaling
+// bug" safety net had nothing behind it. Asserts the replacement is
+// itself schema-valid — the one property that matters, since this is the
+// last-resort document when runtime's OWN output failed validation.
+func TestMinimalValidationFailureAlert(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rep := minimalValidationFailureAlert(cfg, 7, errors.New("report: body: length 3000 runes out of bounds [1,2000]"))
+
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, verr := report.Validate(b); verr != nil {
+		t.Fatalf("the safety-net document itself must validate: %v", verr)
+	}
+	if rep.Status != "ALERT" {
+		t.Errorf("Status = %q, want ALERT — a marshaling bug must never be reported as OK", rep.Status)
+	}
+	if len(rep.Findings) == 0 {
+		t.Fatal("no findings — status ALERT with zero findings fails validation anyway, but assert the shape directly")
 	}
 }

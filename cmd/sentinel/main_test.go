@@ -249,6 +249,26 @@ func TestTickWithoutStateDirFlagUsesEnv(t *testing.T) {
 	}
 }
 
+// TestTickOnceRunsStartupPreflight is round-3 item 5: R2's startup
+// sequence ("preflight, the read-only lint, agy-home seeding") is
+// required "once before --loop starts ticking, AND once before the
+// single tick in --once" — before this fix, main.go only ran it inside
+// Loop(), so a --once invocation with neither journal directory mounted
+// silently skipped a check --loop would have enforced. baseEnv gives a
+// real, writable $STATE_DIR (so state.New succeeds) but never sets
+// HOST_JOURNAL_DIR/HOST_JOURNAL_VOLATILE_DIR, so both fall back to their
+// C3 defaults (/host/journal, /host/journal-volatile) — real container
+// paths that do not exist on a dev/CI host, which is exactly the
+// "neither journal directory is readable and non-empty" case StartupPreflight
+// must catch.
+func TestTickOnceRunsStartupPreflight(t *testing.T) {
+	bin := buildSentinel(t)
+	_, stderr, code := runBin(t, bin, baseEnv(t, t.TempDir()), "tick", "--once")
+	if code != 78 {
+		t.Fatalf("code = %d, stderr = %q, want 78 (StartupPreflight must run before a --once tick, not only inside Loop)", code, stderr)
+	}
+}
+
 func TestTZDataEmbedded(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {

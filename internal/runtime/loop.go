@@ -110,12 +110,15 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 func nextTickSeq(cfg *config.Config, logger warner) int64 {
 	path := filepath.Join(cfg.StateDir, "tick-seq")
 	var seq int64 = 1
-	if data, err := os.ReadFile(path); err == nil {
-		if n, perr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); perr == nil {
-			seq = n + 1
-		} else {
-			logger.Warn("tick-seq unparseable, restarting at 1")
-		}
+	// R3.1: "Missing or unparseable ⇒ start at 1 and WARN" — both cases,
+	// not only the unparseable one.
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		logger.Warn("tick-seq missing, starting at 1")
+	} else if n, perr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); perr == nil {
+		seq = n + 1
+	} else {
+		logger.Warn("tick-seq unparseable, restarting at 1")
 	}
 
 	if tmp, err := os.CreateTemp(cfg.StateDir, ".tmp-tick-seq-*"); err == nil {
@@ -137,11 +140,15 @@ func assertBinDirReadOnly(logger warner) {
 	}
 }
 
-// Loop runs preflight once, then ticks every TICK_INTERVAL until
-// SIGTERM/SIGINT. It terminates only with 0 (signal), 78 (config/mount
-// preflight) or 69 (state dir) — every other tick failure is logged and
-// the loop continues (R2).
-func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
+// StartupPreflight is R2's startup sequence steps 2-5: filesystem
+// preflight (STATE_DIR, /tmp, a readable journal dir, $HOST_PROC/uptime,
+// and the C4 subdirectory MkdirAlls), the /usr/local/bin read-only lint,
+// and agy-home seeding. R2 requires this "once before --loop starts
+// ticking, and once before the single tick in --once" — step 1
+// (config.Load) and step 6 (signal.NotifyContext, --loop only) are the
+// caller's job. Returns the C2 exit code: 69 for a state-dir failure, 78
+// for any other preflight failure, 0 on success.
+func StartupPreflight(cfg *config.Config) (int, error) {
 	logger := newLogger(cfg)
 
 	if err := preflight(cfg); err != nil {
@@ -159,6 +166,19 @@ func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 
 	assertBinDirReadOnly(logger)
 	seedAgyHome(cfg, logger)
+	return 0, nil
+}
+
+// Loop runs StartupPreflight once, then ticks every TICK_INTERVAL until
+// SIGTERM/SIGINT. It terminates only with 0 (signal), 78 (config/mount
+// preflight) or 69 (state dir) — every other tick failure is logged and
+// the loop continues (R2).
+func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
+	logger := newLogger(cfg)
+
+	if code, err := StartupPreflight(cfg); err != nil {
+		return code, err
+	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

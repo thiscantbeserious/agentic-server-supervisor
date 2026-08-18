@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +142,25 @@ func TestLoop_Shutdown(t *testing.T) {
 	}
 	if code != 0 || err != nil {
 		t.Errorf("Loop() = %d, %v, want 0, nil", code, err)
+	}
+}
+
+// TestNextTickSeq_MissingWarnsToo is round-3 item 9: R3.1 says "Missing or
+// unparseable ⇒ start at 1 and WARN" — the pre-fix code only warned on the
+// unparseable branch, so the far more common real case (a fresh $STATE_DIR
+// on first boot, tick-seq simply absent) started at 1 silently.
+func TestNextTickSeq_MissingWarnsToo(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	seq := nextTickSeq(cfg, newLogger(cfg))
+	if seq != 1 {
+		t.Fatalf("seq = %d, want 1 on a fresh $STATE_DIR", seq)
+	}
+	if !strings.Contains(logBuf.String(), "tick-seq missing") {
+		t.Errorf("stderr does not WARN on a missing tick-seq file: %q", logBuf.String())
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,6 +296,45 @@ func TestSendFailures(t *testing.T) {
 	})
 }
 
+// TestPostFailureLogKeys is round-3 item 10: N.3.5 specifies two distinct
+// log keys for a failed POST, "http=<code>" or "transport=<err>" — not one
+// generic "error" key a log-scraping alert can't distinguish by cause.
+func TestPostFailureLogKeys(t *testing.T) {
+	r := loadFixture(t, "report-ok.json")
+
+	t.Run("http", func(t *testing.T) {
+		cfg := notifyTestConfig(t, newAppriseStub(t, 502), nil)
+		var logBuf bytes.Buffer
+		logWriter = &logBuf
+		defer func() { logWriter = nil }()
+
+		Send(context.Background(), cfg, r, false)
+		if !strings.Contains(logBuf.String(), "http=502") {
+			t.Errorf("stderr = %q, want it to contain http=502", logBuf.String())
+		}
+		if strings.Contains(logBuf.String(), "error=") {
+			t.Errorf("stderr still uses the generic error= key: %q", logBuf.String())
+		}
+	})
+
+	t.Run("transport", func(t *testing.T) {
+		stub := newAppriseStub(t, 200)
+		stub.srv.Close()
+		cfg := notifyTestConfig(t, stub, nil)
+		var logBuf bytes.Buffer
+		logWriter = &logBuf
+		defer func() { logWriter = nil }()
+
+		Send(context.Background(), cfg, r, false)
+		if !strings.Contains(logBuf.String(), "transport=") {
+			t.Errorf("stderr = %q, want it to contain transport=", logBuf.String())
+		}
+		if strings.Contains(logBuf.String(), "error=") {
+			t.Errorf("stderr still uses the generic error= key: %q", logBuf.String())
+		}
+	})
+}
+
 // TestAppriseKeyNeverLeaks is round-1 review blocker 1: APPRISE_KEY sits
 // in the URL path of every apprise request, so both a deliberate message
 // (the 204 case) and an incidental one (a *url.Error's Error() embeds the
@@ -309,15 +349,30 @@ func TestAppriseKeyNeverLeaks(t *testing.T) {
 
 	cases := []struct {
 		name       string
+		key        string
 		makeConfig func(t *testing.T) *config.Config
 	}{
-		{"204", func(t *testing.T) *config.Config {
+		{"204", secretKey, func(t *testing.T) *config.Config {
 			return notifyTestConfig(t, newAppriseStub(t, 204), nil)
 		}},
-		{"non-2xx", func(t *testing.T) *config.Config {
+		{"non-2xx", secretKey, func(t *testing.T) *config.Config {
 			return notifyTestConfig(t, newAppriseStub(t, 502), nil)
 		}},
-		{"transport refused", func(t *testing.T) *config.Config {
+		{"transport refused", secretKey, func(t *testing.T) *config.Config {
+			stub := newAppriseStub(t, 200)
+			stub.srv.Close()
+			return notifyTestConfig(t, stub, nil)
+		}},
+		// Round 2 review: net/url percent-encodes the key into a
+		// *url.Error's Error() text, so a literal string match alone only
+		// catches keys with no character Go escapes. These two exercise
+		// exactly the encoding this component must not leak.
+		{"transport refused, key with space", "key with space 9999", func(t *testing.T) *config.Config {
+			stub := newAppriseStub(t, 200)
+			stub.srv.Close()
+			return notifyTestConfig(t, stub, nil)
+		}},
+		{"transport refused, non-ASCII key", "schlüssel9999", func(t *testing.T) *config.Config {
 			stub := newAppriseStub(t, 200)
 			stub.srv.Close()
 			return notifyTestConfig(t, stub, nil)
@@ -326,7 +381,7 @@ func TestAppriseKeyNeverLeaks(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := c.makeConfig(t)
-			cfg.AppriseKey = secretKey
+			cfg.AppriseKey = c.key
 
 			var logBuf bytes.Buffer
 			logWriter = &logBuf
@@ -336,11 +391,15 @@ func TestAppriseKeyNeverLeaks(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected a delivery error")
 			}
-			if strings.Contains(err.Error(), secretKey) {
-				t.Errorf("returned error leaks APPRISE_KEY: %q", err.Error())
+			// Check the key itself AND its percent-encoded form — the
+			// encoded form is what a *url.Error actually prints, and is
+			// the exact gap a plain literal-match redactor misses.
+			encoded := (&url.URL{Path: c.key}).EscapedPath()
+			if strings.Contains(err.Error(), c.key) || strings.Contains(err.Error(), encoded) {
+				t.Errorf("returned error leaks APPRISE_KEY (raw or percent-encoded): %q", err.Error())
 			}
-			if strings.Contains(logBuf.String(), secretKey) {
-				t.Errorf("stderr log leaks APPRISE_KEY: %q", logBuf.String())
+			if strings.Contains(logBuf.String(), c.key) || strings.Contains(logBuf.String(), encoded) {
+				t.Errorf("stderr log leaks APPRISE_KEY (raw or percent-encoded): %q", logBuf.String())
 			}
 		})
 	}
@@ -579,6 +638,37 @@ func TestSeedConfig(t *testing.T) {
 	}
 }
 
+// TestSeedConfig_204IsFailure is round-3 item 6: N.3.1's 204 rule ("the
+// key was not registered") applies to /add/{key} exactly as it does to
+// /notify/{key} — a 204 there means apprise did NOT accept the config,
+// the one outcome SeedConfig exists to prevent silently.
+func TestSeedConfig_204IsFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "sentinel.cfg")
+	if err := os.WriteFile(cfgFile, []byte("tgram://token/chatid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	t.Setenv("SENTINEL_HOSTNAME", "bam")
+	t.Setenv("APPRISE_URL", srv.URL)
+	t.Setenv("APPRISE_KEY", "sentinel")
+	t.Setenv("APPRISE_CONFIG_FILE", cfgFile)
+	t.Setenv("MAILRISE_USER", "u")
+	t.Setenv("MAILRISE_PASS", "p")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SeedConfig(context.Background(), cfg); err == nil {
+		t.Error("SeedConfig must treat a 204 response as failure, not success")
+	}
+}
+
 // --- 17: TestNoSecretsInRepo ---
 
 var (
@@ -601,7 +691,13 @@ func TestNoSecretsInRepo(t *testing.T) {
 	root := "../.."
 	out, err := exec.Command("git", "-C", root, "ls-files").Output()
 	if err != nil {
-		t.Fatalf("git ls-files: %v", err)
+		// A build context with no .git (T7's Dockerfile: `COPY . .`, no
+		// .dockerignore excluding it today, but that is a normal thing to
+		// add) is not this test's business — "no secrets in git" is
+		// vacuously true with no git repo to ask. C9's sanctioned pattern
+		// is a loud skip here, never a hard fail that would break an
+		// otherwise-clean image build, and never a silent pass either.
+		t.Skipf("not a git checkout (git ls-files: %v) — skipping the tracked-secrets scan", err)
 	}
 
 	for _, rel := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {

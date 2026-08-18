@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -49,18 +50,51 @@ func wrapErr(target error, format string, args ...any) error {
 	return &sentinelErr{msg: fmt.Sprintf(format, args...), target: target}
 }
 
+// unwrapURLErr strips the request URL out of a *url.Error before it can
+// reach a log line or a returned error string (C7: "Never logged: ...
+// APPRISE_KEY"). APPRISE_KEY is the last path segment of every apprise
+// request, and net/url percent-encodes that segment into Error()'s text —
+// a literal string match (redact, below) only catches keys with no
+// character Go escapes, which is most keys but not all (a space, a
+// non-ASCII character). Never letting the URL into the error at all is
+// the root-cause fix: unwrap to the transport's own error, which never
+// carries the URL.
+func unwrapURLErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
+
 // redact strips cfg.AppriseKey out of an error's text before it can reach
 // a log line or a returned error string (C7: "Never logged: ... APPRISE_KEY").
-// APPRISE_KEY sits in the URL path of every apprise request, so both a
-// deliberate message (the 204 case) and an incidental one (a *url.Error's
-// Error() embeds the full request URL) can leak it; one redactor at every
-// call site is the root-cause fix rather than three separate ones.
+// Belt-and-braces alongside unwrapURLErr: on the postApprise/SeedConfig
+// transport path the URL is gone before this ever runs, but redact also
+// guards the 204 message and sendMail's dial errors, which are not
+// *url.Error and so unwrapURLErr does not touch them.
 func redact(cfg *config.Config, err error) string {
 	msg := err.Error()
 	if cfg.AppriseKey == "" {
 		return msg
 	}
 	return strings.ReplaceAll(msg, cfg.AppriseKey, "<APPRISE_KEY>")
+}
+
+// logPostFailure is N.3.5: "post failed (http=<code> or transport=<err>)"
+// — two distinct log keys, not one generic "error". postApprise's error
+// text is always either "http <code>: ..." or "transport: ...", so the
+// prefix tells us which key applies; the http case logs just the code,
+// matching the contract's http=<code> shape rather than the full body text.
+func logPostFailure(logger *slog.Logger, cfg *config.Config, err error) {
+	msg := redact(cfg, err)
+	if rest, ok := strings.CutPrefix(msg, "http "); ok {
+		if code, _, found := strings.Cut(rest, ":"); found {
+			logger.Error("post failed", "http", code)
+			return
+		}
+	}
+	logger.Error("post failed", "transport", msg)
 }
 
 // logWriter lets tests capture the exact C7 lines this package emits; the
@@ -136,7 +170,7 @@ func Send(ctx context.Context, cfg *config.Config, r report.Report, smtpFallback
 	}
 
 	if err := postApprise(ctx, cfg, payload); err != nil {
-		logger.Error("post failed", "error", redact(cfg, err))
+		logPostFailure(logger, cfg, err)
 		return wrapErr(ErrSend, "%s", redact(cfg, err))
 	}
 	logger.Info("sent", "status", r.Status, "host", cfg.Hostname, "path", "apprise")
@@ -156,8 +190,8 @@ func postApprise(ctx context.Context, cfg *config.Config, payload Payload) error
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	url := strings.TrimRight(cfg.AppriseURL, "/") + "/notify/" + cfg.AppriseKey
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+	endpoint := strings.TrimRight(cfg.AppriseURL, "/") + "/notify/" + cfg.AppriseKey
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -166,7 +200,7 @@ func postApprise(ctx context.Context, cfg *config.Config, payload Payload) error
 	client := &http.Client{Timeout: cfg.NotifyTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("transport: %w", err)
+		return fmt.Errorf("transport: %w", unwrapURLErr(err))
 	}
 	defer resp.Body.Close()
 
