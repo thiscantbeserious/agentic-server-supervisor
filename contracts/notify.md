@@ -108,6 +108,8 @@ func Sanitize(s string) string
 
 One `strings.Map`: drop `` ` `` `_` `*` `[` `]`, map every `unicode.IsControl` rune except `\n` to a space, drop invalid UTF-8 (`utf8.RuneError`). Helper `oneLine(s string) string` collapses `\n` and runs of spaces — applied to every field except `body`.
 
+**What the N.3.3 rules removed from this example, and why it is worth seeing:** there is one finding, so no `**Findings**` header. Its severity is `watch`, so no `_Analysis:_` block — the analysis is still in the report document, in history and in the next tick's prompt, just not pushed to a phone. And `cksum_errors=1` appears with its underscore intact, because evidence is no longer passed through `Sanitize`. The earlier version of this example carried all three, and the operator's first real message showed why none of them belonged there.
+
 #### N.3.6 Plain-text body (the SMTP path)
 
 ```go
@@ -142,7 +144,7 @@ Input report — the state contract's `decision.report` for the WATCH case, with
 ```json
 {
   "title": "[WATCH] bam: 1 checksum error on seagate-zvtazeam-crypt (hotstore mirror)",
-  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n\n**Findings**\n- **WATCH · zfs** — ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\n  `zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\n  _Analysis:_ Single event, first occurrence, redundancy intact (mirror partner 0 errors), SMART for this disk clean. Consistent with a transient bit error, not with a failing device. Blast radius: none, the block was repaired from the mirror.\n  _Recommendation:_ Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
+  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n\n- **WATCH · zfs** — ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\n  `zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\n  _Recommendation:_ Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
   "type": "warning",
   "format": "markdown"
 }
