@@ -22,15 +22,14 @@ type Payload struct {
 	Format string `json:"format"`
 }
 
-// Sanitize drops Telegram markdown metacharacters and control characters so
-// no report text can break the parser at the notification layer.
-// ponytail: strip instead of escape — a mangled log line is acceptable,
-// a permanently rejected Telegram message is not.
-func Sanitize(s string) string {
+// stripUnsafe removes what may never appear in the wire body regardless of
+// markup: invalid UTF-8, and control characters other than '\n'. It is the
+// non-markdown half of Sanitize, extracted so every path — markdown
+// (Sanitize, sanitizeEvidence) and HTML (htmlStyle, below) — shares one
+// copy of the rule rather than three that could drift.
+func stripUnsafe(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
-		case '`', '_', '*', '[', ']':
-			return -1
 		case utf8.RuneError:
 			return -1
 		case '\n':
@@ -43,30 +42,36 @@ func Sanitize(s string) string {
 	}, s)
 }
 
+// Sanitize drops Telegram markdown metacharacters and control characters so
+// no report text can break the parser at the notification layer.
+// ponytail: strip instead of escape — a mangled log line is acceptable,
+// a permanently rejected Telegram message is not.
+func Sanitize(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '`', '_', '*', '[', ']':
+			return -1
+		}
+		return r
+	}, stripUnsafe(s))
+}
+
 // sanitizeEvidence is N.3.3's amended evidence rule: evidence is rendered
 // verbatim inside a markdown code span, where every metacharacter except
 // a backtick is already literal — so unlike Sanitize, only the backtick
 // is touched (replaced with a plain quote so it can't close the span
-// early). Control characters and invalid UTF-8 are still removed.
-// Stripping `_` here (as Sanitize would) corrupted the one field analyze
-// guarantees is "copied verbatim from FACTS": cksum_errors=1 reached the
-// operator as cksumerrors=1, breaking their ability to grep their own
-// logs for what the alert named.
+// early). Control characters and invalid UTF-8 are still removed via
+// stripUnsafe. Stripping `_` here (as Sanitize would) corrupted the one
+// field analyze guarantees is "copied verbatim from FACTS":
+// cksum_errors=1 reached the operator as cksumerrors=1, breaking their
+// ability to grep their own logs for what the alert named.
 func sanitizeEvidence(s string) string {
 	return strings.Map(func(r rune) rune {
-		switch r {
-		case '`':
+		if r == '`' {
 			return '\''
-		case utf8.RuneError:
-			return -1
-		case '\n':
-			return '\n'
-		}
-		if unicode.IsControl(r) {
-			return ' '
 		}
 		return r
-	}, s)
+	}, stripUnsafe(s))
 }
 
 // TruncRunes returns s cut to max runes, appending ellipsis when it cut.
@@ -156,11 +161,20 @@ var markdownStyle = bodyStyle{
 	evidence: sanitizeEvidence,
 }
 
+// htmlEscapeSafe composes stripUnsafe with html.EscapeString: strip what
+// may never appear in the wire body (invalid UTF-8, control chars other
+// than '\n') BEFORE escaping, so the escaped output is always valid UTF-8
+// with no embedded NUL — RFC 5321 §2.3.1 forbids NUL in SMTP DATA, and a
+// message declaring charset=utf-8 must not carry invalid UTF-8 regardless.
+func htmlEscapeSafe(s string) string {
+	return html.EscapeString(stripUnsafe(s))
+}
+
 var htmlStyle = bodyStyle{
 	heading:  func(label string) string { return "<b>" + label + "</b>" },
 	code:     func(s string) string { return "<code>" + s + "</code>" },
-	prose:    html.EscapeString,
-	evidence: html.EscapeString,
+	prose:    htmlEscapeSafe,
+	evidence: htmlEscapeSafe,
 }
 
 // buildSkeleton is N.3.3's body assembly, shared verbatim by the markdown

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
@@ -512,6 +514,54 @@ func TestSMTPBody_HTML(t *testing.T) {
 	normalized := strings.ReplaceAll(dataText, "\r\n", "\n")
 	if !strings.Contains(normalized, want) {
 		t.Errorf("SMTP DATA block does not carry BuildHTMLBody's output: got %q want substring %q", normalized, want)
+	}
+}
+
+// TestSMTPBody_StripsUnsafeButKeepsFidelity is the 0bdf468 amendment: the
+// HTML path must still drop invalid UTF-8 and control characters the way
+// Sanitize always did for the markdown path — html.EscapeString alone
+// only handles the five XML entities, not NUL/BEL/invalid UTF-8. RFC 5321 §2.3.1
+// forbids NUL in SMTP DATA, and a message declaring charset=utf-8 must
+// not carry invalid UTF-8. This is checked in the SAME test as the
+// fidelity guarantee (cksum_errors, <mce>, A&B surviving as escaped
+// text) so neither property can be "fixed" by breaking the other.
+func TestSMTPBody_StripsUnsafeButKeepsFidelity(t *testing.T) {
+	appriseStubSrv := newAppriseStub(t, 200)
+	smtp := newSMTPStub(t)
+	cfg := notifyTestConfig(t, appriseStubSrv, smtp)
+
+	evidence := "cksum_errors=1 <mce> A&B \x00NUL\x07BEL" + string([]byte{0xff, 0xfe}) + "invalid-utf8"
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{{Severity: "alert", Component: "kernel", Evidence: evidence, Explanation: "exp"}},
+		Resolved: []string{},
+	}
+
+	if err := Send(context.Background(), cfg, r, true); err != nil {
+		t.Fatalf("Send(smtpFallback=true): %v", err)
+	}
+	smtp.mu.Lock()
+	dataText := smtp.dataText
+	smtp.mu.Unlock()
+
+	// --- stripping half ---
+	if !utf8.ValidString(dataText) {
+		t.Errorf("SMTP message body is NOT valid UTF-8 (declared charset=utf-8): %q", dataText)
+	}
+	if strings.Contains(dataText, "\x00") {
+		t.Error("SMTP DATA block still carries a NUL byte (RFC 5321 §2.3.1 forbids NUL in DATA)")
+	}
+	for _, r := range dataText {
+		if r != '\n' && r != '\r' && unicode.IsControl(r) {
+			t.Errorf("SMTP DATA block carries a control character other than CR/LF: %q (%U)", r, r)
+		}
+	}
+
+	// --- fidelity half, same test ---
+	for _, want := range []string{"cksum_errors=1", "&lt;mce&gt;", "A&amp;B"} {
+		if !strings.Contains(dataText, want) {
+			t.Errorf("SMTP DATA block lost fidelity, missing %q: %q", want, dataText)
+		}
 	}
 }
 
