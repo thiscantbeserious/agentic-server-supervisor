@@ -475,6 +475,38 @@ func TestSMTPFallback(t *testing.T) {
 	})
 }
 
+// TestSMTPBody_NoMarkdown is 31cec31 item 1, end-to-end through Send: the
+// DATA block must be the plain-text body (N.3.6), never payload.Body — the
+// cksum fixture's markdown-heavy content (**Findings**, _Analysis:_,
+// backtick-wrapped evidence) is exactly what a real mailrise message
+// forwarded literally before this fix.
+func TestSMTPBody_NoMarkdown(t *testing.T) {
+	appriseStubSrv := newAppriseStub(t, 200)
+	smtp := newSMTPStub(t)
+	cfg := notifyTestConfig(t, appriseStubSrv, smtp)
+	r := loadFixture(t, "report-watch-zfs-cksum.json")
+
+	if err := Send(context.Background(), cfg, r, true); err != nil {
+		t.Fatalf("Send(smtpFallback=true): %v", err)
+	}
+	smtp.mu.Lock()
+	dataText := smtp.dataText
+	smtp.mu.Unlock()
+
+	for _, bad := range []string{"**Findings**", "_Analysis:_", "_Recommendation:_"} {
+		if strings.Contains(dataText, bad) {
+			t.Errorf("SMTP DATA block still carries markdown syntax %q: %s", bad, dataText)
+		}
+	}
+	want := BuildTextBody(cfg, r)
+	// net/smtp's DATA writer canonicalizes line endings to CRLF; compare
+	// content, not wire line-ending format.
+	normalized := strings.ReplaceAll(dataText, "\r\n", "\n")
+	if !strings.Contains(normalized, want) {
+		t.Errorf("SMTP DATA block does not carry BuildTextBody's output: got %q want substring %q", normalized, want)
+	}
+}
+
 func subjectEncodedForTest(title string) string {
 	// ASCII-only titles pass through mime.QEncoding unencoded; every fixture
 	// title used here is ASCII, so a plain substring check is meaningful.

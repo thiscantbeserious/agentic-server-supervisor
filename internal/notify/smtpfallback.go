@@ -36,7 +36,7 @@ func (a plainAuthNoTLS) Next(_ []byte, more bool) ([]byte, error) {
 	return nil, nil
 }
 
-func sendMail(ctx context.Context, cfg *config.Config, payload Payload) error {
+func sendMail(ctx context.Context, cfg *config.Config, title, textBody string) error {
 	addr := net.JoinHostPort(cfg.MailriseHost, strconv.Itoa(cfg.MailrisePort))
 	dialer := net.Dialer{Timeout: cfg.NotifyTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -65,7 +65,7 @@ func sendMail(ctx context.Context, cfg *config.Config, payload Payload) error {
 	if err != nil {
 		return fmt.Errorf("data: %w", err)
 	}
-	if _, err := w.Write([]byte(buildMIME(cfg, payload))); err != nil {
+	if _, err := w.Write([]byte(buildMIME(cfg, title, textBody))); err != nil {
 		return fmt.Errorf("write message: %w", err)
 	}
 	if err := w.Close(); err != nil {
@@ -74,9 +74,12 @@ func sendMail(ctx context.Context, cfg *config.Config, payload Payload) error {
 	return client.Quit()
 }
 
-// buildMIME is N.5.1 step 4: CRLF-terminated headers, then the payload
-// body verbatim.
-func buildMIME(cfg *config.Config, payload Payload) string {
+// buildMIME is N.5.1 step 4: CRLF-terminated headers, then the plain-text
+// body (N.3.6) — never payload.Body, which is markdown that renders only
+// because the JSON payload carries format: markdown alongside it. Over
+// SMTP there is no such field, so mailrise would forward literal
+// "**Findings**"/"_Analysis:_" to the operator (verified live 2026-08-18).
+func buildMIME(cfg *config.Config, title, textBody string) string {
 	now := time.Now()
 	if !cfg.Now.IsZero() {
 		now = cfg.Now
@@ -84,11 +87,11 @@ func buildMIME(cfg *config.Config, payload Payload) string {
 	var b strings.Builder
 	b.WriteString("From: " + cfg.SentinelMailFrom + "\r\n")
 	b.WriteString("To: " + cfg.SentinelMailTo + "\r\n")
-	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", payload.Title) + "\r\n")
+	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", title) + "\r\n")
 	b.WriteString("Date: " + now.Format(time.RFC1123Z) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	b.WriteString("\r\n")
-	b.WriteString(payload.Body)
+	b.WriteString(textBody)
 	return b.String()
 }

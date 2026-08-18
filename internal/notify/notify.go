@@ -161,7 +161,7 @@ func Send(ctx context.Context, cfg *config.Config, r report.Report, smtpFallback
 		if cfg.MailriseUser == "" || cfg.MailrisePass == "" {
 			return wrapErr(ErrSend, "smtp fallback unconfigured")
 		}
-		if err := sendMail(ctx, cfg, payload); err != nil {
+		if err := sendMail(ctx, cfg, payload.Title, BuildTextBody(cfg, r)); err != nil {
 			logger.Error("post failed", "transport", redact(cfg, err))
 			return wrapErr(ErrSend, "%s", redact(cfg, err))
 		}

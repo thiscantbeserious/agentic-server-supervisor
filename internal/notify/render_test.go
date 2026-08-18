@@ -103,7 +103,18 @@ func TestStatusTypeMapping(t *testing.T) {
 
 func TestBodyOrder(t *testing.T) {
 	cfg := testCfg(t)
-	r := loadFixture(t, "report-watch-zfs-cksum.json")
+	// 31cec31: analysis renders for `alert` severity only, so this order
+	// check needs an alert finding — the shared WATCH fixture no longer
+	// carries an _Analysis:_ block at all (covered separately below).
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "alert", Component: "zfs", Evidence: "e",
+			Explanation: "ZFS detected and repaired one checksum mismatch",
+			Analysis:    "Trend analysis text", Recommendation: "Recommendation text",
+		}},
+		Resolved: []string{},
+	}
 	p := BuildPayload(r, cfg)
 
 	iExpl := strings.Index(p.Body, "ZFS detected and repaired")
@@ -125,6 +136,83 @@ func TestBodyOrder(t *testing.T) {
 	p2 := BuildPayload(r2, cfg)
 	if strings.Contains(p2.Body, "_Analysis:_") || strings.Contains(p2.Body, "_Recommendation:_") {
 		t.Errorf("absent optionals rendered a label: %s", p2.Body)
+	}
+}
+
+// --- 31cec31: analysis is alert-only ---
+
+func TestAnalysisOnlyForAlertSeverity(t *testing.T) {
+	cfg := testCfg(t)
+	base := report.Finding{
+		Component: "zfs", Evidence: "e", Explanation: "exp",
+		Analysis: "this is the analysis text", Recommendation: "rec",
+	}
+
+	watch := base
+	watch.Severity = "watch"
+	rWatch := report.Report{Status: "WATCH", Headline: "h", Body: "b", Findings: []report.Finding{watch}, Resolved: []string{}}
+	pWatch := BuildPayload(rWatch, cfg)
+	if strings.Contains(pWatch.Body, "_Analysis:_") || strings.Contains(pWatch.Body, "this is the analysis text") {
+		t.Errorf("watch severity must not render analysis: %s", pWatch.Body)
+	}
+	// The watch case still keeps evidence and recommendation (N.3.3: "nothing actionable is lost").
+	if !strings.Contains(pWatch.Body, "_Recommendation:_") {
+		t.Errorf("watch severity must still render recommendation: %s", pWatch.Body)
+	}
+
+	alert := base
+	alert.Severity = "alert"
+	rAlert := report.Report{Status: "ALERT", Headline: "h", Body: "b", Findings: []report.Finding{alert}, Resolved: []string{}}
+	pAlert := BuildPayload(rAlert, cfg)
+	if !strings.Contains(pAlert.Body, "_Analysis:_ this is the analysis text") {
+		t.Errorf("alert severity must render analysis: %s", pAlert.Body)
+	}
+
+	// Same rule on the plain-text (SMTP) path.
+	tWatch := BuildTextBody(cfg, rWatch)
+	if strings.Contains(tWatch, "Analysis:") {
+		t.Errorf("text body: watch severity must not render analysis: %s", tWatch)
+	}
+	tAlert := BuildTextBody(cfg, rAlert)
+	if !strings.Contains(tAlert, "Analysis: this is the analysis text") {
+		t.Errorf("text body: alert severity must render analysis: %s", tAlert)
+	}
+}
+
+// --- 31cec31: Findings header only above two findings ---
+
+func TestFindingsHeaderOnlyWhenMultiple(t *testing.T) {
+	cfg := testCfg(t)
+	one := report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{{Severity: "watch", Component: "zfs", Evidence: "e1", Explanation: "exp1"}},
+		Resolved: []string{},
+	}
+	two := report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{
+			{Severity: "watch", Component: "zfs", Evidence: "e1", Explanation: "exp1"},
+			{Severity: "watch", Component: "smart", Evidence: "e2", Explanation: "exp2"},
+		},
+		Resolved: []string{},
+	}
+
+	pOne := BuildPayload(one, cfg)
+	if strings.Contains(pOne.Body, "**Findings**") {
+		t.Errorf("single finding must not render the Findings header: %s", pOne.Body)
+	}
+	pTwo := BuildPayload(two, cfg)
+	if !strings.Contains(pTwo.Body, "**Findings**") {
+		t.Errorf("two findings must render the Findings header: %s", pTwo.Body)
+	}
+
+	tOne := BuildTextBody(cfg, one)
+	if strings.Contains(tOne, "FINDINGS") {
+		t.Errorf("text body: single finding must not render the FINDINGS header: %s", tOne)
+	}
+	tTwo := BuildTextBody(cfg, two)
+	if !strings.Contains(tTwo, "FINDINGS") {
+		t.Errorf("text body: two findings must render the FINDINGS header: %s", tTwo)
 	}
 }
 
@@ -174,6 +262,18 @@ func TestSanitizeAllFields(t *testing.T) {
 	}
 	if strings.Contains(p.Title, "ignore previous instructions") == false {
 		t.Fatalf("setup guard: title should still carry the (harmless as data) injection phrase: %q", p.Title)
+	}
+
+	// 31cec31: evidence is no longer passed through Sanitize — only a
+	// backtick can break its code span, so only the backtick is touched.
+	// The fixture's evidence carries a backtick (must become a quote) AND
+	// underscores/asterisks/brackets (must survive verbatim, unlike the
+	// prose fields checked above).
+	if strings.Contains(p.Body, "log line: ignore previous instructions `") {
+		t.Errorf("evidence still carries an unescaped backtick, code span would break: %q", p.Body)
+	}
+	if !strings.Contains(p.Body, "log line: ignore previous instructions '_*[]") {
+		t.Errorf("evidence lost its underscore/asterisk/bracket characters (should survive verbatim in a code span): %q", p.Body)
 	}
 }
 
@@ -272,5 +372,104 @@ func TestHostnameSource(t *testing.T) {
 	real, err := os.Hostname()
 	if err == nil && real != "bam" && real != "other-host" && strings.Contains(p.Title+p2.Title, real) {
 		t.Errorf("payload leaked the real machine hostname %q", real)
+	}
+}
+
+// --- 31cec31: evidence fidelity (cksum_errors must not become cksumerrors) ---
+
+func TestEvidenceSurvivesVerbatim_Underscores(t *testing.T) {
+	cfg := testCfg(t)
+	evidence := "zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1"
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{{Severity: "alert", Component: "zfs", Evidence: evidence, Explanation: "exp"}},
+		Resolved: []string{},
+	}
+
+	p := BuildPayload(r, cfg)
+	if !strings.Contains(p.Body, "cksum_errors=1") {
+		t.Errorf("markdown body corrupted evidence, want literal cksum_errors=1: %s", p.Body)
+	}
+	if strings.Contains(p.Body, "cksumerrors") {
+		t.Errorf("markdown body dropped the underscore in cksum_errors: %s", p.Body)
+	}
+
+	text := BuildTextBody(cfg, r)
+	if !strings.Contains(text, "cksum_errors=1") {
+		t.Errorf("text body corrupted evidence, want literal cksum_errors=1: %s", text)
+	}
+}
+
+// TestEvidenceByteIdenticalOverSMTP is N.3.6's strongest claim: nothing in
+// the plain-text body needs sanitizing for a parser, because no parser is
+// claimed — so evidence with every markdown metacharacter EXCEPT a
+// newline or control character must survive byte-for-byte.
+func TestEvidenceByteIdenticalOverSMTP(t *testing.T) {
+	cfg := testCfg(t)
+	evidence := "kernel: `_*[]weird but real_` cksum_errors=1 [bracket] *star*"
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{{Severity: "alert", Component: "kernel", Evidence: evidence, Explanation: "exp"}},
+		Resolved: []string{},
+	}
+	text := BuildTextBody(cfg, r)
+	if !strings.Contains(text, evidence) {
+		t.Errorf("text body evidence not byte-identical:\ngot in body: %s\nwant substring: %q", text, evidence)
+	}
+}
+
+// --- 31cec31: BuildTextBody has no markdown syntax at all ---
+
+func TestBuildTextBody_NoMarkdownSyntax(t *testing.T) {
+	cfg := testCfg(t)
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "plain body text",
+		Findings: []report.Finding{
+			{Severity: "alert", Component: "zfs", Evidence: "ev1 `code` _em_ *b* [x]", Explanation: "exp1", Analysis: "an1", Recommendation: "rec1"},
+			{Severity: "watch", Component: "smart", Evidence: "ev2", Explanation: "exp2", Recommendation: "rec2"},
+		},
+		Resolved: []string{"closed one"},
+	}
+	text := BuildTextBody(cfg, r)
+
+	for _, bad := range []string{"**", "_Analysis:_", "_Recommendation:_", "**Findings**", "**Resolved**"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("text body still carries markdown syntax %q: %s", bad, text)
+		}
+	}
+	if !strings.Contains(text, "FINDINGS") {
+		t.Errorf("text body missing plain FINDINGS header: %s", text)
+	}
+	if !strings.Contains(text, "RESOLVED") {
+		t.Errorf("text body missing plain RESOLVED header: %s", text)
+	}
+	if !strings.Contains(text, "Analysis: an1") {
+		t.Errorf("text body missing plain Analysis label: %s", text)
+	}
+	if !strings.Contains(text, "Recommendation: rec1") {
+		t.Errorf("text body missing plain Recommendation label: %s", text)
+	}
+	// Evidence lines are indented four spaces, not bulleted or backticked.
+	if !strings.Contains(text, "\n    ev1 `code` _em_ *b* [x]") {
+		t.Errorf("text body evidence not four-space indented and unescaped: %s", text)
+	}
+	if strings.Contains(text, "\n  `ev1") {
+		t.Errorf("text body still uses the markdown indented-backtick evidence style: %s", text)
+	}
+}
+
+func TestBuildTextBody_Truncation(t *testing.T) {
+	t.Setenv("NOTIFY_BODY_MAX", "200")
+	cfg := testCfg(t)
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: strings.Repeat("x", 500),
+		Findings: []report.Finding{}, Resolved: []string{},
+	}
+	text := BuildTextBody(cfg, r)
+	if !strings.HasSuffix(text, "...truncated") {
+		t.Fatalf("text body not marked truncated: %q", text[len(text)-40:])
+	}
+	if strings.Contains(text, "_…truncated_") {
+		t.Errorf("text body truncation marker still uses markdown italics: %q", text)
 	}
 }
