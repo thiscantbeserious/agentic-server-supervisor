@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -100,12 +101,12 @@ func TestStatusTypeMapping(t *testing.T) {
 }
 
 // --- 5: TestBodyOrder ---
+//
+// 2593e07's skeleton: GAP, heading, value — repeated per section, in
+// order explanation -> Evidence -> Analysis (alert only) -> Recommendation.
 
 func TestBodyOrder(t *testing.T) {
 	cfg := testCfg(t)
-	// 31cec31: analysis renders for `alert` severity only, so this order
-	// check needs an alert finding — the shared WATCH fixture no longer
-	// carries an _Analysis:_ block at all (covered separately below).
 	r := report.Report{
 		Status: "ALERT", Headline: "h", Body: "b",
 		Findings: []report.Finding{{
@@ -118,28 +119,104 @@ func TestBodyOrder(t *testing.T) {
 	p := BuildPayload(r, cfg)
 
 	iExpl := strings.Index(p.Body, "ZFS detected and repaired")
-	iAnalysis := strings.Index(p.Body, "_Analysis:_")
-	iRec := strings.Index(p.Body, "_Recommendation:_")
-	if iExpl < 0 || iAnalysis < 0 || iRec < 0 {
+	iEvHeading := strings.Index(p.Body, "**Evidence:**")
+	iAnalysisHeading := strings.Index(p.Body, "**Analysis:**")
+	iAnalysis := strings.Index(p.Body, "Trend analysis text")
+	iRecHeading := strings.Index(p.Body, "**Recommendation:**")
+	iRec := strings.Index(p.Body, "Recommendation text")
+	if iExpl < 0 || iEvHeading < 0 || iAnalysisHeading < 0 || iAnalysis < 0 || iRecHeading < 0 || iRec < 0 {
 		t.Fatalf("body missing expected sections: %s", p.Body)
 	}
-	if !(iExpl < iAnalysis && iAnalysis < iRec) {
-		t.Errorf("wrong order: explanation=%d analysis=%d recommendation=%d", iExpl, iAnalysis, iRec)
+	if !(iExpl < iEvHeading && iEvHeading < iAnalysisHeading && iAnalysisHeading < iAnalysis && iAnalysis < iRecHeading && iRecHeading < iRec) {
+		t.Errorf("wrong order: expl=%d evidenceHeading=%d analysisHeading=%d analysis=%d recHeading=%d rec=%d",
+			iExpl, iEvHeading, iAnalysisHeading, iAnalysis, iRecHeading, iRec)
 	}
 
-	// Absent optionals render no label.
+	// Absent optionals (watch severity: no analysis; empty recommendation) render no heading.
 	r2 := report.Report{
 		Status: "WATCH", Headline: "h", Body: "b",
 		Findings: []report.Finding{{Severity: "watch", Component: "zfs", Evidence: "e", Explanation: "exp"}},
 		Resolved: []string{},
 	}
 	p2 := BuildPayload(r2, cfg)
-	if strings.Contains(p2.Body, "_Analysis:_") || strings.Contains(p2.Body, "_Recommendation:_") {
-		t.Errorf("absent optionals rendered a label: %s", p2.Body)
+	if strings.Contains(p2.Body, "**Analysis:**") || strings.Contains(p2.Body, "**Recommendation:**") {
+		t.Errorf("absent optionals rendered a heading: %s", p2.Body)
 	}
 }
 
-// --- 31cec31: analysis is alert-only ---
+// TestGapLineIsU2800 pins the exact codepoint, not just "whatever gapLine
+// happens to equal" — a self-referential check against the package
+// constant would pass even if someone silently swapped it for a space.
+// U+2800 was chosen because it is a printable character (nothing trims
+// it) that still isn't itself pattern whitespace via unicode.IsSpace.
+func TestGapLineIsU2800(t *testing.T) {
+	const wantGap = "⠀" // BRAILLE PATTERN BLANK
+	if gapLine != wantGap {
+		t.Fatalf("gapLine = %U, want U+2800 BRAILLE PATTERN BLANK", []rune(gapLine))
+	}
+	r := []rune(gapLine)
+	if len(r) != 1 {
+		t.Fatalf("gapLine must be exactly one rune, got %d: %q", len(r), gapLine)
+	}
+	if r[0] != 0x2800 {
+		t.Errorf("gapLine rune = U+%04X, want U+2800", r[0])
+	}
+	for _, forbidden := range []string{"", " ", " ", "​"} {
+		if gapLine == forbidden {
+			t.Errorf("gapLine must not be an empty string, ASCII space, NBSP, or zero-width space: got %q", gapLine)
+		}
+	}
+}
+
+// --- 2593e07: every heading is preceded by GAP, on both paths ---
+
+func TestGapPrecedesEveryHeading(t *testing.T) {
+	cfg := testCfg(t)
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "alert", Component: "zfs", Evidence: "e",
+			Explanation: "exp", Analysis: "an", Recommendation: "rec",
+		}},
+		Resolved: []string{"closed"},
+	}
+
+	for name, body := range map[string]string{
+		"markdown": BuildPayload(r, cfg).Body,
+		"html":     BuildHTMLBody(cfg, r),
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := strings.Split(body, "\n")
+			gaps := 0
+			for i, l := range lines {
+				if l == gapLine {
+					gaps++
+					if i+1 >= len(lines) {
+						t.Fatalf("GAP is the last line, no heading follows: %v", lines)
+					}
+					next := lines[i+1]
+					if !strings.Contains(next, "Evidence:") && !strings.Contains(next, "Analysis:") &&
+						!strings.Contains(next, "Recommendation:") && !strings.Contains(next, "Resolved:") &&
+						!strings.Contains(next, "ZFS:") && !strings.Contains(next, ":") {
+						t.Errorf("line after GAP is not a heading: %q", next)
+					}
+				}
+			}
+			// severity+component, Evidence, Analysis, Recommendation, Resolved = 5 GAPs.
+			if gaps != 5 {
+				t.Errorf("%s: found %d GAP lines, want 5 (one per heading section): %q", name, gaps, body)
+			}
+			if !strings.Contains(body, gapLine) {
+				t.Fatal("setup guard: body must contain at least one GAP line")
+			}
+			if !utf8.ValidString(body) {
+				t.Error("body is not valid UTF-8")
+			}
+		})
+	}
+}
+
+// --- analysis is alert-only (unchanged rule, new skeleton) ---
 
 func TestAnalysisOnlyForAlertSeverity(t *testing.T) {
 	cfg := testCfg(t)
@@ -152,11 +229,11 @@ func TestAnalysisOnlyForAlertSeverity(t *testing.T) {
 	watch.Severity = "watch"
 	rWatch := report.Report{Status: "WATCH", Headline: "h", Body: "b", Findings: []report.Finding{watch}, Resolved: []string{}}
 	pWatch := BuildPayload(rWatch, cfg)
-	if strings.Contains(pWatch.Body, "_Analysis:_") || strings.Contains(pWatch.Body, "this is the analysis text") {
+	if strings.Contains(pWatch.Body, "Analysis:") || strings.Contains(pWatch.Body, "this is the analysis text") {
 		t.Errorf("watch severity must not render analysis: %s", pWatch.Body)
 	}
 	// The watch case still keeps evidence and recommendation (N.3.3: "nothing actionable is lost").
-	if !strings.Contains(pWatch.Body, "_Recommendation:_") {
+	if !strings.Contains(pWatch.Body, "**Recommendation:**") {
 		t.Errorf("watch severity must still render recommendation: %s", pWatch.Body)
 	}
 
@@ -164,24 +241,24 @@ func TestAnalysisOnlyForAlertSeverity(t *testing.T) {
 	alert.Severity = "alert"
 	rAlert := report.Report{Status: "ALERT", Headline: "h", Body: "b", Findings: []report.Finding{alert}, Resolved: []string{}}
 	pAlert := BuildPayload(rAlert, cfg)
-	if !strings.Contains(pAlert.Body, "_Analysis:_ this is the analysis text") {
+	if !strings.Contains(pAlert.Body, "**Analysis:**\nthis is the analysis text") {
 		t.Errorf("alert severity must render analysis: %s", pAlert.Body)
 	}
 
-	// Same rule on the plain-text (SMTP) path.
-	tWatch := BuildTextBody(cfg, rWatch)
-	if strings.Contains(tWatch, "Analysis:") {
-		t.Errorf("text body: watch severity must not render analysis: %s", tWatch)
+	// Same rule on the HTML (SMTP) path.
+	hWatch := BuildHTMLBody(cfg, rWatch)
+	if strings.Contains(hWatch, "Analysis:") {
+		t.Errorf("html body: watch severity must not render analysis: %s", hWatch)
 	}
-	tAlert := BuildTextBody(cfg, rAlert)
-	if !strings.Contains(tAlert, "Analysis: this is the analysis text") {
-		t.Errorf("text body: alert severity must render analysis: %s", tAlert)
+	hAlert := BuildHTMLBody(cfg, rAlert)
+	if !strings.Contains(hAlert, "<b>Analysis:</b>\nthis is the analysis text") {
+		t.Errorf("html body: alert severity must render analysis: %s", hAlert)
 	}
 }
 
-// --- 31cec31: Findings header only above two findings ---
+// --- 2593e07: the Findings header is gone entirely, regardless of count ---
 
-func TestFindingsHeaderOnlyWhenMultiple(t *testing.T) {
+func TestFindingsHeaderGoneRegardlessOfCount(t *testing.T) {
 	cfg := testCfg(t)
 	one := report.Report{
 		Status: "WATCH", Headline: "h", Body: "b",
@@ -197,22 +274,14 @@ func TestFindingsHeaderOnlyWhenMultiple(t *testing.T) {
 		Resolved: []string{},
 	}
 
-	pOne := BuildPayload(one, cfg)
-	if strings.Contains(pOne.Body, "**Findings**") {
-		t.Errorf("single finding must not render the Findings header: %s", pOne.Body)
-	}
-	pTwo := BuildPayload(two, cfg)
-	if !strings.Contains(pTwo.Body, "**Findings**") {
-		t.Errorf("two findings must render the Findings header: %s", pTwo.Body)
-	}
-
-	tOne := BuildTextBody(cfg, one)
-	if strings.Contains(tOne, "FINDINGS") {
-		t.Errorf("text body: single finding must not render the FINDINGS header: %s", tOne)
-	}
-	tTwo := BuildTextBody(cfg, two)
-	if !strings.Contains(tTwo, "FINDINGS") {
-		t.Errorf("text body: two findings must render the FINDINGS header: %s", tTwo)
+	for _, r := range []report.Report{one, two} {
+		md := BuildPayload(r, cfg).Body
+		html := BuildHTMLBody(cfg, r)
+		for name, body := range map[string]string{"markdown": md, "html": html} {
+			if strings.Contains(strings.ToLower(body), "findings") {
+				t.Errorf("%s (n=%d findings): body still names a Findings header: %s", name, len(r.Findings), body)
+			}
+		}
 	}
 }
 
@@ -251,28 +320,19 @@ func TestSanitizeAllFields(t *testing.T) {
 			t.Errorf("sanitized headline portion still contains %q: %q", bad, headlinePart)
 		}
 	}
-	// The renderer's OWN markdown structure legitimately contains backticks,
-	// asterisks and underscores (**Findings**, `evidence`, _Analysis:_) —
-	// check only the parts that came from report text, not the template.
-	if strings.Contains(p.Body, "reveal") {
-		bodyLines := strings.Split(p.Body, "\n")
-		if len(bodyLines) == 0 || strings.ContainsAny(bodyLines[0], "`_*[]") {
-			t.Errorf("sanitized body line still carries markdown metacharacters: %q", bodyLines[0])
-		}
-	}
 	if strings.Contains(p.Title, "ignore previous instructions") == false {
 		t.Fatalf("setup guard: title should still carry the (harmless as data) injection phrase: %q", p.Title)
 	}
 
-	// 31cec31: evidence is no longer passed through Sanitize — only a
-	// backtick can break its code span, so only the backtick is touched.
-	// The fixture's evidence carries a backtick (must become a quote) AND
-	// underscores/asterisks/brackets (must survive verbatim, unlike the
-	// prose fields checked above).
-	if strings.Contains(p.Body, "log line: ignore previous instructions `") {
+	// Evidence is rendered on its own line inside a code span (heading
+	// "**Evidence:**" on the line above) — only a backtick can break the
+	// code span, so only the backtick is touched. The fixture's evidence
+	// carries a backtick (must become a quote) AND underscores/asterisks/
+	// brackets (must survive verbatim, unlike the prose fields above).
+	if strings.Contains(p.Body, "`log line: ignore previous instructions `") {
 		t.Errorf("evidence still carries an unescaped backtick, code span would break: %q", p.Body)
 	}
-	if !strings.Contains(p.Body, "log line: ignore previous instructions '_*[]") {
+	if !strings.Contains(p.Body, "`log line: ignore previous instructions '_*[]") {
 		t.Errorf("evidence lost its underscore/asterisk/bracket characters (should survive verbatim in a code span): %q", p.Body)
 	}
 }
@@ -375,7 +435,7 @@ func TestHostnameSource(t *testing.T) {
 	}
 }
 
-// --- 31cec31: evidence fidelity (cksum_errors must not become cksumerrors) ---
+// --- evidence fidelity (cksum_errors must not become cksumerrors), both paths ---
 
 func TestEvidenceSurvivesVerbatim_Underscores(t *testing.T) {
 	cfg := testCfg(t)
@@ -394,82 +454,124 @@ func TestEvidenceSurvivesVerbatim_Underscores(t *testing.T) {
 		t.Errorf("markdown body dropped the underscore in cksum_errors: %s", p.Body)
 	}
 
-	text := BuildTextBody(cfg, r)
-	if !strings.Contains(text, "cksum_errors=1") {
-		t.Errorf("text body corrupted evidence, want literal cksum_errors=1: %s", text)
+	html := BuildHTMLBody(cfg, r)
+	if !strings.Contains(html, "cksum_errors=1") {
+		t.Errorf("html body corrupted evidence, want literal cksum_errors=1: %s", html)
 	}
 }
 
-// TestEvidenceByteIdenticalOverSMTP is N.3.6's strongest claim: nothing in
-// the plain-text body needs sanitizing for a parser, because no parser is
-// claimed — so evidence with every markdown metacharacter EXCEPT a
-// newline or control character must survive byte-for-byte.
-func TestEvidenceByteIdenticalOverSMTP(t *testing.T) {
+// TestEvidenceAngleBracketsSurviveEscaping is 2593e07's core HTML-path
+// claim: kernel evidence routinely carries '<'/'>'/'&' (e.g. "<mce>"), and
+// html.EscapeString must turn those into their entity forms BEFORE the
+// <code> tag is added, so the wire text stays valid HTML while the
+// rendered client shows the operator the original characters back.
+func TestEvidenceAngleBracketsSurviveEscaping(t *testing.T) {
 	cfg := testCfg(t)
-	evidence := "kernel: `_*[]weird but real_` cksum_errors=1 [bracket] *star*"
+	evidence := "sd 0:0:0:0: [sda] <mce> A&B < C > D"
 	r := report.Report{
 		Status: "ALERT", Headline: "h", Body: "b",
 		Findings: []report.Finding{{Severity: "alert", Component: "kernel", Evidence: evidence, Explanation: "exp"}},
 		Resolved: []string{},
 	}
-	text := BuildTextBody(cfg, r)
-	if !strings.Contains(text, evidence) {
-		t.Errorf("text body evidence not byte-identical:\ngot in body: %s\nwant substring: %q", text, evidence)
+	html := BuildHTMLBody(cfg, r)
+
+	for _, want := range []string{"&lt;mce&gt;", "A&amp;B", "&lt; C &gt; D"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("html body missing escaped form %q: %s", want, html)
+		}
+	}
+	// The raw, unescaped angle brackets must not appear inside the
+	// evidence text itself (only as part of the <code>/</code> tags the
+	// renderer adds, which this substring excludes).
+	if strings.Contains(html, "<mce>") {
+		t.Errorf("html body still carries a raw unescaped '<mce>': %s", html)
 	}
 }
 
-// --- 31cec31: BuildTextBody has no markdown syntax at all ---
+// --- HTML body: only <b> and <code> tags, GAP-separated skeleton ---
 
-func TestBuildTextBody_NoMarkdownSyntax(t *testing.T) {
+var htmlTagRe = regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*[^>]*>`)
+
+func TestBuildHTMLBody_OnlyBAndCodeTags(t *testing.T) {
 	cfg := testCfg(t)
 	r := report.Report{
 		Status: "ALERT", Headline: "h", Body: "plain body text",
 		Findings: []report.Finding{
-			{Severity: "alert", Component: "zfs", Evidence: "ev1 `code` _em_ *b* [x]", Explanation: "exp1", Analysis: "an1", Recommendation: "rec1"},
+			{Severity: "alert", Component: "zfs", Evidence: "ev1", Explanation: "exp1", Analysis: "an1", Recommendation: "rec1"},
 			{Severity: "watch", Component: "smart", Evidence: "ev2", Explanation: "exp2", Recommendation: "rec2"},
 		},
 		Resolved: []string{"closed one"},
 	}
-	text := BuildTextBody(cfg, r)
+	body := BuildHTMLBody(cfg, r)
 
-	for _, bad := range []string{"**", "_Analysis:_", "_Recommendation:_", "**Findings**", "**Resolved**"} {
-		if strings.Contains(text, bad) {
-			t.Errorf("text body still carries markdown syntax %q: %s", bad, text)
+	for _, tag := range htmlTagRe.FindAllString(body, -1) {
+		switch tag {
+		case "<b>", "</b>", "<code>", "</code>":
+		default:
+			t.Errorf("html body contains a disallowed tag %q: %s", tag, body)
 		}
 	}
-	if !strings.Contains(text, "FINDINGS") {
-		t.Errorf("text body missing plain FINDINGS header: %s", text)
+	if !strings.Contains(body, gapLine) {
+		t.Error("html body missing GAP separators")
 	}
-	if !strings.Contains(text, "RESOLVED") {
-		t.Errorf("text body missing plain RESOLVED header: %s", text)
+	if !strings.Contains(body, "<b>Resolved:</b>\nclosed one") {
+		t.Errorf("html body missing plain Resolved heading+entry: %s", body)
 	}
-	if !strings.Contains(text, "Analysis: an1") {
-		t.Errorf("text body missing plain Analysis label: %s", text)
+	if !strings.Contains(body, "<b>Recommendation:</b>\nrec1") {
+		t.Errorf("html body missing Recommendation heading+value: %s", body)
 	}
-	if !strings.Contains(text, "Recommendation: rec1") {
-		t.Errorf("text body missing plain Recommendation label: %s", text)
-	}
-	// Evidence lines are indented four spaces, not bulleted or backticked.
-	if !strings.Contains(text, "\n    ev1 `code` _em_ *b* [x]") {
-		t.Errorf("text body evidence not four-space indented and unescaped: %s", text)
-	}
-	if strings.Contains(text, "\n  `ev1") {
-		t.Errorf("text body still uses the markdown indented-backtick evidence style: %s", text)
+	if strings.Contains(body, "**") {
+		t.Errorf("html body still carries markdown bold syntax: %s", body)
 	}
 }
 
-func TestBuildTextBody_Truncation(t *testing.T) {
+func TestBuildHTMLBody_Truncation(t *testing.T) {
 	t.Setenv("NOTIFY_BODY_MAX", "200")
 	cfg := testCfg(t)
 	r := report.Report{
 		Status: "ALERT", Headline: "h", Body: strings.Repeat("x", 500),
 		Findings: []report.Finding{}, Resolved: []string{},
 	}
-	text := BuildTextBody(cfg, r)
-	if !strings.HasSuffix(text, "...truncated") {
-		t.Fatalf("text body not marked truncated: %q", text[len(text)-40:])
+	html := BuildHTMLBody(cfg, r)
+	if !strings.HasSuffix(html, "_…truncated_") {
+		t.Fatalf("html body not marked truncated: %q", html[len(html)-40:])
 	}
-	if strings.Contains(text, "_…truncated_") {
-		t.Errorf("text body truncation marker still uses markdown italics: %q", text)
+	if !utf8.ValidString(html) {
+		t.Fatal("truncation split a multi-byte rune")
+	}
+}
+
+// --- 2593e07: bullet/dot/dash/leading-space regression guard, both paths ---
+
+func TestNoLegacySeparatorsOrIndentation(t *testing.T) {
+	cfg := testCfg(t)
+	r := report.Report{
+		Status: "ALERT", Headline: "h", Body: "b",
+		Findings: []report.Finding{
+			{Severity: "alert", Component: "zfs", Evidence: "ev1", Explanation: "exp1", Analysis: "an1", Recommendation: "rec1"},
+			{Severity: "watch", Component: "smart", Evidence: "ev2", Explanation: "exp2", Recommendation: "rec2"},
+		},
+		Resolved: []string{"closed one", "closed two"},
+	}
+
+	for name, body := range map[string]string{
+		"markdown": BuildPayload(r, cfg).Body,
+		"html":     BuildHTMLBody(cfg, r),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, bad := range []string{"·", "—", "- "} {
+				if strings.Contains(body, bad) {
+					t.Errorf("body still carries legacy separator %q: %s", bad, body)
+				}
+			}
+			if strings.Contains(strings.ToLower(body), "findings") {
+				t.Errorf("body still names a Findings header: %s", body)
+			}
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, " ") {
+					t.Errorf("line begins with a space (indentation does not survive a wrap): %q in %s", line, body)
+				}
+			}
+		})
 	}
 }

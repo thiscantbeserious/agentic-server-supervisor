@@ -480,7 +480,7 @@ func TestSMTPFallback(t *testing.T) {
 // cksum fixture's markdown-heavy content (**Findings**, _Analysis:_,
 // backtick-wrapped evidence) is exactly what a real mailrise message
 // forwarded literally before this fix.
-func TestSMTPBody_NoMarkdown(t *testing.T) {
+func TestSMTPBody_HTML(t *testing.T) {
 	appriseStubSrv := newAppriseStub(t, 200)
 	smtp := newSMTPStub(t)
 	cfg := notifyTestConfig(t, appriseStubSrv, smtp)
@@ -493,17 +493,25 @@ func TestSMTPBody_NoMarkdown(t *testing.T) {
 	dataText := smtp.dataText
 	smtp.mu.Unlock()
 
-	for _, bad := range []string{"**Findings**", "_Analysis:_", "_Recommendation:_"} {
+	// 2593e07: the SMTP path now sends text/html, not text/plain — mailrise
+	// selects the notification format from Content-Type.
+	if !strings.Contains(dataText, "Content-Type: text/html; charset=utf-8") {
+		t.Errorf("SMTP message is not Content-Type: text/html: %s", dataText)
+	}
+	for _, bad := range []string{"**Findings**", "_Analysis:_", "_Recommendation:_", "**WATCH"} {
 		if strings.Contains(dataText, bad) {
 			t.Errorf("SMTP DATA block still carries markdown syntax %q: %s", bad, dataText)
 		}
 	}
-	want := BuildTextBody(cfg, r)
+	if !strings.Contains(dataText, "<b>Evidence:</b>") {
+		t.Errorf("SMTP DATA block missing the HTML Evidence heading: %s", dataText)
+	}
+	want := BuildHTMLBody(cfg, r)
 	// net/smtp's DATA writer canonicalizes line endings to CRLF; compare
 	// content, not wire line-ending format.
 	normalized := strings.ReplaceAll(dataText, "\r\n", "\n")
 	if !strings.Contains(normalized, want) {
-		t.Errorf("SMTP DATA block does not carry BuildTextBody's output: got %q want substring %q", normalized, want)
+		t.Errorf("SMTP DATA block does not carry BuildHTMLBody's output: got %q want substring %q", normalized, want)
 	}
 }
 

@@ -4,6 +4,7 @@ package notify
 
 import (
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 	"unicode"
@@ -68,26 +69,6 @@ func sanitizeEvidence(s string) string {
 	}, s)
 }
 
-// stripControl is N.3.6's plain-text sanitizer (the SMTP path): nothing
-// declares that body's format to a parser, so nothing needs escaping for
-// one — only control characters and invalid UTF-8 are removed. `_ * [ ]`
-// and backticks all pass through unchanged, which makes evidence over
-// SMTP byte-identical to what the collector saw.
-func stripControl(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case utf8.RuneError:
-			return -1
-		case '\n':
-			return '\n'
-		}
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, s)
-}
-
 // TruncRunes returns s cut to max runes, appending ellipsis when it cut.
 func TruncRunes(s string, max int, ellipsis string) string {
 	r := []rune(s)
@@ -140,106 +121,116 @@ func BuildPayload(r report.Report, cfg *config.Config) Payload {
 	}
 }
 
-// buildBody assembles the markdown body deterministically per N.3.3.
-func buildBody(r report.Report, cfg *config.Config) string {
-	var b strings.Builder
-	b.WriteString(Sanitize(r.Body))
+// gapLine is N.3.3's vertical separator: U+2800 BRAILLE PATTERN BLANK, on
+// a line of its own, between every section. Measured against a real
+// Telegram client on 2026-08-18, not decorative — do not replace it with
+// an empty line, an ASCII space, a U+00A0 NBSP, or a U+200B zero-width
+// space:
+//   - An empty line collapses to nothing on both delivery paths.
+//   - A space or NBSP collapses on the apprise (markdown) path but
+//     SURVIVES over SMTP — a gap that works on the fallback and vanishes
+//     on the primary, the worst failure available, because it looks
+//     correct in whichever path you happen to test.
+//   - U+2800 is a printable character, not whitespace, so nothing trims
+//     it, and it survives both. U+200B was also tried and rejected as
+//     likelier to be stripped later by a client that treats it as
+//     zero-width formatting rather than content.
+const gapLine = "⠀"
 
-	if len(r.Findings) > 0 {
-		b.WriteString("\n")
-		// The header labels a list — with exactly one finding it labels a
-		// list of one and costs a line on a phone screen for nothing.
-		if len(r.Findings) > 1 {
-			b.WriteString("\n**Findings**")
-		}
-		for _, f := range r.Findings {
-			sev := strings.ToUpper(oneLine(Sanitize(f.Severity)))
-			comp := oneLine(Sanitize(f.Component))
-			expl := oneLine(Sanitize(f.Explanation))
-			fmt.Fprintf(&b, "\n- **%s · %s** — %s", sev, comp, expl)
-
-			lines := strings.Split(f.Evidence, "\n")
-			if len(lines) > 3 {
-				lines = lines[:3]
-			}
-			for _, line := range lines {
-				line = TruncRunes(sanitizeEvidence(line), 200, "")
-				b.WriteString("\n  `" + line + "`")
-			}
-
-			// analysis answers "how bad is this" — needed at 3am for an
-			// alert, not for a watch read over coffee. The watch case
-			// keeps evidence and recommendation; the full analysis still
-			// lives in the report, in history, and in the next prompt.
-			if f.Severity == "alert" {
-				if analysis := oneLine(Sanitize(f.Analysis)); analysis != "" {
-					b.WriteString("\n  _Analysis:_ " + analysis)
-				}
-			}
-			if rec := oneLine(Sanitize(f.Recommendation)); rec != "" {
-				b.WriteString("\n  _Recommendation:_ " + rec)
-			}
-		}
-	}
-
-	if len(r.Resolved) > 0 {
-		b.WriteString("\n\n**Resolved**")
-		for _, res := range r.Resolved {
-			b.WriteString("\n- " + oneLine(Sanitize(res)))
-		}
-	}
-
-	return truncateBody(b.String(), cfg.NotifyBodyMax, "\n\n_…truncated_")
+// bodyStyle parameterizes the ONE skeleton N.3.3/N.3.6 share, so the two
+// delivery paths cannot drift apart the way payload.Body vs. a hand-built
+// text body already did once. heading wraps a label line ("Evidence:");
+// code wraps one evidence line; prose sanitizes every non-evidence
+// report-derived field; evidence sanitizes evidence lines specifically.
+type bodyStyle struct {
+	heading  func(label string) string
+	code     func(s string) string
+	prose    func(s string) string
+	evidence func(s string) string
 }
 
-// BuildTextBody is N.3.6: the same content and order as buildBody, with
-// markup removed rather than reformatted — the plain-text body sent over
-// SMTP (N.5.1), where nothing declares the body's format to a parser.
-func BuildTextBody(cfg *config.Config, r report.Report) string {
-	var b strings.Builder
-	b.WriteString(stripControl(r.Body))
+var markdownStyle = bodyStyle{
+	heading:  func(label string) string { return "**" + label + "**" },
+	code:     func(s string) string { return "`" + s + "`" },
+	prose:    Sanitize,
+	evidence: sanitizeEvidence,
+}
 
-	if len(r.Findings) > 0 {
-		b.WriteString("\n")
-		if len(r.Findings) > 1 {
-			b.WriteString("\nFINDINGS")
+var htmlStyle = bodyStyle{
+	heading:  func(label string) string { return "<b>" + label + "</b>" },
+	code:     func(s string) string { return "<code>" + s + "</code>" },
+	prose:    html.EscapeString,
+	evidence: html.EscapeString,
+}
+
+// buildSkeleton is N.3.3's body assembly, shared verbatim by the markdown
+// path (buildBody) and the HTML path (BuildHTMLBody) — same section
+// order, same GAP placement, same alert-only/non-empty-only gating,
+// differing only in style.heading/code/prose/evidence.
+func buildSkeleton(r report.Report, cfg *config.Config, st bodyStyle, truncMarker string) string {
+	// strings.Join treats a multi-line element the same as pre-splitting
+	// it (both produce identical "\n"-joined output), so r.Body's own
+	// internal newlines (Sanitize/html.EscapeString preserve '\n') need
+	// no special handling here.
+	lines := []string{st.prose(r.Body)}
+
+	for _, f := range r.Findings {
+		sev := strings.ToUpper(oneLine(st.prose(f.Severity)))
+		comp := oneLine(st.prose(f.Component))
+		expl := oneLine(st.prose(f.Explanation))
+
+		lines = append(lines, gapLine, st.heading(sev+" "+comp+":"), expl)
+
+		lines = append(lines, gapLine, st.heading("Evidence:"))
+		evLines := strings.Split(f.Evidence, "\n")
+		if len(evLines) > 3 {
+			evLines = evLines[:3]
 		}
-		for _, f := range r.Findings {
-			sev := strings.ToUpper(oneLine(stripControl(f.Severity)))
-			comp := oneLine(stripControl(f.Component))
-			expl := oneLine(stripControl(f.Explanation))
-			fmt.Fprintf(&b, "\n- %s · %s — %s", sev, comp, expl)
+		for _, ev := range evLines {
+			ev = TruncRunes(st.evidence(ev), 200, "")
+			lines = append(lines, st.code(ev))
+		}
 
-			lines := strings.Split(f.Evidence, "\n")
-			if len(lines) > 3 {
-				lines = lines[:3]
+		// analysis answers "how bad is this" — needed at 3am for an
+		// alert, not for a watch read over coffee. The watch case keeps
+		// evidence and recommendation; the full analysis still lives in
+		// the report, in history, and in the next prompt.
+		if f.Severity == "alert" {
+			if analysis := oneLine(st.prose(f.Analysis)); analysis != "" {
+				lines = append(lines, gapLine, st.heading("Analysis:"), analysis)
 			}
-			for _, line := range lines {
-				line = TruncRunes(stripControl(line), 200, "")
-				b.WriteString("\n    " + line)
-			}
-
-			if f.Severity == "alert" {
-				if analysis := oneLine(stripControl(f.Analysis)); analysis != "" {
-					b.WriteString("\n    Analysis: " + analysis)
-				}
-			}
-			if rec := oneLine(stripControl(f.Recommendation)); rec != "" {
-				b.WriteString("\n    Recommendation: " + rec)
-			}
+		}
+		if rec := oneLine(st.prose(f.Recommendation)); rec != "" {
+			lines = append(lines, gapLine, st.heading("Recommendation:"), rec)
 		}
 	}
 
 	if len(r.Resolved) > 0 {
-		b.WriteString("\n\nRESOLVED")
+		lines = append(lines, gapLine, st.heading("Resolved:"))
 		for _, res := range r.Resolved {
-			b.WriteString("\n- " + oneLine(stripControl(res)))
+			lines = append(lines, oneLine(st.prose(res)))
 		}
 	}
 
-	// The text body claims no markdown syntax at all (N.3.6), so its own
-	// truncation marker must not smuggle a "_..._" italics pair back in.
-	return truncateBody(b.String(), cfg.NotifyBodyMax, "\n\n...truncated")
+	return truncateBody(strings.Join(lines, "\n"), cfg.NotifyBodyMax, truncMarker)
+}
+
+// buildBody assembles the markdown body deterministically per N.3.3.
+func buildBody(r report.Report, cfg *config.Config) string {
+	return buildSkeleton(r, cfg, markdownStyle, "\n\n_…truncated_")
+}
+
+// BuildHTMLBody is N.3.6: the same skeleton as N.3.3, rendered as HTML for
+// delivery over SMTP with Content-Type: text/html; charset=utf-8 — mailrise
+// selects the notification format from Content-Type, so this renders bold
+// and monospace on Telegram exactly like the apprise path (verified live
+// 2026-08-18). Every report-derived string is escaped with html.EscapeString
+// before any tag is added; nothing goes through Sanitize. Escaping is
+// lossless where Sanitize's strip was destructive: cksum_errors=1 survives,
+// and a literal '<' in kernel evidence (e.g. "<mce>") arrives as '<' in the
+// rendered client instead of truncating or mangling the message.
+func BuildHTMLBody(cfg *config.Config, r report.Report) string {
+	return buildSkeleton(r, cfg, htmlStyle, "\n\n_…truncated_")
 }
 
 // truncateBody is N.3.3 step 4 / N.3.6: truncate to cfg.NotifyBodyMax
