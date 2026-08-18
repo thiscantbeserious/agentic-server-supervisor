@@ -85,17 +85,22 @@ func TruncRunes(s string, max int, ellipsis string) string
 1. Sanitized `body`, newlines preserved.
 2. If `findings` is non-empty: blank line, then one block per finding in array order. The `**Findings**` header is emitted **only when there is more than one finding** — with a single finding it labels a list of one and costs a line on a phone screen.
    ```
-   - **<SEVERITY> · <component>** — <explanation>
-     `<evidence line 1>`
-     _Analysis:_ <analysis>              ← alert severity only, and only when non-empty
-     _Recommendation:_ <recommendation>  ← only when non-empty after sanitizing
+   **<SEVERITY> <component>:** <explanation>
+   Evidence: `<evidence line 1>`
+   Analysis: <analysis>                  ← alert severity only, and only when non-empty
+   Recommendation: <recommendation>      ← only when non-empty after sanitizing
    ```
+
+   **Every line begins with a word that identifies it, and nothing is indented.** This is not a style preference — it is what a phone screen forces, measured against a real Telegram client on 2026-08-18:
+   - **Blank lines do not survive.** A probe with one and with two consecutive blank lines arrived with neither. Vertical whitespace is not an available tool on either path, so the layout must read without it.
+   - **Indentation is a lie once a line wraps.** A four-space indent holds on the first rendered line and every continuation starts hard left — and long lines are exactly the evidence and recommendation strings that most need grouping. Indentation therefore marks only the content short enough not to need marking.
+   - A leading `- ` bullet, a `·` between severity and component, and an `—` before the explanation were all removed. They read as generated filler, they cost horizontal space on a narrow screen, and a colon does the same work — which is what `syslog`, `smartd` and `zed` already use.
    `<SEVERITY>` = `strings.ToUpper(severity)`. `explanation`, `analysis`, `recommendation`, `component` are collapsed to one line.
 
    **`analysis` is rendered for `alert` findings only.** It is the longest field in the payload and it explains *why this is or is not serious* — which an operator needs when woken at 3am for an alert, and does not need for a watch they will read over coffee. A watch finding still carries its evidence and its recommendation, so nothing actionable is lost. This is a deliberate cut for readability on a phone: the full analysis remains in the report document, in history, and in the next tick's prompt.
 
    **Evidence is rendered verbatim inside a code span and is NOT passed through `Sanitize`.** Split on `\n`, first 3 lines, each cut to 200 runes, each on its own indented backticked line. Inside a code span every markdown metacharacter is already literal, so the only character that can break the parser is a backtick — replace `` ` `` with `'` in evidence and change nothing else. Stripping `_` there corrupted the one field the analyze contract guarantees is "copied verbatim from FACTS": `cksum_errors=1` reached the operator as `cksumerrors=1`, which does not match what they will grep for in their own logs. Control characters and invalid UTF-8 are still removed.
-3. If `resolved` is non-empty: blank line, `**Resolved**`, then `- <item>` per sanitized entry.
+3. If `resolved` is non-empty: newline, then `Resolved: <item>` per sanitized entry, one per line — same line-start-label rule, no header and no bullet.
 4. Truncate to `cfg.NotifyBodyMax` runes; if it was cut, append `\n\n_…truncated_`.
 
 ```go
@@ -122,18 +127,14 @@ Same content and same order as N.3.3, same `NotifyBodyMax` truncation, with the 
 
 ```
 <body>
-
-FINDINGS                          ← only when there is more than one finding
-- WATCH · zfs — <explanation>
-    <evidence line 1>
-    Analysis: <analysis>          ← alert severity only
-    Recommendation: <recommendation>
-
-RESOLVED
-- <item>
+WATCH zfs: <explanation>
+Evidence: <evidence line 1>
+Analysis: <analysis>              ← alert severity only
+Recommendation: <recommendation>
+Resolved: <item>
 ```
 
-No `**`, no `_`, no backticks, no leading `- ` on the evidence lines — evidence is indented four spaces instead, which reads as a block in a mail client and in Telegram alike.
+Identical to N.3.3 with the markup removed: no `**`, no `_`, no backticks. Same line-start labels, same absence of indentation, for the same measured reasons — blank lines are collapsed and indentation does not survive a wrap. The two paths differ only in emphasis characters, so an operator reading a mailrise message and an apprise message sees the same shape.
 
 **Nothing in this body needs sanitizing for a parser, because no parser is claimed.** Only control characters and invalid UTF-8 are removed; `_`, `*`, `[`, `]` and backticks are all passed through unchanged, so evidence over SMTP is byte-identical to what the collector saw. That is a property worth having on the LLM-free path specifically: when everything else is failing, the message an operator gets is the raw truth.
 
@@ -144,7 +145,7 @@ Input report — the state contract's `decision.report` for the WATCH case, with
 ```json
 {
   "title": "[WATCH] bam: 1 checksum error on seagate-zvtazeam-crypt (hotstore mirror)",
-  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n\n- **WATCH · zfs** — ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\n  `zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\n  _Recommendation:_ Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
+  "body": "A single checksum error was recorded on one mirror half of pool hotstore during a running scrub. The mirror partner is clean, the pool is ONLINE, no data loss occurred.\n**WATCH zfs:** ZFS detected and repaired one checksum mismatch on a single disk of the hotstore mirror.\nEvidence: `zed1284: eid=41 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=1`\nRecommendation: Wait for the running scrub to finish. If the counter stays at 1 and SMART stays clean, run zpool clear hotstore and watch the next scrub. If the counter rises across scrubs, replace seagate-zvtazeam-crypt.",
   "type": "warning",
   "format": "markdown"
 }
