@@ -82,25 +82,43 @@ func TruncRunes(s string, max int, ellipsis string) string
 
 #### N.3.3 Body assembly (deterministic, in this order)
 
-1. Sanitized `body`, newlines preserved.
-2. If `findings` is non-empty: blank line, then one block per finding in array order. The `**Findings**` header is emitted **only when there is more than one finding** — with a single finding it labels a list of one and costs a line on a phone screen.
-   ```
-   **<SEVERITY> <component>:** <explanation>
-   Evidence: `<evidence line 1>`
-   Analysis: <analysis>                  ← alert severity only, and only when non-empty
-   Recommendation: <recommendation>      ← only when non-empty after sanitizing
-   ```
+Both bodies share one skeleton and differ only in emphasis syntax. `GAP` below is the single character **U+2800 BRAILLE PATTERN BLANK** on a line of its own.
 
-   **Every line begins with a word that identifies it, and nothing is indented.** This is not a style preference — it is what a phone screen forces, measured against a real Telegram client on 2026-08-18:
-   - **Blank lines do not survive.** A probe with one and with two consecutive blank lines arrived with neither. Vertical whitespace is not an available tool on either path, so the layout must read without it.
-   - **Indentation is a lie once a line wraps.** A four-space indent holds on the first rendered line and every continuation starts hard left — and long lines are exactly the evidence and recommendation strings that most need grouping. Indentation therefore marks only the content short enough not to need marking.
-   - A leading `- ` bullet, a `·` between severity and component, and an `—` before the explanation were all removed. They read as generated filler, they cost horizontal space on a narrow screen, and a colon does the same work — which is what `syslog`, `smartd` and `zed` already use.
+```
+<body>
+GAP
+<b>| **</b><SEVERITY> <component>:<b>| **</b>
+<explanation>
+GAP
+<b>| **</b>Evidence:<b>| **</b>
+<code>| `</code>| ` around each evidence line
+GAP
+<b>| **</b>Analysis:<b>| **</b>          ← alert severity only, and only when non-empty
+<analysis>
+GAP
+<b>| **</b>Recommendation:<b>| **</b>    ← only when non-empty
+<recommendation>
+GAP
+<b>| **</b>Resolved:<b>| **</b>
+<one entry per line>
+```
+
+1. `body` first, newlines preserved.
+2. Then one block per finding in array order, in the shape above. There is **no `Findings` header** — the severity/component line already labels the block, and a header above a single finding is a header on a list of one.
+
+   **Every rule below was measured against a real Telegram client on 2026-08-18, not chosen for looks. Do not "tidy" any of them away.**
+   - **An empty line is collapsed and buys nothing.** Probes with one and with two consecutive empty lines arrived with neither.
+   - **A line holding only whitespace is also collapsed on the apprise path** — an ASCII space and a U+00A0 NBSP were both trimmed to empty and dropped. They *do* survive over SMTP, which is the trap: a gap that works on the fallback path and vanishes on the primary one.
+   - **U+2800 BRAILLE PATTERN BLANK survives on both paths** because it is a printable character, not whitespace, so nothing trims it. It is the only vertical spacing available. A zero-width space (U+200B) also worked, and was rejected as the more likely of the two to be stripped later by a client that treats it as formatting.
+   - **Indentation is a lie once a line wraps.** A four-space indent holds on the first rendered line and every continuation starts hard left — and long lines are exactly the evidence and recommendation strings that most need grouping. Nothing is indented; each element gets a labelled heading line instead.
+   - A leading `- ` bullet, a `·` between severity and component, and an `—` before the explanation were all removed as generated filler that costs horizontal space on a narrow screen. A colon does the same work, and is what `syslog`, `smartd` and `zed` already use.
+
    `<SEVERITY>` = `strings.ToUpper(severity)`. `explanation`, `analysis`, `recommendation`, `component` are collapsed to one line.
 
    **`analysis` is rendered for `alert` findings only.** It is the longest field in the payload and it explains *why this is or is not serious* — which an operator needs when woken at 3am for an alert, and does not need for a watch they will read over coffee. A watch finding still carries its evidence and its recommendation, so nothing actionable is lost. This is a deliberate cut for readability on a phone: the full analysis remains in the report document, in history, and in the next tick's prompt.
 
    **Evidence is rendered verbatim inside a code span and is NOT passed through `Sanitize`.** Split on `\n`, first 3 lines, each cut to 200 runes, each on its own indented backticked line. Inside a code span every markdown metacharacter is already literal, so the only character that can break the parser is a backtick — replace `` ` `` with `'` in evidence and change nothing else. Stripping `_` there corrupted the one field the analyze contract guarantees is "copied verbatim from FACTS": `cksum_errors=1` reached the operator as `cksumerrors=1`, which does not match what they will grep for in their own logs. Control characters and invalid UTF-8 are still removed.
-3. If `resolved` is non-empty: newline, then `Resolved: <item>` per sanitized entry, one per line — same line-start-label rule, no header and no bullet.
+3. If `resolved` is non-empty: `GAP`, the `Resolved:` heading, then one sanitized entry per line.
 4. Truncate to `cfg.NotifyBodyMax` runes; if it was cut, append `\n\n_…truncated_`.
 
 ```go
@@ -115,28 +133,23 @@ One `strings.Map`: drop `` ` `` `_` `*` `[` `]`, map every `unicode.IsControl` r
 
 **What the N.3.3 rules removed from this example, and why it is worth seeing:** there is one finding, so no `**Findings**` header. Its severity is `watch`, so no `_Analysis:_` block — the analysis is still in the report document, in history and in the next tick's prompt, just not pushed to a phone. And `cksum_errors=1` appears with its underscore intact, because evidence is no longer passed through `Sanitize`. The earlier version of this example carried all three, and the operator's first real message showed why none of them belonged there.
 
-#### N.3.6 Plain-text body (the SMTP path)
+#### N.3.6 HTML body (the SMTP path)
 
 ```go
-// BuildTextBody renders the same report as N.3.3 with no markdown syntax,
-// for delivery over SMTP where nothing declares the body's format.
-func BuildTextBody(cfg *config.Config, r report.Report) string
+// BuildHTMLBody renders the same report as N.3.3 as HTML, for delivery over
+// SMTP with Content-Type: text/html; charset=utf-8.
+func BuildHTMLBody(cfg *config.Config, r report.Report) string
 ```
 
-Same content and same order as N.3.3, same `NotifyBodyMax` truncation, with the markup removed rather than reformatted:
+Same skeleton, same order, same `GAP` separators, same `NotifyBodyMax` truncation. Emphasis is `<b>…</b>` where the markdown body uses `**…**`, and evidence lines are wrapped in `<code>…</code>` where the markdown body uses backticks. No other tags: no `<html>`, `<body>`, `<br>`, `<p>` or `<div>` — mailrise passes the body through to apprise, and Telegram's HTML mode accepts only a small tag set. Newlines stay newlines.
 
-```
-<body>
-WATCH zfs: <explanation>
-Evidence: <evidence line 1>
-Analysis: <analysis>              ← alert severity only
-Recommendation: <recommendation>
-Resolved: <item>
-```
+**Verified live 2026-08-18:** mailrise selects the notification format from the mail's `Content-Type`, so `text/html` renders bold and monospace on Telegram exactly as the apprise path does. An earlier plain-text version of this section produced a correctly readable but unformatted message; this replaces it.
 
-Identical to N.3.3 with the markup removed: no `**`, no `_`, no backticks. Same line-start labels, same absence of indentation, for the same measured reasons — blank lines are collapsed and indentation does not survive a wrap. The two paths differ only in emphasis characters, so an operator reading a mailrise message and an apprise message sees the same shape.
+**Escaping — this is the part that must not be got wrong.** Every report-derived string on this path (`headline`, `body`, `explanation`, `analysis`, `recommendation`, `resolved[]`, `evidence` and the hostname) passes through `html.EscapeString` **before** any tag is added, and nothing passes through `Sanitize`. Kernel evidence routinely contains `<` and `>` — `sd 0:0:0:0: [sda]`, `<mce>` — and an unescaped one truncates or mangles the message.
 
-**Nothing in this body needs sanitizing for a parser, because no parser is claimed.** Only control characters and invalid UTF-8 are removed; `_`, `*`, `[`, `]` and backticks are all passed through unchanged, so evidence over SMTP is byte-identical to what the collector saw. That is a property worth having on the LLM-free path specifically: when everything else is failing, the message an operator gets is the raw truth.
+**Escaping preserves fidelity where stripping destroyed it.** `html.EscapeString` is lossless and reversible: `cksum_errors=1` stays `cksum_errors=1`, and a `<` arrives as a `<` in the rendered client even though the wire carries `&lt;`. That is strictly better than the markdown path's constraint, and it is why adding a parser to the fallback route is an acceptable trade here — the property being protected is that the operator reads exactly what the collector saw, and escaping keeps it.
+
+**The subject line is not HTML.** `Subject:` carries the same title as the apprise `title` field, MIME-encoded per N.5.1, with no tags and no escaping.
 
 #### N.3.4 Example (the ARCHITECTURE §2.7 CKSUM benchmark)
 
@@ -200,7 +213,7 @@ flowchart TB
 1. `net.DialTimeout` with `cfg.NotifyTimeout` + `smtp.NewClient` on `net.JoinHostPort(MailriseHost, MailrisePort)`.
 2. `c.Auth(plainAuthNoTLS{user, pass, host})` — a ~15-line local `smtp.Auth` implementing PLAIN without stdlib's TLS requirement. `ponytail: mailrise is a LAN-only plaintext listener (mailrise.conf tls: off); switch to smtp.PlainAuth over STARTTLS when the listener gets a cert.`
 3. `c.Mail(MailFrom)`, `c.Rcpt(MailTo)`, `c.Data()`.
-4. Message with CRLF endings: `From:`, `To:`, `Subject:` (`mime.QEncoding.Encode("utf-8", title)`), `Date:` (RFC1123Z), `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, blank line, then **the plain-text body (N.3.6), never `payload.Body`**.
+4. Message with CRLF endings: `From:`, `To:`, `Subject:` (`mime.QEncoding.Encode("utf-8", title)`), `Date:` (RFC1123Z), `MIME-Version: 1.0`, `Content-Type: text/html; charset=utf-8`, blank line, then **the HTML body (N.3.6), never `payload.Body`**.
 
    `payload.Body` is markdown, and it renders as markdown only because the JSON payload carries `format: markdown` alongside it. Over SMTP there is no such field: mailrise forwards the text as it stands and the operator receives literal `**Findings**` and `_Analysis:_`. Verified live 2026-08-18. This is the LLM-free path — the one that must be readable when the supervisor is down — so it is the last place an unreadable message is acceptable.
 5. `c.Quit()`.
