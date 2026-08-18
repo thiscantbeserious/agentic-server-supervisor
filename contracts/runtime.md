@@ -330,7 +330,7 @@ Notes that are contract, not commentary:
 - One network, `sentinel-net`, **not** `internal: true` — apprise needs outbound internet for Telegram, and `depends_on: service_healthy` plus DNS resolution of `apprise` require both services on the same non-internal network. `sentinel` publishes no ports; only `apprise` and `mailrise` publish, bound to a LAN interface.
 - The healthcheck is `sentinel health` — no shell, no `$$` interpolation trap.
 - The apprise config volume is seeded by the `apprise` service (T1). The sentinel container gets **no `/config` mount and no `TELEGRAM_*` variables**: the bot token stays out of the process that parses attacker-controlled log text. `APPRISE_CONFIG_FILE` is present only because `notify --seed-config` is an ops one-shot; the runtime never invokes it.
-- `.env.example` lists every interpolated variable, including `SENTINEL_TAG`, `AGY_CREDENTIALS_DIR`, `JOURNAL_GID`, `MAILRISE_SMTP_USER`, `MAILRISE_SMTP_PASS`. Exactly one top-level `volumes:` and one `networks:` block in the file.
+- `.env.example` lists every variable compose interpolates **without a default** — every `:?` and every bare `${VAR}` — including `SENTINEL_TAG`, `AGY_CREDENTIALS_DIR`, `JOURNAL_GID`, `MAILRISE_SMTP_USER`, `MAILRISE_SMTP_PASS`, since an unset one either fails the stack or silently interpolates empty. Variables with a `:-default` are **not** copied in: their default already lives in the compose file and in CONTRACTS.md C3, and a third copy in `.env.example` is a third place for them to drift. An operator who wants to change one reads C3. Exactly one top-level `volumes:` and one `networks:` block in the file.
 - **agy credential mount:** agy holds an OAuth credential file plus config in the operator's home directory. That directory is mounted read-only at `/run/secrets/agy`; startup copies it into tmpfs so agy can refresh its access token without a writable host path. `AGY_CREDENTIALS_DIR` lives in `.env` (0600, gitignored) with the note "the container never writes back — re-authenticate on the host and restart sentinel". Docker `secrets:` is not used: it supports single files, agy needs a directory.
 - Any `:?` variable unset ⇒ `docker compose up` fails immediately. Fail fast beats a container that silently cannot read the journal or authenticate to mailrise.
 
@@ -360,7 +360,13 @@ Requires root (`EUID=0`), else exit `77`. Requires Debian/`apt-get` + `systemctl
 **Steps** (in order, each independently idempotent)
 1. `apt-get install -y --no-install-recommends rasdaemon lm-sensors msmtp msmtp-mta` — skipped per package when `dpkg-query -W -f='${Status}'` already reports installed.
 2. `systemctl enable --now rasdaemon` — skipped when already enabled **and** active.
-3. Write `/etc/msmtprc`: smarthost `--mailrise-host:--mailrise-port`, `auth off` unless `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS` are present in the env file, `from sentinel@<hostname>`. Mode `0600`, owner `root:root`.
+3. Write `/etc/msmtprc`: smarthost `--mailrise-host:--mailrise-port`, `from sentinel@<hostname>`. Mode `0600`, owner `root:root`.
+
+   **When `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS` are present in the env file, write `auth on` together with `user <MAILRISE_SMTP_USER>` and `password <MAILRISE_SMTP_PASS>`.** `auth on` without both is not a weaker configuration, it is a broken one: msmtp exits `69` with `cannot use a secure authentication method` and `--debug` reports `user = (not set)`, `password = (not set)`. Verified against real msmtp on Debian 13 against a server advertising `AUTH PLAIN LOGIN`.
+
+   This is the production branch, not an edge case — R4 hard-requires both variables with `:?`, so on any real host they are set. And `auth off` is not a fallback, because mailrise enforces SMTP AUTH unconditionally (see the `smtpFallback` unconfigured rule in contracts/notify.md N.4). **Neither branch delivering means smartd and ZED cannot send mail at all** — that is the host-side LLM-free path, the one carrying SMART failures and ZFS pool events, and it would fail silently with `sentinel health` staying green.
+
+   `password` in cleartext on the host is why this file is `0600 root:root`. That mode is not decoration: it is the whole containment for a credential that must exist in a file msmtp can read non-interactively. `passwordeval` is deliberately not used — it buys indirection, not secrecy, and adds a second failure mode on the path that runs when the supervisor is down.
 4. smartd: ensure `/etc/smartd.conf` contains exactly one managed line
    `DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m smartd@mailrise.xyz -M exec /usr/share/smartmontools/smartd-runner`, inside the marker block. Restart `smartd` only if the block changed.
 5. ZED: ensure `/etc/zfs/zed.d/zed.rc` sets `ZED_EMAIL_ADDR="zed@mailrise.xyz"`, `ZED_EMAIL_PROG="msmtp"`, `ZED_NOTIFY_VERBOSE=1` inside the marker block. Restart `zfs-zed` only if changed. No `/etc/zfs/zed.d/` ⇒ `WARN`, skip, do not fail.
@@ -373,7 +379,7 @@ Requires root (`EUID=0`), else exit `77`. Requires Debian/`apt-get` + `systemctl
 …
 # <<< agentic-server-supervisor (managed) <<<
 ```
-Content outside the markers is never modified. Rendering the block is a pure function of flags + host facts, so a second run is byte-identical. **Asserted:** two consecutive real runs produce identical sha256 for every touched file, and the second reports `changed=0` and restarts no service. A pre-existing unmanaged `-m` line in `smartd.conf` is left in place, commented out with `# disabled by agentic-server-supervisor` inside the managed block's preamble, and reported.
+Content outside the markers is never modified. Rendering the block is a pure function of flags + host facts, so a second run is byte-identical. **Asserted:** two consecutive real runs produce identical sha256 for every touched file, and the second reports `changed=0` and restarts no service. A pre-existing unmanaged `-m` line in `smartd.conf` is **commented out where it stands** — the original line prefixed with `# disabled by agentic-server-supervisor: ` — and the fact recorded in the managed block's preamble and in the run summary. An earlier wording said it was "left in place, commented out … inside the managed block's preamble", which is self-contradictory and was implemented literally: the original stayed live at the top of the file while only a commented copy appeared in the block, so smartd kept honouring the operator's previous mail target while the summary reported it handled. Two active `-m` targets is also not merely untidy — real smartd refused to start on such a file (`Unable to register device /dev/sda … Exiting`), which would take the SMART path down entirely. The original text is never deleted: it is the operator's configuration and the `.bak-<epoch>` copy plus the comment are how they get it back.
 
 **Exit codes** (host script, deliberately its own table — it is not the `sentinel` binary): `0` converged / `--check` clean / `--dry-run` done · `1` `--check` found drift · `64` usage · `69` unsupported host · `70` `systemd-journal` group missing · `75` package install or service restart failed (transient, safe to re-run) · `77` not root.
 
@@ -383,7 +389,9 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 
 ### R6. `.github/workflows/build.yml`
 
-**Trigger:** `push` on `main` limited to `cmd/**`, `internal/**`, `supervisor/**`, `go.mod`, `go.sum`, `.github/workflows/build.yml`; `pull_request` on the same paths (build only, no push); `workflow_dispatch`.
+**Trigger:** `push` on `main` limited to `cmd/**`, `internal/**`, `deploy/**`, `test/**`, `go.mod`, `go.sum`, `.github/workflows/build.yml`; `pull_request` on the same paths (build only, no push); `workflow_dispatch`.
+
+`deploy/**` is load-bearing and was missing: without it a Dockerfile-only change does not rebuild, and T8's `docker compose pull` on `bam` then returns a stale image that silently does not contain the change just made. `supervisor/**` was listed and does not exist in this repository — a leftover from the shell-script layout C1 abolished.
 
 **Permissions:** `contents: read`, `packages: write`. Built-in `GITHUB_TOKEN` only — no repository secrets (PLAN §2.9).
 
