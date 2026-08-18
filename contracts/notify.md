@@ -172,7 +172,7 @@ Kernel evidence routinely contains `<` and `>` — `sd 0:0:0:0: [sda]`, `<mce>` 
 > **This example is normative and must be updated whenever N.3.3 changes.** It went stale three rounds running during T6 and was implemented around each time; it is the block a reader copies, so a stale one reproduces itself.
 
 
-Input report — the state contract's `decision.report` for the WATCH case, with `meta: {"hostname": "bam", "tick_seq": 412}`. Resulting payload (`key`, `first_seen`, `occurrences`, `meta.tick_seq` ignored; backticks and brackets stripped from all report text):
+Input report — the state contract's `decision.report` for the WATCH case, with `meta: {"hostname": "bam", "tick_seq": 412}`. Resulting payload (`key`, `first_seen`, `occurrences` and `meta.tick_seq` are ignored). Note what is and is not stripped, because it differs by field: prose fields go through `Sanitize`, which drops `` ` `` `_` `*` `[` `]`; **evidence does not** — it keeps brackets and underscores and only has its backticks replaced, which is why `cksum_errors=1` appears here intact.
 
 ```json
 {
