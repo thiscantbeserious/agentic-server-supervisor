@@ -1326,6 +1326,176 @@ chmod +x /root/deploy/install-host.sh`
 	logPass(t, "PASS C12")
 }
 
+// TestContainer_C12_CollapsesDuplicateManagedBlocks: everything between
+// our own markers is OUR content, never the operator's (unlike the
+// pre-existing smartd -m line, which survives as a comment specifically
+// because it belongs to them) — so a file that somehow ends up with TWO
+// managed blocks (a half-finished run, a restored backup, a merge) is
+// our own mess to clean up, not a state a human has to resolve by hand.
+// Pre-seeds /etc/smartd.conf with two managed blocks (deliberately
+// mismatched from the desired content, so a naive "already converged"
+// read of just the first block cannot mask the duplicate) and asserts
+// one real run collapses them into a single block and reports having
+// done so, and that a second run then reports ordinary convergence with
+// an identical sha256 — collapsing is a one-time fixup, not a repeated
+// rewrite.
+func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		t.Skipf("SKIP C12 (duplicate blocks): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	name := "sentinel-c12-dup-test"
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"debian:trixie-slim", "sleep", "600")
+	if code != 0 {
+		t.Skipf("SKIP C12 (duplicate blocks): could not start throwaway container: %s", errOut)
+	}
+	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	const beginMark = "# >>> agentic-server-supervisor (managed) >>>"
+	const endMark = "# <<< agentic-server-supervisor (managed) <<<"
+
+	prep := `set -e
+cp -r /work /root/deploy
+apt-get update -qq
+apt-get install -y -qq systemd >/dev/null 2>&1 || true
+groupadd -g 7777 systemd-journal 2>/dev/null || true
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/deploy/.env
+chmod +x /root/deploy/install-host.sh
+cat > /etc/smartd.conf <<'SMARTD_EOF'
+` + beginMark + `
+DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /usr/share/smartmontools/smartd-runner
+` + endMark + `
+` + beginMark + `
+DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /usr/share/smartmontools/smartd-runner
+` + endMark + `
+SMARTD_EOF`
+	if out, errOut, code := exec_(prep); code != 0 {
+		t.Skipf("SKIP C12 (duplicate blocks): throwaway container prep failed: %s %s", out, errOut)
+	}
+
+	countBlocks := func() int {
+		n, _, _ := exec_(`grep -c '^` + beginMark + `$' /etc/smartd.conf 2>/dev/null || true`)
+		v, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			t.Fatalf("could not parse managed-block count %q: %v", n, err)
+		}
+		return v
+	}
+	if got := countBlocks(); got != 2 {
+		t.Fatalf("setup guard: /etc/smartd.conf must start with 2 managed blocks, got %d", got)
+	}
+
+	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	if code1 != 0 && code1 != 75 {
+		t.Logf("first run exit=%d (non-fatal for this check): %s %s", code1, out1, errOut1)
+	}
+	if !strings.Contains(out1, "step4 /etc/smartd.conf: collapsed 2 managed blocks into 1") {
+		t.Errorf("FAIL C12 (duplicate blocks): first run did not report the collapse: %s", out1)
+	}
+	if got := countBlocks(); got != 1 {
+		t.Fatalf("FAIL C12 (duplicate blocks): /etc/smartd.conf has %d managed blocks after the collapsing run, want 1", got)
+	}
+	hash1, _, _ := exec_("sha256sum /etc/smartd.conf")
+
+	out2, _, _ := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	if !strings.Contains(out2, "step4 /etc/smartd.conf: already converged") {
+		t.Errorf("FAIL C12 (duplicate blocks): second run did not report convergence: %s", out2)
+	}
+	if got := countBlocks(); got != 1 {
+		t.Errorf("FAIL C12 (duplicate blocks): /etc/smartd.conf has %d managed blocks after the second run, want 1", got)
+	}
+	hash2, _, _ := exec_("sha256sum /etc/smartd.conf")
+	if hash1 != hash2 {
+		t.Errorf("FAIL C12 (duplicate blocks): sha256 of /etc/smartd.conf differs between the collapsing run and the next one:\n1: %s\n2: %s", hash1, hash2)
+	}
+	logPass(t, "PASS C12 (duplicate managed blocks collapse to 1, then stay converged)")
+}
+
+// TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps: msmtp
+// package PRESENT, MAILRISE_SMTP_USER/PASS ABSENT. Steps 4 and 5 hand
+// their alert mail to msmtp regardless of whether msmtp has anything to
+// send with (smartd's `-m` target, ZED_EMAIL_PROG=msmtp) — gating only
+// on package presence would let them "converge" while pointing a real
+// host's SMART and ZFS alerts at an msmtp with no config file at all,
+// which is worse than the pre-existing broken-but-present config this
+// whole area of the script exists to fix. All three of steps 3/4/5 must
+// refuse to write, and the run must exit 78 (required ops input missing
+// from --env-file — permanent until a human edits .env, never 75's
+// "safe to re-run").
+func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		t.Skipf("SKIP C12 (mail creds missing): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	name := "sentinel-c12-nocreds-test"
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"debian:trixie-slim", "sleep", "600")
+	if code != 0 {
+		t.Skipf("SKIP C12 (mail creds missing): could not start throwaway container: %s", errOut)
+	}
+	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// msmtp installed for real (network access, matches the rest of the
+	// C12 suite's real-apt-get assumption) — this is the package-PRESENT
+	// case, deliberately distinct from MUST 1's package-absent test.
+	// .env is intentionally empty: no MAILRISE_SMTP_USER/PASS at all.
+	prep := `set -e
+cp -r /work /root/deploy
+apt-get update -qq
+apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1 || true
+: > /root/deploy/.env
+chmod +x /root/deploy/install-host.sh
+mkdir -p /etc/zfs/zed.d`
+	if out, errOut, code := exec_(prep); code != 0 {
+		t.Skipf("SKIP C12 (mail creds missing): throwaway container prep failed: %s %s", out, errOut)
+	}
+	if out, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
+		t.Skipf("SKIP C12 (mail creds missing): msmtp did not actually install in this environment: %s", out)
+	}
+
+	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	if code1 != 78 {
+		t.Errorf("FAIL C12 (mail creds missing): exit code = %d, want 78 (required ops input missing, not 75's transient/retry): %s %s", code1, out1, errOut1)
+	}
+	for _, want := range []string{
+		"step3 /etc/msmtprc: skipped (",
+		"step4 /etc/smartd.conf: skipped (",
+		"step5 ZED: skipped (",
+	} {
+		if !strings.Contains(out1, want) {
+			t.Errorf("FAIL C12 (mail creds missing): summary missing %q: %s", want, out1)
+		}
+	}
+
+	if out, _, _ := exec_("test -e /etc/msmtprc && echo exists || echo absent"); strings.TrimSpace(out) != "absent" {
+		t.Errorf("FAIL C12 (mail creds missing): /etc/msmtprc must not be written: %s", out)
+	}
+	if out, _, _ := exec_("test -e /etc/smartd.conf && echo exists || echo absent"); strings.TrimSpace(out) != "absent" {
+		t.Errorf("FAIL C12 (mail creds missing): /etc/smartd.conf must not gain a managed block — smartd would then point live alerts at an unconfigured msmtp: %s", out)
+	}
+	if out, _, _ := exec_("test -e /etc/zfs/zed.d/zed.rc && echo exists || echo absent"); strings.TrimSpace(out) != "absent" {
+		t.Errorf("FAIL C12 (mail creds missing): /etc/zfs/zed.d/zed.rc must not gain a managed block — ZED_EMAIL_PROG=msmtp would then be unusable: %s", out)
+	}
+	logPass(t, "PASS C12 (mail credentials missing skips steps 3, 4 and 5, and exits 78)")
+}
+
 // TestContainer_C12_EnvOwnerUnmappedUID: step 6 resolving the .env owner
 // by NAME (stat -c %U) breaks silently for a uid with no /etc/passwd
 // entry — stat prints the literal string "UNKNOWN", `install -o UNKNOWN`

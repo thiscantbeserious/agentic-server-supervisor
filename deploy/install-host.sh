@@ -77,6 +77,63 @@ TRANSIENT_FAIL=0
 RASDAEMON_OK=0
 MSMTP_OK=0
 
+# MAIL_OK means mail will actually work: the msmtp package is present
+# AND step3 wrote a credentialed /etc/msmtprc. Package presence alone is
+# not enough — smartd's -m target and ZED_EMAIL_PROG both hand mail to
+# msmtp regardless of whether msmtp has anything to send with, so a step
+# that only checked MSMTP_OK would point live alert paths at an msmtp
+# with no config file at all whenever credentials are the missing piece
+# rather than the package. Steps 3, 4 and 5 all gate on this ONE flag —
+# not three separate checks that could drift apart from each other
+# again — because the property that matters is identical for all three:
+# a step whose output cannot work must not run. Computed once, right
+# after step1, by compute_mail_status.
+MAIL_OK=0
+MAIL_NOT_OK_REASON=""
+SMTP_USER=""
+SMTP_PASS=""
+# Set only for the credentials-missing case specifically (never for a
+# missing package, which is TRANSIENT_FAIL/75 — retryable by installing
+# the package). Missing credentials are permanent until a human edits
+# --env-file, so R5 (contract) now assigns this its own exit 78, the
+# same code C2 uses for "required ops input missing" on the sentinel
+# binary — 75 would tell rollout automation to retry a condition that
+# never resolves without that edit.
+MISSING_ENV_INPUT=0
+
+# compute_mail_status reads --env-file ONCE, right after step1 (so
+# MSMTP_OK already reflects package reality), and sets MAIL_OK plus the
+# reason steps 3-5 report when it is not 1. SMTP_USER/SMTP_PASS are
+# cached here so step3 does not re-parse the same file.
+compute_mail_status() {
+  SMTP_USER=""
+  SMTP_PASS=""
+  if [ -f "$ENV_FILE" ]; then
+    SMTP_USER="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
+    SMTP_PASS="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
+  fi
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    MAIL_OK=0
+    MAIL_NOT_OK_REASON="msmtp package not installed"
+    return
+  fi
+  if [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+    # mailrise enforces SMTP AUTH unconditionally (R4 requires both
+    # MAILRISE_SMTP_USER and MAILRISE_SMTP_PASS with `:?`), so a real
+    # host always has them. An operator who has not filled .env in yet
+    # needs telling, not a config that writes "auth off" and looks
+    # converged while every mail send fails silently.
+    MAIL_OK=0
+    MAIL_NOT_OK_REASON="MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS missing or empty in $ENV_FILE"
+    echo "$PROG: $MAIL_NOT_OK_REASON — mail delivery (msmtprc, smartd -m, ZED) will not be configured" >&2
+    if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+      MISSING_ENV_INPUT=1
+    fi
+    return
+  fi
+  MAIL_OK=1
+}
+
 # --- helpers -----------------------------------------------------------
 
 # render_managed_block FILE PREAMBLE BODY MODE
@@ -84,19 +141,33 @@ MSMTP_OK=0
 # content outside the markers untouched, atomic replace via mktemp +
 # install. Returns 0 if the file changed, 1 if it was already converged.
 # In --check/--dry-run mode, only reports/prints; never writes.
+#
+# Sets RENDER_COLLAPSED to the number of managed blocks found when more
+# than one existed (0 otherwise), so callers can report a collapse
+# distinctly from an ordinary content update. Everything between our own
+# markers is OUR content, never the operator's — unlike the pre-existing
+# smartd -m line, which had to survive as a comment because it belonged
+# to them — so a second block found alongside the first is our own mess
+# (a half-finished run, a restored backup, a merge) and collapsing it
+# destroys nothing an operator wrote. A host that cannot resolve this
+# without a human is worse than one that fixes it and says so.
 render_managed_block() {
   file="$1"; preamble="$2"; body="$3"; mode="$4"
+  RENDER_COLLAPSED=0
 
   desired_block="$MARK_BEGIN
 ${preamble}${body}
 $MARK_END"
 
   existing=""
+  block_count=0
   if [ -f "$file" ]; then
     existing="$(sed -n "/^${MARK_BEGIN}\$/,/^${MARK_END}\$/p" "$file")"
+    block_count="$(grep -c "^${MARK_BEGIN}\$" "$file" 2>/dev/null || true)"
+    [ -z "$block_count" ] && block_count=0
   fi
 
-  if [ "$existing" = "$desired_block" ] && [ -f "$file" ]; then
+  if [ "$existing" = "$desired_block" ] && [ -f "$file" ] && [ "$block_count" -le 1 ]; then
     return 1
   fi
 
@@ -116,10 +187,16 @@ $MARK_END"
     if [ -z "$existing_bak" ]; then
       cp -p "$file" "${file}.bak-$(date +%s)" 2>/dev/null || true
     fi
-    if grep -q "^${MARK_BEGIN}\$" "$file" 2>/dev/null; then
-      # Replace the existing block in place, preserving surrounding content.
+    if [ "$block_count" -ge 1 ]; then
+      # Emit the desired block once, at the FIRST begin marker; every
+      # later marker pair (and its content) is dropped entirely rather
+      # than re-emitted — collapsing N blocks into 1, not just refreshing
+      # the content of each.
+      if [ "$block_count" -gt 1 ]; then
+        RENDER_COLLAPSED="$block_count"
+      fi
       awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v repl="$desired_block" '
-        $0==b {print repl; skip=1; next}
+        $0==b {if (!seen) {print repl; seen=1} skip=1; next}
         $0==e {if (skip) {skip=0; next}}
         skip {next}
         {print}
@@ -258,36 +335,13 @@ step2() {
 # --- step 3: /etc/msmtprc -------------------------------------------------
 
 step3() {
-  if [ "$MSMTP_OK" -ne 1 ]; then
-    note "step3 /etc/msmtprc: skipped (msmtp package not installed)"
-    return
-  fi
   file="/etc/msmtprc"
-  smtp_user=""
-  smtp_pass=""
-  if [ -f "$ENV_FILE" ]; then
-    smtp_user="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
-    smtp_pass="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
-  fi
-  if [ -z "$smtp_user" ] || [ -z "$smtp_pass" ]; then
-    # mailrise enforces SMTP AUTH unconditionally (R4 requires both
-    # MAILRISE_SMTP_USER and MAILRISE_SMTP_PASS with `:?`), so a real
-    # host always has them. An operator who has not filled .env in yet
-    # needs telling, not a config that writes "auth off" and looks
-    # converged while every mail send fails silently — the same failure
-    # mode this script has now fixed twice already for the other two
-    # ways an unusable msmtp config can look valid.
-    echo "$PROG: MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS missing or empty in $ENV_FILE — not writing $file" >&2
-    note "step3 $file: skipped — mail credentials missing, mail is not configured"
-    # --check/--dry-run promise "change nothing, exit 0/0-or-1" — this is
-    # a real-run-only failure signal. Both modes already never reach a
-    # write, so there is nothing to warn them off; only the real run
-    # needs the exit-75 "safe to re-run once .env is filled in" signal.
-    if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
-      TRANSIENT_FAIL=1
-    fi
+  if [ "$MAIL_OK" -ne 1 ]; then
+    note "step3 $file: skipped ($MAIL_NOT_OK_REASON)"
     return
   fi
+  smtp_user="$SMTP_USER"
+  smtp_pass="$SMTP_PASS"
   # mailrise enforces SMTP AUTH unconditionally (R4) and runs
   # tls: off on the LAN (internal/notify/smtpfallback.go's own comment
   # and its plainAuthNoTLS type document the same fact for sentinel's
@@ -316,7 +370,11 @@ ${cred_lines}from sentinel@${hn}
 account default : sentinel"
 
   if render_managed_block "$file" "" "$body" 0600; then
-    note "step3 /etc/msmtprc: updated"
+    if [ "$RENDER_COLLAPSED" -gt 0 ]; then
+      note "step3 /etc/msmtprc: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+    else
+      note "step3 /etc/msmtprc: updated"
+    fi
     changed=$((changed+1))
   else
     note "step3 /etc/msmtprc: already converged"
@@ -330,8 +388,8 @@ SMARTD_LINE='DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m smartd@mailris
 DISABLED_MARK="# disabled by agentic-server-supervisor: "
 
 step4() {
-  if [ "$MSMTP_OK" -ne 1 ]; then
-    note "step4 /etc/smartd.conf: skipped (msmtp package not installed — the DEVICESCAN mail target it configures cannot deliver)"
+  if [ "$MAIL_OK" -ne 1 ]; then
+    note "step4 /etc/smartd.conf: skipped ($MAIL_NOT_OK_REASON — the DEVICESCAN mail target it configures cannot deliver)"
     return
   fi
   file="/etc/smartd.conf"
@@ -443,7 +501,11 @@ step4() {
 
   did_update=0
   if render_managed_block "$file" "$preamble" "$SMARTD_LINE" 0644; then
-    note "step4 /etc/smartd.conf: updated"
+    if [ "$RENDER_COLLAPSED" -gt 0 ]; then
+      note "step4 /etc/smartd.conf: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+    else
+      note "step4 /etc/smartd.conf: updated"
+    fi
     changed=$((changed+1))
     did_update=1
   else
@@ -472,8 +534,8 @@ step4() {
 # --- step 5: ZED --------------------------------------------------------
 
 step5() {
-  if [ "$MSMTP_OK" -ne 1 ]; then
-    note "step5 ZED: skipped (msmtp package not installed — ZED_EMAIL_PROG=msmtp would be unusable)"
+  if [ "$MAIL_OK" -ne 1 ]; then
+    note "step5 ZED: skipped ($MAIL_NOT_OK_REASON — ZED_EMAIL_PROG=msmtp would be unusable)"
     return
   fi
   dir="/etc/zfs/zed.d"
@@ -492,7 +554,11 @@ ZED_NOTIFY_VERBOSE=1'
   [ -f "$file" ] && before_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
 
   if render_managed_block "$file" "" "$body" 0644; then
-    note "step5 $file: updated"
+    if [ "$RENDER_COLLAPSED" -gt 0 ]; then
+      note "step5 $file: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+    else
+      note "step5 $file: updated"
+    fi
     changed=$((changed+1))
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
       after_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
@@ -593,6 +659,9 @@ step6() {
 # --- run -------------------------------------------------------------
 
 step1
+# Must run after step1 (needs the real RASDAEMON_OK/MSMTP_OK it sets)
+# and before step3/4/5 (which all gate on the MAIL_OK it computes).
+compute_mail_status
 step2
 step3
 step4
@@ -604,6 +673,15 @@ for l in "${report_lines[@]}"; do
   echo "  - $l"
 done
 echo "changed=${changed}"
+
+# Checked before TRANSIENT_FAIL/75: missing ops input is permanent until
+# a human edits --env-file, not a condition retrying resolves, so it
+# gets its own code (R5) rather than sharing 75's "safe to re-run" label
+# with a real package/service transient that could also be set alongside
+# it in the same run.
+if [ "$MISSING_ENV_INPUT" -eq 1 ]; then
+  exit 78
+fi
 
 if [ "$TRANSIENT_FAIL" -eq 1 ]; then
   exit 75
