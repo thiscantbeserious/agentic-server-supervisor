@@ -6,7 +6,8 @@ on:
     paths:
       - "cmd/**"
       - "internal/**"
-      - "supervisor/**"
+      - "deploy/**"
+      - "test/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/build.yml"
@@ -14,7 +15,8 @@ on:
     paths:
       - "cmd/**"
       - "internal/**"
-      - "supervisor/**"
+      - "deploy/**"
+      - "test/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/build.yml"

@@ -123,7 +123,20 @@ $MARK_END"
     printf '%s\n' "$desired_block" > "$tmp"
   fi
 
-  install -m "$mode" -o root -g root "$tmp" "$file"
+  if ! install -m "$mode" -o root -g root "$tmp" "$file"; then
+    # Round-2 review item 5: an unchecked `install` (read-only /etc, full
+    # disk) used to report success — "updated" and changed+1 — having
+    # written nothing. Fail loud instead: TRANSIENT_FAIL makes the whole
+    # run exit 75 (safe to re-run), and returning 1 here means the
+    # caller's "already converged" branch runs rather than "updated" —
+    # imperfect wording for this one case, but it never claims a write
+    # that did not happen, and the exit code is the honest signal an
+    # operator or a script checking $? actually reads.
+    echo "$PROG: failed to install $file" >&2
+    TRANSIENT_FAIL=1
+    rm -f "$tmp"
+    return 1
+  fi
   rm -f "$tmp"
   return 0
 }
@@ -150,6 +163,12 @@ step1() {
     changed=$((changed+1))
     return
   fi
+  # Round-2 review item 7: R5's step text is just the install, but a host
+  # with stale apt lists fails with "Unable to locate package" here,
+  # surfacing as exit 75 "safe to re-run" when re-running alone does not
+  # fix it. update is idempotent and cheap; run it right before the one
+  # step that needs current lists rather than assuming they're fresh.
+  apt-get update -qq || true
   if ! apt-get install -y --no-install-recommends "${need[@]}"; then
     echo "$PROG: apt-get install failed" >&2
     TRANSIENT_FAIL=1
@@ -188,16 +207,40 @@ step2() {
 step3() {
   file="/etc/msmtprc"
   auth_line="auth off"
-  if [ -f "$ENV_FILE" ] && grep -q "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null \
-     && grep -q "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null; then
-    auth_line="auth on"
+  cred_lines=""
+  smtp_user=""
+  smtp_pass=""
+  if [ -f "$ENV_FILE" ]; then
+    smtp_user="$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+    smtp_pass="$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  fi
+  if [ -n "$smtp_user" ] && [ -n "$smtp_pass" ]; then
+    # mailrise enforces SMTP AUTH unconditionally (R4) and runs
+    # tls: off on the LAN (internal/notify/smtpfallback.go's own comment
+    # and its plainAuthNoTLS type document the same fact for sentinel's
+    # own SMTP client). "auth on" tells msmtp to auto-pick the "safest"
+    # method, and msmtp refuses PLAIN/LOGIN — the only methods a plain
+    # mailrise listener offers — over a non-TLS connection even with
+    # "tls off" set explicitly: verified against real msmtp 1.8.28 on
+    # Debian 13 against a stub advertising "AUTH PLAIN LOGIN", "auth on"
+    # + user/password + tls off still exits 69 "cannot use a secure
+    # authentication method". Forcing the method explicitly ("auth
+    # plain") is what bypasses that guard — the exact same fix
+    # smtpfallback.go already applies on the Go side for the identical
+    # reason, so this keeps both SMTP clients doing the same thing
+    # against the same server.
+    auth_line="auth plain
+tls off"
+    cred_lines="user ${smtp_user}
+password ${smtp_pass}
+"
   fi
   hn="$(hostname -f 2>/dev/null || hostname)"
   body="account sentinel
 host ${MAILRISE_HOST}
 port ${MAILRISE_PORT}
 ${auth_line}
-from sentinel@${hn}
+${cred_lines}from sentinel@${hn}
 account default : sentinel"
 
   if render_managed_block "$file" "" "$body" 0600; then
@@ -212,11 +255,19 @@ account default : sentinel"
 
 SMARTD_LINE='DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m smartd@mailrise.xyz -M exec /usr/share/smartmontools/smartd-runner'
 
+DISABLED_MARK="# disabled by agentic-server-supervisor: "
+
 step4() {
   file="/etc/smartd.conf"
   preamble=""
-  # A pre-existing unmanaged -m line is disabled in place, inside the
-  # managed block's preamble, and reported (R5 idempotency contract).
+  # A pre-existing unmanaged -m line is commented out WHERE IT STANDS
+  # (contracts/runtime.md R5, amended 3fbb0cc) — not merely noted in the
+  # managed block's preamble while staying live at the top of the file.
+  # Two active -m targets is not just untidy: real smartd refuses to
+  # start at all with two ("Unable to register device ... Exiting"),
+  # which would take the whole SMART path down. Never deleted — the
+  # .bak-<epoch> copy plus this in-place comment are how the operator
+  # gets their original line back.
   if [ -f "$file" ]; then
     # Scan only the content OUTSIDE the managed block — the managed
     # DEVICESCAN line itself legitimately contains "-m ", and scanning the
@@ -230,16 +281,45 @@ step4() {
       {print}
     ' "$file")"
     existing_m="$(printf '%s\n' "$outside_block" | grep -E "^[^#].*-m " || true)"
-    if [ -n "$existing_m" ]; then
-      preamble="# disabled by agentic-server-supervisor
+
+    if [ -n "$existing_m" ] && [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+      existing_bak="$(ls "${file}".bak-* 2>/dev/null | head -n1)"
+      if [ -z "$existing_bak" ]; then
+        cp -p "$file" "${file}.bak-$(date +%s)" 2>/dev/null || true
+      fi
+      tmp_m="$(mktemp)"
+      awk -v mark="$DISABLED_MARK" '
+        /^[^#].*-m / {print mark $0; next}
+        {print}
+      ' "$file" > "$tmp_m"
+      install -m 0644 -o root -g root "$tmp_m" "$file"
+      rm -f "$tmp_m"
+      note "step4 smartd: pre-existing -m line found, commented out where it stands"
+      # Re-read after the in-place edit — the preamble below is derived
+      # from the PERSISTENT marker (next block), not from this pre-edit
+      # scan, so the recorded fact survives every future run even after
+      # the live "-m " line no longer exists to re-detect.
+    elif [ -n "$existing_m" ]; then
+      note "step4 smartd: pre-existing -m line found (--check/--dry-run: not commented)"
+    fi
+
+    # The preamble is derived from the PERSISTENT in-place marker, not
+    # from a live re-scan for an uncommented "-m " line — once step4 has
+    # commented the original out, that live scan finds nothing on every
+    # later run, and re-deriving the preamble from it would silently drop
+    # the recorded fact (and un-converge the managed block) on run 2.
+    # Scanning for our own marker instead makes the record — and the
+    # block's content — stable forever after the one-time transition.
+    outside_after="$(awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+      $0==b {skip=1; next}
+      $0==e {skip=0; next}
+      skip {next}
+      {print}
+    ' "$file" 2>/dev/null)"
+    disabled_lines="$(printf '%s\n' "$outside_after" | grep -F "$DISABLED_MARK" || true)"
+    if [ -n "$disabled_lines" ]; then
+      preamble="# disabled by agentic-server-supervisor (pre-existing config, commented in place — see backup)
 "
-      while IFS= read -r l; do
-        [ -n "$l" ] && preamble="${preamble}# ${l}
-"
-      done <<EOF2
-$existing_m
-EOF2
-      note "step4 smartd: pre-existing -m line found, commented in managed block preamble"
     fi
   fi
 
@@ -337,7 +417,23 @@ step6() {
   else
     printf '%s\n' "$desired" > "$tmp"
   fi
-  install -m 0600 "$tmp" "$ENV_FILE"
+  # Round-2 review item 6: preserve the .env's EXISTING owner rather than
+  # letting `install` default to root:root (this script requires
+  # EUID=0). If `docker compose` is later run as a non-root ops user on
+  # bam, a root:root 0600 .env would be unreadable to them — this file is
+  # ops-authored (JOURNAL_GID is the one field install-host.sh itself
+  # writes into it) and stays owned by whoever created it. A fresh file
+  # (this script creating .env for the first time) has no prior owner to
+  # preserve, so it falls back to root:root, same as before.
+  install_owner="root"
+  install_group="root"
+  if [ -f "$ENV_FILE" ]; then
+    existing_owner="$(stat -c '%U' "$ENV_FILE" 2>/dev/null || stat -f '%Su' "$ENV_FILE" 2>/dev/null)"
+    existing_group="$(stat -c '%G' "$ENV_FILE" 2>/dev/null || stat -f '%Sg' "$ENV_FILE" 2>/dev/null)"
+    [ -n "$existing_owner" ] && install_owner="$existing_owner"
+    [ -n "$existing_group" ] && install_group="$existing_group"
+  fi
+  install -m 0600 -o "$install_owner" -g "$install_group" "$tmp" "$ENV_FILE"
   rm -f "$tmp"
   changed=$((changed+1))
 }

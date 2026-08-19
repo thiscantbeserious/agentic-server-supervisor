@@ -23,17 +23,21 @@
 package test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -168,10 +172,41 @@ func buildSentinelImage(t *testing.T) error {
 	return buildErr
 }
 
+// dockerAvailable is a cheap, cached "is the Docker/Podman daemon even
+// reachable" probe — round-2 review item 8: requireImage used to map
+// EVERY build failure to a SKIP claiming "not a Dockerfile defect",
+// which would also SKIP a real Dockerfile regression silently instead of
+// failing the run. Checked once per test binary run.
+var (
+	dockerAvailOnce sync.Once
+	dockerAvailErr  error
+)
+
+func dockerAvailable(t *testing.T) error {
+	t.Helper()
+	dockerAvailOnce.Do(func() {
+		_, errOut, code := runCmd(t, 10*time.Second, dockerBin(), "version")
+		if code != 0 {
+			dockerAvailErr = fmt.Errorf("%s not reachable: %s", dockerBin(), errOut)
+		}
+	})
+	return dockerAvailErr
+}
+
 func requireImage(t *testing.T) {
 	t.Helper()
+	if err := dockerAvailable(t); err != nil {
+		t.Skipf("SKIP: %v (environment limitation)", err)
+	}
+	// Daemon IS reachable past this point — a build failure from here on
+	// is either a real Dockerfile/build regression (FAIL) or the
+	// synthetic-agy-fixture's own container-to-host networking not
+	// working in this sandbox (still a real thing to know, so it FAILs
+	// too rather than silently vanishing as a SKIP — the AGY_URL-missing
+	// case, the one truly expected failure without ops input, has its
+	// own dedicated test elsewhere and is not what requireImage guards).
 	if err := buildSentinelImage(t); err != nil {
-		t.Skipf("SKIP: could not build %s (environment limitation, not a Dockerfile defect): %v", imageTag, err)
+		t.Fatalf("FAIL: could not build %s: %v", imageTag, err)
 	}
 }
 
@@ -192,31 +227,105 @@ func TestContainer_C1_StartsUnprivileged(t *testing.T) {
 
 // --- C3: every ro mount rejects a write; /state and /tmp accept one ---
 
+// hostPathExists checks existence via a throwaway container bind-mounting
+// the Docker/Podman HOST's path — never the local Go test process's own
+// filesystem (the C2/C11 lesson: on a Podman Desktop/machine setup this
+// test binary runs on macOS while containers run in a separate Linux VM).
+func hostPathExists(t *testing.T, hostPath string) bool {
+	t.Helper()
+	_, _, code := runCmd(t, 10*time.Second, dockerBin(), "run", "--rm",
+		"-v", hostPath+":/probe:ro", "debian:trixie-slim", "test", "-e", "/probe")
+	return code == 0
+}
+
+// TestContainer_C3_ReadOnlySurfaces is R8 C3: "for EVERY ro mount target
+// of R4, creating a file fails". Round-2 review finding: the first
+// version ran `docker run --read-only` with NO bind mounts at all, so 8
+// of 9 "write failed" assertions were actually "path does not exist" —
+// green evidence for an assertion never made. This version attaches the
+// REAL R4 mount set (real host paths, read-only) so a bind that lost its
+// `:ro` in compose would actually be caught here.
 func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 	requireImage(t)
-	roTargets := []string{
-		"/host/journal", "/host/journal-volatile", "/etc/machine-id",
-		"/host/rasdaemon", "/host/proc", "/host/sys", "/etc/os-release",
-		"/host/root", "/usr/local/bin",
+	selinux := selinuxEnforcingOnDockerHost(t)
+
+	// {container target, real host source, isDir}. Matches R4's mount
+	// list exactly (minus AGY_SECRET_DIR and /state/tmpfs, which are not
+	// "ro mount targets" — /state and /tmp are the rw exception C3 checks
+	// separately below).
+	type mount struct {
+		target string
+		host   string
+		isDir  bool
 	}
-	for _, target := range roTargets {
-		script := fmt.Sprintf("echo x > %s/.w 2>/dev/null; echo rc=$?", strings.TrimRight(target, "/"))
-		out, _, _ := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+	mounts := []mount{
+		{"/host/journal", "/var/log/journal", true},
+		{"/host/journal-volatile", "/run/log/journal", true},
+		{"/etc/machine-id", "/etc/machine-id", false},
+		{"/host/rasdaemon", "/var/lib/rasdaemon", true},
+		{"/host/proc", "/proc", true},
+		{"/host/sys", "/sys", true},
+		{"/etc/os-release", "/etc/os-release", false},
+		{"/host/root", "/", true},
+	}
+
+	for _, m := range mounts {
+		if !hostPathExists(t, m.host) {
+			t.Logf("SKIP C3 target %s: host path %s does not exist on this test host", m.target, m.host)
+			continue
+		}
+		var writeTarget string
+		if m.isDir {
+			writeTarget = strings.TrimRight(m.target, "/") + "/.w"
+		} else {
+			writeTarget = m.target // overwrite attempt on the file itself
+		}
+		script := fmt.Sprintf("echo x > %s 2>/dev/null; echo rc=$?", writeTarget)
+		args := []string{"run", "--rm",
 			"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
 			"-u", "10001:10001", "--tmpfs", "/tmp",
-			"--entrypoint", "sh", imageTag, "-c", script)
+			"-v", m.host + ":" + m.target + ":ro"}
+		if selinux {
+			args = append(args, "--security-opt", "label=disable")
+		}
+		args = append(args, "--entrypoint", "sh", imageTag, "-c", script)
+		out, errOut, _ := runCmd(t, 15*time.Second, dockerBin(), args...)
 		if !strings.Contains(out, "rc=") || strings.Contains(out, "rc=0") {
-			t.Errorf("FAIL C3: write to %s did not fail as expected: %q", target, out)
+			t.Errorf("FAIL C3: write to %s (host %s) did not fail as expected: out=%q err=%q", m.target, m.host, out, errOut)
 		}
 	}
+
+	// /usr/local/bin has no host mount — it's part of the image itself,
+	// and read_only:true is what protects it.
 	out, _, _ := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+		"-u", "10001:10001", "--tmpfs", "/tmp",
+		"--entrypoint", "sh", imageTag, "-c", "echo x > /usr/local/bin/.w 2>/dev/null; echo rc=$?")
+	if !strings.Contains(out, "rc=") || strings.Contains(out, "rc=0") {
+		t.Errorf("FAIL C3: write to /usr/local/bin did not fail as expected: %q", out)
+	}
+
+	// /state and /tmp are the two rw exceptions — must accept a write
+	// (R8 C3: "/state/.w and /tmp/.w succeed").
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o777); err != nil { // container uid 10001 != host owner uid
+		t.Fatal(err)
+	}
+	out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+		"-u", "10001:10001", "--tmpfs", "/tmp", "-v", stateDir+":/state",
+		"--entrypoint", "sh", imageTag, "-c", "echo x > /state/.w 2>/dev/null; echo rc=$?")
+	if !strings.Contains(out, "rc=0") {
+		t.Fatalf("FAIL C3: write to /state should succeed: %q", out)
+	}
+	out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
 		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
 		"-u", "10001:10001", "--tmpfs", "/tmp",
 		"--entrypoint", "sh", imageTag, "-c", "echo x > /tmp/.w 2>/dev/null; echo rc=$?")
 	if !strings.Contains(out, "rc=0") {
 		t.Fatalf("FAIL C3: write to /tmp should succeed: %q", out)
 	}
-	t.Log("PASS C3 (host-root-mount cases not exercised here: those bind-mount specific host paths not present in a bare `docker run`; /usr/local/bin and /tmp are the two the security flags alone can prove)")
+	t.Log("PASS C3")
 }
 
 // --- C2: journal readable via group_add ---
@@ -514,38 +623,114 @@ func TestContainer_C9_TickExitCodes(t *testing.T) {
 
 // --- C10: compose security model, via `docker compose config` ---
 
+// sentinelServiceBlock extracts JUST the "sentinel:" service's rendered
+// YAML from `docker compose config` output. `docker compose config`
+// consistently indents top-level service names by exactly 2 spaces and
+// everything belonging to a service by 4+ spaces (verified against a real
+// render: "  apprise:", "  mailrise:", "  sentinel:", "  sentinel-net:"
+// all sit at column 2; every key under a service sits at column 4+).
+// Round-2 review finding: the previous version searched for the next
+// "\n  " (a TWO-space prefix) as the block end, but the service's own
+// keys are indented FOUR spaces — so "\n  " never matches inside the
+// block, the "end" is the very next line, and the window inspected is
+// the literal string "sentinel:" with nothing else. This version anchors
+// on the next line with EXACTLY a 2-space indent (any other top-level
+// service or the closing top-level key), which is the real boundary.
+func sentinelServiceBlock(t *testing.T, text string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^  sentinel:\n`)
+	loc := re.FindStringIndex(text)
+	if loc == nil {
+		t.Fatal("sentinel: service not found in rendered compose config")
+	}
+	rest := text[loc[1]:]
+	endRe := regexp.MustCompile(`(?m)^  \S`) // next 2-space-indented line = next top-level key
+	end := endRe.FindStringIndex(rest)
+	if end == nil {
+		return text[loc[0]:] // sentinel was the last block in the file
+	}
+	return text[loc[0] : loc[1]+end[0]]
+}
+
 func TestContainer_C10_ComposeConfig(t *testing.T) {
 	root := repoRoot(t)
 	deployDir := filepath.Join(root, "deploy")
-	if _, err := os.Stat(filepath.Join(deployDir, ".env")); err != nil {
-		t.Skip("SKIP: deploy/.env not present (gitignored; ops-provided) — cannot render compose config without it")
+
+	// Round-2 review finding: skipping outright when deploy/.env (ops-
+	// provided, gitignored) is absent means the ONLY check of the
+	// security model disappears on every fresh clone and every CI
+	// runner — exactly where you'd most want it run. `docker compose`
+	// only needs the `:?`-required variables to render; synthesize a
+	// minimal env covering just those instead of depending on ops state.
+	// Only the variables docker-compose.yml's sentinel service actually
+	// dereferences with `:?` — TELEGRAM_* is never read by this file
+	// (R4: the sentinel container gets no TELEGRAM_* variables at all).
+	envFile := filepath.Join(t.TempDir(), "ci.env")
+	envContent := "JOURNAL_GID=999\n" +
+		"AGY_CREDENTIALS_DIR=/tmp\n" +
+		"MAILRISE_SMTP_USER=ci\n" +
+		"MAILRISE_SMTP_PASS=changeme\n"
+	if err := os.WriteFile(envFile, []byte(envContent), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	cmd := exec.Command(dockerBin(), "compose", "config")
+
+	cmd := exec.Command(dockerBin(), "compose", "--env-file", envFile, "config")
 	cmd.Dir = deployDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("FAIL C10: docker compose config: %v\n%s", err, out)
 	}
 	text := string(out)
+	block := sentinelServiceBlock(t, text)
+
+	// SERVICE-LEVEL read_only, anchored at the 4-space indent `docker
+	// compose config` uses for a service's own keys — round-2 review's
+	// own mutation exposed why a bare substring check is not enough
+	// here: every individual bind mount under `volumes:` also renders
+	// its own "read_only: true" (8+ space indent), so those never
+	// disappear even when the SERVICE-level flag is flipped to false.
+	// Worse, compose omits a false boolean from the render entirely
+	// rather than printing "read_only: false", so the negative case
+	// leaves no line to substring-match against at all — only an
+	// anchored "is this specific line present" check catches it.
+	serviceReadOnlyRe := regexp.MustCompile(`(?m)^    read_only: true$`)
+	if !serviceReadOnlyRe.MatchString(block) {
+		t.Errorf("FAIL C10: sentinel service block missing the SERVICE-level read_only: true\nblock:\n%s", block)
+	}
 
 	checks := []struct {
 		name string
 		want string
 	}{
-		{"read_only", "read_only: true"},
 		{"cap_drop", "- ALL"},
 		{"no-new-privileges", "no-new-privileges:true"},
 		{"user", "10001:10001"},
 	}
 	for _, c := range checks {
-		if !strings.Contains(text, c.want) {
-			t.Errorf("FAIL C10: rendered compose config missing %s (%q)", c.name, c.want)
+		if !strings.Contains(block, c.want) {
+			t.Errorf("FAIL C10: sentinel service block missing %s (%q)\nblock:\n%s", c.name, c.want, block)
 		}
 	}
-	forbidden := []string{"privileged:", "cap_add:", "TELEGRAM_", "/config:"}
+
+	// R8 C10: "every bind read_only: true". Each `- type: bind` entry
+	// renders its own nested "read_only: true" at 8-space indent
+	// immediately under it; the one `- type: volume` entry (sentinel-state,
+	// deliberately rw) has none. Counting the two against each other
+	// catches a bind that lost its :ro without hardcoding the mount list
+	// here (which would drift from R4 the moment a mount is added there).
+	bindCount := strings.Count(block, "- type: bind")
+	nestedReadOnlyRe := regexp.MustCompile(`(?m)^ {8}read_only: true$`)
+	nestedReadOnlyCount := len(nestedReadOnlyRe.FindAllString(block, -1))
+	if bindCount == 0 {
+		t.Error("FAIL C10: sentinel service block has no bind mounts at all — R4 defines several")
+	}
+	if bindCount != nestedReadOnlyCount {
+		t.Errorf("FAIL C10: %d bind mounts but only %d carry read_only: true — every bind must be :ro\nblock:\n%s", bindCount, nestedReadOnlyCount, block)
+	}
+	forbidden := []string{"privileged:", "cap_add:", "TELEGRAM_", "/config:", "ports:"}
 	for _, f := range forbidden {
-		if strings.Contains(text, f) {
-			t.Errorf("FAIL C10: rendered compose config unexpectedly contains %q", f)
+		if strings.Contains(block, f) {
+			t.Errorf("FAIL C10: sentinel service block unexpectedly contains %q\nblock:\n%s", f, block)
 		}
 	}
 	// Every C3 env var must be present in the sentinel service's rendered
@@ -555,7 +740,7 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 		"JOURNAL_MAX_RECORDS", "FACTS_MAX_BYTES", "SERVICES_MAX_BYTES", "STATE_DIR",
 		"HOST_JOURNAL_DIR", "HOST_JOURNAL_VOLATILE_DIR", "HOST_PROC", "HOST_ROOT",
 		"HOST_RASDAEMON", "SENTINEL_HOSTNAME", "AGY_BIN", "AGY_HOME", "AGY_SECRET_DIR",
-		"AGY_PRINT_TIMEOUT", "AGY_HARD_TIMEOUT", "HISTORY_N", "PROMPT_MAX_BYTES",
+		"AGY_PRINT_TIMEOUT", "AGY_HARD_TIMEOUT", "HISTORY_N",
 		"HISTORY_KEEP", "DEEP_ENABLED", "DEEP_TIMEOUT", "RAW_ALERT_MAX_PRIORITY",
 		"RAW_ALERT_MAX_LINES", "RAW_ALERT_REPEAT_SECONDS", "RAW_ALERT_MARKER_TTL_HOURS",
 		"RENOTIFY_ALERT_SEC", "RENOTIFY_WATCH_SEC", "STALE_ALERT_SEC", "HEARTBEAT_HOUR",
@@ -565,33 +750,12 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 		"SENTINEL_MAIL_TO", "LOG_LEVEL", "TMPDIR", "TZ",
 	}
 	// PROMPT_MAX_BYTES is not in the R4 environment block (analyze-only,
-	// no compose default listed there) — drop it from the required set to
-	// match the contract's actual table rather than over-asserting.
-	want := make([]string, 0, len(c3Vars))
+	// no compose default listed there) — not in the required set, since
+	// asserting it would be checking against a variable the contract's
+	// own table never puts there.
 	for _, v := range c3Vars {
-		if v == "PROMPT_MAX_BYTES" {
-			continue
-		}
-		want = append(want, v)
-	}
-	for _, v := range want {
-		if !strings.Contains(text, v+":") {
+		if !strings.Contains(block, v+":") {
 			t.Errorf("FAIL C10: sentinel environment missing %s", v)
-		}
-	}
-	if strings.Contains(text, "ports:") {
-		// ports: may legitimately appear under apprise/mailrise; only fail
-		// if it appears inside the sentinel service block specifically.
-		idx := strings.Index(text, "sentinel:")
-		if idx >= 0 {
-			next := strings.Index(text[idx+1:], "\n  ")
-			block := text[idx:]
-			if next >= 0 {
-				block = text[idx : idx+1+next]
-			}
-			if strings.Contains(block, "ports:") {
-				t.Error("FAIL C10: sentinel service unexpectedly has ports:")
-			}
 		}
 	}
 	t.Log("PASS C10")
@@ -694,12 +858,26 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	}
 
 	// Prep a writable copy + systemd-journal group + apt update, all inside
-	// the throwaway container.
+	// the throwaway container. The gid is deliberately NOT 999 (the real
+	// bam value, and also what a hardcoded implementation would happen to
+	// emit) — a non-999 value is the only way this test can actually
+	// distinguish "discovers the gid" from "hardcodes 999" (round-2
+	// review finding: the previous 999 prep passed identically either
+	// way).
+	const testJournalGID = "7777"
 	prep := `set -e
 cp -r /work /root/deploy
 apt-get update -qq
 apt-get install -y -qq systemd >/dev/null 2>&1 || true
-getent group systemd-journal >/dev/null || groupadd -g 999 systemd-journal
+` +
+		// The systemd package's own postinst already creates
+		// systemd-journal at gid 999 as a side effect of installing it
+		// (verified: it does this unconditionally) — so a plain
+		// "getent || groupadd" never fires, the group already exists at
+		// 999, and this test would silently go back to testing nothing.
+		// Force it to the test gid with groupmod, falling back to
+		// groupadd only if the group somehow does not exist yet.
+		`groupmod -g ` + testJournalGID + ` systemd-journal 2>/dev/null || groupadd -g ` + testJournalGID + ` systemd-journal
 touch /root/deploy/.env
 chmod +x /root/deploy/install-host.sh`
 	if out, errOut, code := exec_(prep); code != 0 {
@@ -729,6 +907,17 @@ chmod +x /root/deploy/install-host.sh`
 		// idempotency of whatever DID converge.
 		t.Logf("first run exit=%d (non-fatal for this idempotency check): %s %s", code1, out1, errOut1)
 	}
+	// Round-2 review finding: this throwaway container has no real PID 1
+	// systemd, so `systemctl enable --now rasdaemon` (step2) fails on
+	// EVERY run, always reports rc=75, and never contributes to
+	// `changed`. That means "changed=0 on the second run" is satisfied
+	// just as well by a run where nothing converged as by a run where
+	// everything did — it is not proof of convergence by itself. Assert
+	// the actual per-step "already converged" lines instead, for every
+	// step this environment CAN converge (everything except step2's
+	// service enable, which is a genuine environment limitation here,
+	// and step5, skipped because /etc/zfs/zed.d does not exist in this
+	// container).
 	hash1 := hashFiles()
 
 	out2, errOut2, code2 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
@@ -737,10 +926,202 @@ chmod +x /root/deploy/install-host.sh`
 	if hash1 != hash2 {
 		t.Errorf("FAIL C12: sha256 of touched files differs between two real runs:\n1: %s\n2: %s", hash1, hash2)
 	}
-	if !strings.Contains(out2, "changed=0") {
-		t.Errorf("FAIL C12: second real run did not report changed=0: %s (code=%d) %s", out2, code2, errOut2)
+	for _, want := range []string{
+		"step1 packages: already installed",
+		"step3 /etc/msmtprc: already converged",
+		"step4 /etc/smartd.conf: already converged",
+		"step6 JOURNAL_GID: already " + testJournalGID + " in",
+	} {
+		if !strings.Contains(out2, want) {
+			t.Errorf("FAIL C12: second real run did not report convergence for %q: %s (code=%d) %s", want, out2, code2, errOut2)
+		}
+	}
+	// Proves gid DISCOVERY, not a hardcoded 999: the prep above set the
+	// systemd-journal group to 7777, and step 6 must have written that
+	// exact value, not a constant.
+	envContent, _, _ := exec_("cat /root/deploy/.env")
+	if !strings.Contains(envContent, "JOURNAL_GID="+testJournalGID) {
+		t.Errorf("FAIL C12: /root/deploy/.env does not contain JOURNAL_GID=%s (got: %s) — gid must be DISCOVERED via getent, never hardcoded", testJournalGID, envContent)
 	}
 	t.Log("PASS C12")
+}
+
+// TestContainer_C12_MsmtpDelivery is BLOCKER 1 from round-2 review: step3
+// of install-host.sh must produce a /etc/msmtprc that REAL msmtp can
+// actually authenticate and deliver through, not merely one containing the
+// string "auth on". Reproduces the reviewer's own probe: a real msmtp
+// binary, a real SMTP server requiring AUTH, and the exact config file the
+// script writes — asserting the stub actually received an authenticated
+// delivery, not that install-host.sh exited 0.
+func TestContainer_C12_MsmtpDelivery(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		t.Skipf("SKIP C12b: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	stub := newSMTPAuthStub(t)
+	defer stub.close()
+
+	// --add-host is set up front (docker run only, not exec) so BOTH
+	// aliases below have a real chance to resolve inside this one
+	// container: host.containers.internal is Podman's native resolution,
+	// host.docker.internal needs the explicit mapping on real Docker.
+	// Harmless to pass on either runtime.
+	name := "sentinel-c12b-test"
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	runArgs := []string{"run", "-d", "--name", name,
+		"--add-host", "host.docker.internal:host-gateway",
+		"-v", filepath.Join(root, "deploy") + ":/work:ro",
+		"debian:trixie-slim", "sleep", "300"}
+	if _, errOut, code := runCmd(t, 60*time.Second, dockerBin(), runArgs...); code != 0 {
+		t.Skipf("SKIP C12b: could not start throwaway container: %s", errOut)
+	}
+	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	prep := `set -e
+cp -r /work /root/deploy
+apt-get update -qq
+apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1
+chmod +x /root/deploy/install-host.sh
+printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/deploy/.env`
+	if out, errOut, code := exec_(prep); code != 0 {
+		t.Skipf("SKIP C12b: throwaway container prep failed (msmtp package unavailable?): %s %s", out, errOut)
+	}
+
+	// host.containers.internal (Podman, native) / host.docker.internal
+	// (real Docker, needs the --add-host above) both point at the stub
+	// listening on this test process's host. Try both; whichever the
+	// resolver in THIS environment actually answers is the one that
+	// matters.
+	for _, alias := range []string{"host.containers.internal", "host.docker.internal"} {
+		installCmd := fmt.Sprintf("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env --mailrise-host %s --mailrise-port %d", alias, stub.port())
+		if out, errOut, code := exec_(installCmd); code != 0 && code != 75 {
+			t.Logf("C12b: install-host.sh with alias %s exited %d (skipping this alias): %s %s", alias, code, out, errOut)
+			continue
+		}
+
+		sendCmd := `printf 'To: probe@example.com\nSubject: sentinel probe\n\nprobe body\n' | msmtp -a sentinel probe@example.com`
+		sendOut, sendErr, sendCode := exec_(sendCmd)
+		if sendCode == 0 {
+			deliveries, sawAuth, dataText := stub.snapshot()
+			if deliveries != 1 {
+				t.Fatalf("FAIL C12b: msmtp exited 0 but the stub SMTP server received %d deliveries, want 1 (sendOut=%q sendErr=%q)", deliveries, sendOut, sendErr)
+			}
+			if !sawAuth {
+				t.Fatal("FAIL C12b: msmtp delivered without ever authenticating — mailrise enforces SMTP AUTH unconditionally (R4), so an unauthenticated send proves nothing about the real path")
+			}
+			if !strings.Contains(dataText, "probe body") {
+				t.Fatalf("FAIL C12b: delivered message did not carry the expected body: %q", dataText)
+			}
+			t.Log("PASS C12b (real msmtp, real AUTH, real delivery)")
+			return
+		}
+		t.Logf("C12b: alias %s did not deliver (code=%d): %s %s", alias, sendCode, sendOut, sendErr)
+	}
+	t.Skip("SKIP C12b: neither host.containers.internal nor host.docker.internal reached the local stub SMTP server from the throwaway container in this environment")
+}
+
+// --- SMTP-with-AUTH stub for C12b ---
+
+type smtpAuthStub struct {
+	mu         sync.Mutex
+	sawAuth    bool
+	deliveries int
+	dataText   string
+	ln         net.Listener
+}
+
+func newSMTPAuthStub(t *testing.T) *smtpAuthStub {
+	t.Helper()
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &smtpAuthStub{ln: ln}
+	go s.serve()
+	return s
+}
+
+func (s *smtpAuthStub) close() { s.ln.Close() }
+
+func (s *smtpAuthStub) port() int {
+	_, portStr, _ := net.SplitHostPort(s.ln.Addr().String())
+	p, _ := strconv.Atoi(portStr)
+	return p
+}
+
+func (s *smtpAuthStub) snapshot() (deliveries int, sawAuth bool, dataText string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deliveries, s.sawAuth, s.dataText
+}
+
+func (s *smtpAuthStub) serve() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *smtpAuthStub) handle(conn net.Conn) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	write := func(msg string) { conn.Write([]byte(msg + "\r\n")) }
+	write("220 stub.mailrise.local ESMTP")
+
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		upper := strings.ToUpper(line)
+		switch {
+		case strings.HasPrefix(upper, "EHLO"), strings.HasPrefix(upper, "HELO"):
+			write("250-stub.mailrise.local")
+			write("250 AUTH PLAIN LOGIN")
+		case strings.HasPrefix(upper, "AUTH PLAIN"), strings.HasPrefix(upper, "AUTH LOGIN"):
+			s.mu.Lock()
+			s.sawAuth = true
+			s.mu.Unlock()
+			write("235 Authentication successful")
+		case strings.HasPrefix(upper, "MAIL FROM"):
+			write("250 OK")
+		case strings.HasPrefix(upper, "RCPT TO"):
+			write("250 OK")
+		case strings.HasPrefix(upper, "DATA"):
+			write("354 End data with <CR><LF>.<CR><LF>")
+			var data strings.Builder
+			for {
+				dl, derr := r.ReadString('\n')
+				if derr != nil {
+					return
+				}
+				if dl == ".\r\n" || dl == ".\n" {
+					break
+				}
+				data.WriteString(dl)
+			}
+			s.mu.Lock()
+			s.dataText = data.String()
+			s.deliveries++
+			s.mu.Unlock()
+			write("250 OK: queued")
+		case strings.HasPrefix(upper, "QUIT"):
+			write("221 Bye")
+			return
+		default:
+			write("500 unrecognized command")
+		}
+	}
 }
 
 // --- C13: workflow lint + metadata shape ---
