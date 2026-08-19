@@ -319,18 +319,23 @@ step4() {
         cp -p "$file" "${file}.bak-$(date +%s)" 2>/dev/null || true
       fi
       tmp_m="$(mktemp)"
-      # CRITICAL: scoped to content OUTSIDE the managed block, exactly
-      # like the detection scan above. Without the b/e tracking here,
-      # this awk matches EVERY "-m "-containing line in the whole file —
-      # including the managed block's own live DEVICESCAN line, which is
-      # never prefixed with "#" and matches the same pattern. Found by
+      # Scoped to content OUTSIDE the managed block, exactly like the
+      # detection scan above. Without the b/e tracking here, this awk
+      # matches EVERY "-m "-containing line in the whole file — including
+      # the managed block's own live DEVICESCAN line, which is never
+      # prefixed with "#" and matches the same pattern. Found by
       # constructing the case where a managed block already exists
-      # alongside a still-live unmanaged line: this awk commented OUT
-      # the real DEVICESCAN monitoring line along with the operator's
-      # old one, which is a correctness break, not a cosmetic one — it
-      # would have taken smartd monitoring down entirely on the next
-      # `install-host.sh` run against a host that already had a prior
-      # unmanaged -m line AND an established managed block.
+      # alongside a still-live unmanaged line: an unscoped version of
+      # this awk comments out the real DEVICESCAN line too, alongside
+      # the operator's old one. That turns out to be self-healing rather
+      # than a real outage — the edit runs BEFORE render_managed_block,
+      # which then reads the block back damaged, finds it no longer
+      # matches desired_block, and rewrites it from scratch, restoring
+      # the live line (t7-review verified this by mutation: removing the
+      # scoping still leaves DEVICESCAN count 1 after a run). Scoping it
+      # is still the correct fix — it avoids a pointless rewrite-and-
+      # restart cycle on every run that finds a pre-existing -m line —
+      # just not a fix for silent data loss, which it never was.
       awk -v mark="$DISABLED_MARK" -v b="$MARK_BEGIN" -v e="$MARK_END" '
         $0==b {inblock=1}
         $0==e {inblock=0}
