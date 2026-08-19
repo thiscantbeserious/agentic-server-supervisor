@@ -11,15 +11,20 @@
 // they are NOT run by `go test ./...` (no build tag) or by CI's `test` job
 // (R6) — only by a dedicated container job/local run on a real Linux host.
 //
-// AGY_URL/AGY_SHA512: real ops input (contracts/runtime.md R1), never
-// guessed here. If both are set in the environment, the real tarball is
-// used. Otherwise a SYNTHETIC local fixture (a fake "agy" shell script,
-// served by an in-process httptest.Server) stands in, so the Dockerfile's
-// OWN mechanics (download, sha256 verify, unpack, permissions, build-time
-// verification) are still exercised end to end without ever touching a
-// real or guessed download location. If neither path is reachable (e.g. a
-// sandboxed CI runner with no container-to-host networking), every case
-// that needs a built image SKIPs loudly with the reason.
+// AGY_URL_AMD64/AGY_SHA512_AMD64 and AGY_URL_ARM64/AGY_SHA512_ARM64: real
+// ops input (contracts/runtime.md R1, amended 32a4bac — the image builds
+// and works on BOTH architectures), never guessed here. If a given
+// architecture's pair is set in the environment, the real tarball for
+// that arch is used. Otherwise a SYNTHETIC local fixture (a fake "agy"
+// shell script, served by an in-process httptest.Server — arch-agnostic,
+// since it's an interpreted script) stands in, so the Dockerfile's OWN
+// mechanics (download, sha512 verify, unpack, permissions, build-time
+// verification) are still exercised end to end for both platforms
+// without ever touching a real or guessed download location. Every case
+// that needs a built image runs against BOTH linux/amd64 and
+// linux/arm64 (forEachArch); if neither path is reachable for a given
+// architecture (e.g. a sandboxed CI runner with no container-to-host
+// networking), it SKIPs loudly with the reason.
 package test
 
 import (
@@ -44,7 +49,21 @@ import (
 	"time"
 )
 
-const imageTag = "sentinel:container-test"
+// imageTag is set per-subtest by forEachArch/requireImage before a test
+// body runs. Tests in this file are never t.Parallel (grep confirms none
+// are), so mutating this package var per-subtest is safe and lets every
+// existing case run against both architectures without threading an arch
+// parameter through the ~25 call sites that reference it.
+var imageTag string
+
+// containerArches is the full build matrix, per contracts/runtime.md R1
+// (amended 32a4bac): "the image must build and work on linux/amd64 AND
+// linux/arm64. Both, now."
+var containerArches = []string{"amd64", "arm64"}
+
+func imageTagFor(arch string) string {
+	return "sentinel:container-test-" + arch
+}
 
 // logPass logs a "PASS ..." line only when nothing in this test has
 // already failed (round-3 review finding: an unconditional t.Log("PASS
@@ -96,17 +115,48 @@ func runCmd(t *testing.T, timeout time.Duration, name string, args ...string) (s
 
 // --- shared image build (once per test binary run) ---
 
+type fakeAgyFixture struct {
+	srv    *httptest.Server
+	url    string
+	sha512 string
+}
+
 var (
-	buildOnce  sync.Once
-	buildErr   error
-	fakeAgySrv *httptest.Server
-	agyURL     string
-	agySHA512  string
+	fakeAgyByArch = map[string]*fakeAgyFixture{}
+	fakeAgyMu     sync.Mutex
 )
 
-// syntheticAgy starts an in-process HTTP server serving a fake agy tarball
-// and returns its URL + sha512. Purely local — never a guessed remote
-// location.
+// fakeAgyMain is a minimal Go program cross-compiled into a REAL,
+// architecture-correct static ELF binary — not a #!/bin/sh script.
+// Round-5 requirement: C1's coherence check now reads agy's own ELF
+// e_machine (main's explicit ask, "the piece a wrong URL pair would
+// corrupt silently"), and a shell script has no ELF header at all to
+// read — the very first attempt at this fixture produced garbage bytes
+// at the e_machine offset and would have failed C1 on every run,
+// synthetic-fixture or not. A cross-compiled Go binary is real ELF, for
+// whichever GOARCH it was built with, so the same coherence check that
+// verifies the real vendor artifact also verifies this fixture — and
+// building it deliberately for the WRONG architecture is exactly the
+// mutation main asked for ("build arm64 with the amd64 agy pair").
+const fakeAgySrc = `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("agy container-test 0.0.0-test")
+	}
+}
+`
+
+// syntheticAgy starts an in-process HTTP server serving a fake agy
+// tarball CROSS-COMPILED for arch, and returns its URL + sha512. Purely
+// local — never a guessed remote location. Cached per architecture
+// (unlike the rest of the shared build state, this is genuinely
+// arch-specific content, not just an arch-specific tag).
 //
 // The fixture executable is deliberately named "not-agy", NOT "agy"
 // (contracts/runtime.md R1, amended 7547238): the real vendor tarball
@@ -116,15 +166,28 @@ var (
 // real build (Dockerfile searched for a file already called "agy", which
 // matches nothing in the real archive). This fixture now exercises the
 // same shape: one executable, not named "agy", found by permission bit.
-func syntheticAgy(t *testing.T) (url, sha string) {
+func syntheticAgy(t *testing.T, arch string) (url, sha string) {
 	t.Helper()
-	if fakeAgySrv != nil {
-		return agyURL, agySHA512
+	fakeAgyMu.Lock()
+	defer fakeAgyMu.Unlock()
+	if fx, ok := fakeAgyByArch[arch]; ok {
+		return fx.url, fx.sha512
 	}
 	dir := t.TempDir()
-	script := []byte("#!/bin/sh\ncase \"$1\" in\n  --version) echo 'agy container-test 0.0.0-test'; exit 0 ;;\n  *) exit 0 ;;\nesac\n")
-	agyPath := filepath.Join(dir, "not-agy")
-	if err := os.WriteFile(agyPath, script, 0o755); err != nil {
+	srcPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcPath, []byte(fakeAgySrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(dir, "not-agy")
+	buildCmd := exec.Command("go", "build", "-o", binPath, srcPath)
+	buildCmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
+	var buildOut bytes.Buffer
+	buildCmd.Stdout = &buildOut
+	buildCmd.Stderr = &buildOut
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("cross-compiling the fake agy fixture for %s: %v\n%s", arch, err, buildOut.String())
+	}
+	if err := os.Chmod(binPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	tarPath := filepath.Join(dir, "agy.tar.gz")
@@ -145,34 +208,46 @@ func syntheticAgy(t *testing.T) (url, sha string) {
 		t.Fatal(err)
 	}
 	sum := sha512.Sum512(data)
-	agySHA512 = hex.EncodeToString(sum[:])
+	shaHex := hex.EncodeToString(sum[:])
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agy.tar.gz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/gzip")
 		w.Write(data)
 	})
-	fakeAgySrv = httptest.NewServer(mux)
-	agyURL = fakeAgySrv.URL + "/agy.tar.gz"
-	return agyURL, agySHA512
+	srv := httptest.NewServer(mux)
+	fx := &fakeAgyFixture{srv: srv, url: srv.URL + "/agy.tar.gz", sha512: shaHex}
+	fakeAgyByArch[arch] = fx
+	return fx.url, fx.sha512
 }
 
-// buildSentinelImage builds deploy/Dockerfile once, tagged imageTag. Real
-// AGY_URL/AGY_SHA512 win if both are set; otherwise the synthetic fixture
-// above is used with --add-host so the builder container can reach this
-// process. Every case that needs a built image calls this first and SKIPs
-// (never fails) if it returns an error — an unreachable Docker daemon or a
-// sandboxed CI runner without container-to-host networking is an
+// buildSentinelImage builds deploy/Dockerfile once PER ARCHITECTURE,
+// tagged imageTagFor(arch), for --platform linux/<arch>. Real
+// AGY_URL_<ARCH>/AGY_SHA512_<ARCH> win if both are set for that arch;
+// otherwise the synthetic fixture above is used with --add-host so the
+// builder container can reach this process (the fixture is an
+// interpreted #!/bin/sh script, so the SAME tarball/digest is valid for
+// both architectures — nothing arch-specific about it). Every case that
+// needs a built image calls this first (via requireImage) and SKIPs
+// (never fails) if it returns an error — an unreachable Docker daemon or
+// a sandboxed CI runner without container-to-host networking is an
 // environment limitation, not a defect in the Dockerfile.
-func buildSentinelImage(t *testing.T) error {
+var (
+	buildOnceByArch = map[string]*sync.Once{"amd64": {}, "arm64": {}}
+	buildErrByArch  = map[string]error{}
+)
+
+func buildSentinelImage(t *testing.T, arch string) error {
 	t.Helper()
-	buildOnce.Do(func() {
+	buildOnceByArch[arch].Do(func() {
 		root := repoRoot(t)
-		url := os.Getenv("AGY_URL")
-		sha := os.Getenv("AGY_SHA512")
+		envURL := "AGY_URL_" + strings.ToUpper(arch)
+		envSHA := "AGY_SHA512_" + strings.ToUpper(arch)
+		url := os.Getenv(envURL)
+		sha := os.Getenv(envSHA)
 		hostFlag := ""
 		if url == "" || sha == "" {
-			url, sha = syntheticAgy(t)
+			url, sha = syntheticAgy(t, arch)
 			// host.docker.internal works with --add-host=host.docker.internal:host-gateway
 			// on real Docker (20.10+); Podman resolves host.containers.internal
 			// natively. Try docker.internal first (matches what CI's real
@@ -181,13 +256,12 @@ func buildSentinelImage(t *testing.T) error {
 			url = strings.Replace(url, "127.0.0.1", "host.docker.internal", 1)
 			hostFlag = "host.docker.internal:host-gateway"
 		}
-		args := []string{"build", "-f", "deploy/Dockerfile", "-t", imageTag,
-			// No --platform here: the Dockerfile pins stage 2 to
-			// linux/amd64 itself (where it matters — the stage that
-			// executes agy), while stage 1 builds natively for speed.
-			// See that FROM line's comment for the full reasoning.
-			"--build-arg", "AGY_URL=" + url,
-			"--build-arg", "AGY_SHA512=" + sha,
+		args := []string{"build", "-f", "deploy/Dockerfile", "-t", imageTagFor(arch),
+			"--platform", "linux/" + arch,
+			"--build-arg", "AGY_URL_AMD64=" + pick(arch, "amd64", url),
+			"--build-arg", "AGY_SHA512_AMD64=" + pick(arch, "amd64", sha),
+			"--build-arg", "AGY_URL_ARM64=" + pick(arch, "arm64", url),
+			"--build-arg", "AGY_SHA512_ARM64=" + pick(arch, "arm64", sha),
 			"--build-arg", "VERSION=container-test",
 		}
 		if hostFlag != "" {
@@ -200,10 +274,22 @@ func buildSentinelImage(t *testing.T) error {
 		cmd.Stdout = &out
 		cmd.Stderr = &out
 		if err := cmd.Run(); err != nil {
-			buildErr = fmt.Errorf("docker build failed: %w\n%s", err, out.String())
+			buildErrByArch[arch] = fmt.Errorf("docker build --platform linux/%s failed: %w\n%s", arch, err, out.String())
 		}
 	})
-	return buildErr
+	return buildErrByArch[arch]
+}
+
+// pick returns val when arch == want, else "" — used to leave the OTHER
+// architecture's build-arg pair empty (the Dockerfile only requires and
+// uses whichever pair matches TARGETARCH for this build, so the unused
+// pair being empty is correct, not a gap: it proves the per-arch
+// selection actually selects rather than accepting whatever is present).
+func pick(arch, want, val string) string {
+	if arch == want {
+		return val
+	}
+	return ""
 }
 
 // dockerAvailable is a cheap, cached "is the Docker/Podman daemon even
@@ -227,7 +313,10 @@ func dockerAvailable(t *testing.T) error {
 	return dockerAvailErr
 }
 
-func requireImage(t *testing.T) {
+// requireImage builds (and caches) the image for the CURRENT subtest's
+// architecture — set by forEachArch, which every test that calls this
+// must be wrapped in — and points the package-level imageTag at it.
+func requireImage(t *testing.T, arch string) {
 	t.Helper()
 	if err := dockerAvailable(t); err != nil {
 		t.Skipf("SKIP: %v (environment limitation)", err)
@@ -239,8 +328,68 @@ func requireImage(t *testing.T) {
 	// too rather than silently vanishing as a SKIP — the AGY_URL-missing
 	// case, the one truly expected failure without ops input, has its
 	// own dedicated test elsewhere and is not what requireImage guards).
-	if err := buildSentinelImage(t); err != nil {
-		t.Fatalf("FAIL: could not build %s: %v", imageTag, err)
+	if err := buildSentinelImage(t, arch); err != nil {
+		t.Fatalf("FAIL: could not build %s (linux/%s): %v", imageTagFor(arch), arch, err)
+	}
+	imageTag = imageTagFor(arch)
+}
+
+// forEachArch runs f once per target architecture in containerArches,
+// each as its own subtest (so a failure on one architecture is reported
+// distinctly and does not prevent the other from running), building the
+// image for that architecture first via requireImage. This is what lets
+// every existing C-series test run against both linux/amd64 and
+// linux/arm64 (contracts/runtime.md R1, amended 32a4bac) without
+// threading an arch parameter through each test body.
+// currentArch is set by forEachArch before each subtest runs — same
+// package-var pattern as imageTag, safe for the same reason (no
+// t.Parallel anywhere in this file).
+var currentArch string
+
+func forEachArch(t *testing.T, f func(t *testing.T)) {
+	t.Helper()
+	for _, arch := range containerArches {
+		arch := arch
+		t.Run(arch, func(t *testing.T) {
+			currentArch = arch
+			requireImage(t, arch)
+			f(t)
+		})
+	}
+}
+
+// wantELFMachine returns the little-endian e_machine bytes (as `od`
+// prints them, low byte first) a well-formed binary for arch must have.
+func wantELFMachine(arch string) string {
+	switch arch {
+	case "amd64":
+		return "3e 00" // EM_X86_64 = 62
+	case "arm64":
+		return "b7 00" // EM_AARCH64 = 183
+	default:
+		return "??"
+	}
+}
+
+// assertELFMachine reads the real ELF e_machine field (a little-endian
+// uint16 at byte offset 18) out of binPath inside the given image and
+// fails the test unless it matches arch. `od` (coreutils) is used
+// because `file` is not installed in the runtime image (R1's explicit
+// package list). This is one of the three coherence signals
+// contracts/runtime.md R1 (amended 32a4bac) requires C1 to check: "the
+// Go binary's ELF machine, the image manifest's architecture, and the
+// agy binary's ELF machine all agree with the platform that was
+// requested."
+func assertELFMachine(t *testing.T, tag, binPath, arch string) {
+	t.Helper()
+	out, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "od",
+		tag, "-An", "-tx1", "-j18", "-N2", binPath)
+	if code != 0 {
+		t.Fatalf("FAIL: reading ELF e_machine from %s failed (code=%d): %s %s", binPath, code, out, errOut)
+	}
+	want := wantELFMachine(arch)
+	if machine := strings.Join(strings.Fields(out), " "); machine != want {
+		t.Fatalf("FAIL: %s ELF e_machine = %q, want %q for linux/%s — architecture mismatch", binPath, machine, want, arch)
 	}
 }
 
@@ -248,151 +397,178 @@ func requireImage(t *testing.T) {
 // that would have caught the extraction bug no synthetic fixture could:
 // "Build the image with these real values at least once." Gated on
 // SENTINEL_REAL_AGY=1 (same gate C9/CLAUDE.md already use for real-agy
-// interaction) since it downloads the real ~53 MB tarball (~205 MB
-// extracted) from the vendor over the network — not something a default
-// `go test ./...` or even the default container suite should do.
+// interaction) since it downloads the real tarballs (~53-56 MB each,
+// ~200 MB extracted) from the vendor over the network, for BOTH
+// architectures — not something a default `go test ./...` or even the
+// default container suite should do.
 //
 // The values below are the ones the coordinator independently verified
-// (fetched, sha512-checked) on 2026-08-19 for agy 1.1.15. They are NOT
-// Dockerfile/compose defaults — R1 requires AGY_URL/AGY_SHA512 as ops
-// input with no default, on purpose — these are fixture literals for this
-// one gated verification, the same way a table-driven test's fixture data
-// is not a production default just because it lives in the repo.
-const (
-	realAgyVersion = "1.1.15"
-	realAgyURL     = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.15-5350383476932608/linux-x64/cli_linux_x64.tar.gz"
-	realAgySHA512  = "7d6020caff2e06a5ddf2553f2d9d5b428e3becc69727d11032f10e40609b938db428578ccd5c72694bab5e4da483de9ad3121578cc172adf174aa5263ce51dcc"
-)
+// (fetched, sha512-checked) on 2026-08-19 for agy 1.1.15, one pair per
+// architecture. They are NOT Dockerfile/compose defaults — R1 requires
+// AGY_URL_<ARCH>/AGY_SHA512_<ARCH> as ops input with no default, on
+// purpose — these are fixture literals for this one gated verification,
+// the same way a table-driven test's fixture data is not a production
+// default just because it lives in the repo.
+var realAgyValues = map[string]struct{ url, sha512, version string }{
+	"amd64": {
+		url:     "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.15-5350383476932608/linux-x64/cli_linux_x64.tar.gz",
+		sha512:  "7d6020caff2e06a5ddf2553f2d9d5b428e3becc69727d11032f10e40609b938db428578ccd5c72694bab5e4da483de9ad3121578cc172adf174aa5263ce51dcc",
+		version: "1.1.15",
+	},
+	"arm64": {
+		url:     "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.15-5350383476932608/linux-arm/cli_linux_arm64.tar.gz",
+		sha512:  "2571031ded807a624fad5166bfb7ee2eb0c97862480fc423da673fde2025b71a35240d213ece6a42ad44d215959fa050a71750c76f358befdd245f5933c4a104",
+		version: "1.1.15",
+	},
+}
 
 func TestContainer_RealAgyBuild(t *testing.T) {
 	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
-		t.Skip("SKIP: SENTINEL_REAL_AGY != 1 — set it to build the image against the REAL agy tarball over the network (~53MB download, ~205MB extracted)")
+		t.Skip("SKIP: SENTINEL_REAL_AGY != 1 — set it to build the image against the REAL agy tarballs over the network (~53-56MB download each, ~200MB extracted each)")
 	}
 
-	// Round-4 review item 3: realAgyURL is pinned to one specific vendor
-	// release (1.1.15) rather than re-resolved from the manifest each
-	// run, so when the vendor rotates it this URL can 404 for a reason
-	// that has nothing to do with this repo. Distinguish "the pinned
-	// artifact is gone" (SKIP, loudly, same as requireImage's daemon-
-	// unreachable case) from "the build itself is broken" (FAIL) with a
-	// cheap reachability check before spending 15 minutes on a doomed
-	// build.
-	if resp, err := http.Head(realAgyURL); err != nil {
-		t.Skipf("SKIP: realAgyURL unreachable (%v) — pinned to agy %s, needs a refresh if the vendor has rotated past it", err, realAgyVersion)
-	} else {
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Skipf("SKIP: realAgyURL returned HTTP %d — pinned to agy %s, needs a refresh if the vendor has rotated past it", resp.StatusCode, realAgyVersion)
-		}
-	}
+	for _, arch := range containerArches {
+		arch := arch
+		t.Run(arch, func(t *testing.T) {
+			real := realAgyValues[arch]
 
-	root := repoRoot(t)
-	tag := "sentinel:real-agy-test"
+			// Round-4 review item 3: this URL is pinned to one specific
+			// vendor release (1.1.15) rather than re-resolved from the
+			// manifest each run, so when the vendor rotates it this URL
+			// can 404 for a reason that has nothing to do with this
+			// repo. Distinguish "the pinned artifact is gone" (SKIP,
+			// loudly, same as requireImage's daemon-unreachable case)
+			// from "the build itself is broken" (FAIL) with a cheap
+			// reachability check before spending minutes on a doomed
+			// build.
+			if resp, err := http.Head(real.url); err != nil {
+				t.Skipf("SKIP: %s unreachable (%v) — pinned to agy %s (%s), needs a refresh if the vendor has rotated past it", arch, err, real.version, arch)
+			} else {
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Skipf("SKIP: %s returned HTTP %d — pinned to agy %s (%s), needs a refresh if the vendor has rotated past it", arch, resp.StatusCode, real.version, arch)
+				}
+			}
 
-	args := []string{"build", "-f", "deploy/Dockerfile", "-t", tag,
-		// The Dockerfile itself pins stage 2 (runtime, where agy actually
-		// EXECUTES) to linux/amd64 — see that FROM line for why: without
-		// it, an arm64 dev host resolves stage 2 to the arm64 debian
-		// base, and the real agy binary (dynamically linked against
-		// glibc) fails with "qemu-x86_64-static: Could not open
-		// '/lib64/ld-linux-x86-64.so.2'" — that file exists, just for the
-		// wrong arch. No --platform flag needed here; the Dockerfile
-		// itself is now correct regardless of build host.
-		"--build-arg", "AGY_URL=" + realAgyURL,
-		"--build-arg", "AGY_SHA512=" + realAgySHA512,
-		"--build-arg", "AGY_VERSION=" + realAgyVersion,
-		"--build-arg", "VERSION=real-agy-test",
-		".",
-	}
-	// -f is relative to the docker CLI's own cwd, and "." is the build
-	// context — both need cmd.Dir=root, exactly like buildSentinelImage
-	// does; runCmd (used everywhere else in this file) has no cwd
-	// override and would resolve "deploy/Dockerfile" against the test
-	// binary's own working directory instead.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, dockerBin(), args...)
-	cmd.Dir = root
-	var buildOut bytes.Buffer
-	cmd.Stdout = &buildOut
-	cmd.Stderr = &buildOut
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("FAIL: real-agy build failed: %v\n%s", err, buildOut.String())
-	}
-	defer runCmd(t, 30*time.Second, dockerBin(), "rmi", tag)
+			root := repoRoot(t)
+			tag := "sentinel:real-agy-test-" + arch
 
-	// The real agy --version output and a real sentinel --version, both
-	// out of the ACTUAL built image — not the synthetic fixture's stub.
-	verOut, verErr, verCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "agy", tag, "--version")
-	if verCode != 0 {
-		t.Fatalf("FAIL: agy --version in the real-agy image (code=%d): %s %s", verCode, verOut, verErr)
-	}
-	t.Logf("real agy --version: %s", strings.TrimSpace(verOut))
+			// Both architectures' build-arg pairs are always passed (the
+			// unused one just goes unread by this build's TARGETARCH
+			// branch in the Dockerfile) — this exercises the exact
+			// per-arch selection logic a real `docker buildx build
+			// --platform linux/amd64,linux/arm64` invocation would hit,
+			// not a simplified single-pair path.
+			args := []string{"build", "-f", "deploy/Dockerfile", "-t", tag,
+				"--platform", "linux/" + arch,
+				"--build-arg", "AGY_URL_AMD64=" + realAgyValues["amd64"].url,
+				"--build-arg", "AGY_SHA512_AMD64=" + realAgyValues["amd64"].sha512,
+				"--build-arg", "AGY_URL_ARM64=" + realAgyValues["arm64"].url,
+				"--build-arg", "AGY_SHA512_ARM64=" + realAgyValues["arm64"].sha512,
+				"--build-arg", "AGY_VERSION=" + real.version,
+				"--build-arg", "VERSION=real-agy-test",
+				".",
+			}
+			// -f is relative to the docker CLI's own cwd, and "." is the
+			// build context — both need cmd.Dir=root, exactly like
+			// buildSentinelImage does; runCmd (used everywhere else in
+			// this file) has no cwd override and would resolve
+			// "deploy/Dockerfile" against the test binary's own working
+			// directory instead.
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, dockerBin(), args...)
+			cmd.Dir = root
+			var buildOut bytes.Buffer
+			cmd.Stdout = &buildOut
+			cmd.Stderr = &buildOut
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("FAIL: real-agy build (linux/%s) failed: %v\n%s", arch, err, buildOut.String())
+			}
+			defer runCmd(t, 30*time.Second, dockerBin(), "rmi", tag)
 
-	sentOut, sentErr, sentCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", tag, "--version")
-	if sentCode != 0 {
-		t.Fatalf("FAIL: sentinel --version in the real-agy image (code=%d): %s %s", sentCode, sentOut, sentErr)
-	}
+			// The real agy --version output and a real sentinel
+			// --version, both out of the ACTUAL built image — not the
+			// synthetic fixture's stub.
+			verOut, verErr, verCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "agy", tag, "--version")
+			if verCode != 0 {
+				t.Fatalf("FAIL: agy --version in the real-agy %s image (code=%d): %s %s", arch, verCode, verOut, verErr)
+			}
+			t.Logf("real agy --version (%s): %s", arch, strings.TrimSpace(verOut))
 
-	sizeOut, _, sizeCode := runCmd(t, 10*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Size}}")
-	if sizeCode == 0 {
-		if bytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
-			t.Logf("real-agy image size: %d bytes (%.1f MB) — T8 pulls this onto bam", bytes, float64(bytes)/1e6)
-		}
+			sentOut, sentErr, sentCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", tag, "--version")
+			if sentCode != 0 {
+				t.Fatalf("FAIL: sentinel --version in the real-agy %s image (code=%d): %s %s", arch, sentCode, sentOut, sentErr)
+			}
+
+			// Coherence check with the REAL binaries — this is the one
+			// main named explicitly: "Add agy's ELF to the check — that
+			// is the one this whole round exists over, and it is the
+			// piece a wrong URL pair would corrupt silently."
+			archOut, archErr, archCode := runCmd(t, 15*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Architecture}}")
+			if archCode != 0 {
+				t.Fatalf("FAIL: docker image inspect --format {{.Architecture}} failed for real-agy %s (code=%d): %s %s", arch, archCode, archOut, archErr)
+			}
+			if got := strings.TrimSpace(archOut); got != arch {
+				t.Fatalf("FAIL: real-agy %s image Architecture = %q, want %q", arch, got, arch)
+			}
+			assertELFMachine(t, tag, "/usr/local/bin/sentinel", arch)
+			assertELFMachine(t, tag, "/usr/local/bin/agy", arch)
+
+			sizeOut, _, sizeCode := runCmd(t, 10*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Size}}")
+			if sizeCode == 0 {
+				if bytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
+					t.Logf("real-agy %s image size: %d bytes (%.1f MB) — T8 pulls this onto bam", arch, bytes, float64(bytes)/1e6)
+				}
+			}
+			logPass(t, "PASS real-agy build (%s, version=%s)", arch, real.version)
+		})
 	}
-	logPass(t, "PASS real-agy build (version=%s)", realAgyVersion)
 }
 
 // --- C1: container starts unprivileged ---
 
 func TestContainer_C1_StartsUnprivileged(t *testing.T) {
-	requireImage(t)
-	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "id", imageTag, "-u")
-	if code != 0 || strings.TrimSpace(out) != "10001" {
-		t.Fatalf("FAIL C1: id -u = %q (code=%d) stderr=%q, want 10001/0", out, code, errOut)
-	}
-	out, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "--version")
-	if code != 0 || !strings.Contains(out, "container-test") {
-		t.Fatalf("FAIL C1: sentinel --version = %q (code=%d), want to contain the stamped version", out, code)
-	}
-	// Round-4 review DEFECT: a stray GOARCH=${TARGETARCH} knob (already
-	// removed from the Dockerfile) let an arm64 buildx host silently
-	// produce an arm64-Go-binary-in-an-amd64-labeled-image, and the
-	// build-time `sentinel --version` check could not catch it — an
-	// arm64 host executes an arm64 static ELF regardless of the image's
-	// declared platform (platform is manifest metadata, not an execution
-	// sandbox). This is NOT because agy lacks an arm64 artifact — it has
-	// one (manifests/linux_arm64.json, a distinct tarball and sha512) —
-	// the image is pinned to amd64 because that is what bam runs and
-	// what AGY_URL/AGY_SHA512 are resolved for, one architecture per
-	// deploy/agy-build-args.sh run (main's ruling on this round's
-	// REJECT). Assert the built image's actual architecture directly
-	// rather than relying on a check that is blind to exactly this
-	// failure. Two independent signals: the image manifest's declared
-	// Architecture, and the real ELF e_machine field read out of the
-	// binary itself — the manifest signal is what a stray TARGETARCH
-	// knob left wrong in round 4's finding; the ELF signal is what
-	// actually determines whether the binary can exec on the target.
-	archOut, archErr, archCode := runCmd(t, 15*time.Second, dockerBin(), "image", "inspect", imageTag, "--format", "{{.Architecture}}")
-	if archCode != 0 {
-		t.Fatalf("FAIL C1: docker image inspect --format {{.Architecture}} failed (code=%d): %s %s", archCode, archOut, archErr)
-	}
-	if arch := strings.TrimSpace(archOut); arch != "amd64" {
-		t.Fatalf("FAIL C1: image Architecture = %q, want amd64", arch)
-	}
-	// ELF e_machine is a little-endian uint16 at byte offset 18. EM_X86_64
-	// = 62 = 0x3e00 on the wire (low byte first); EM_AARCH64 = 183 =
-	// 0xb700. od (coreutils, present in the runtime image per R1) reads
-	// it without needing `file`, which is not installed.
-	elfOut, elfErr, elfCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "od",
-		imageTag, "-An", "-tx1", "-j18", "-N2", "/usr/local/bin/sentinel")
-	if elfCode != 0 {
-		t.Fatalf("FAIL C1: reading ELF e_machine from /usr/local/bin/sentinel failed (code=%d): %s %s", elfCode, elfOut, elfErr)
-	}
-	if machine := strings.Join(strings.Fields(elfOut), " "); machine != "3e 00" {
-		t.Fatalf(`FAIL C1: /usr/local/bin/sentinel ELF e_machine = %q, want "3e 00" (EM_X86_64) — got a non-amd64 binary`, machine)
-	}
-	logPass(t, "PASS C1")
+	forEachArch(t, func(t *testing.T) {
+		out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "id", imageTag, "-u")
+		if code != 0 || strings.TrimSpace(out) != "10001" {
+			t.Fatalf("FAIL C1: id -u = %q (code=%d) stderr=%q, want 10001/0", out, code, errOut)
+		}
+		out, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "--version")
+		if code != 0 || !strings.Contains(out, "container-test") {
+			t.Fatalf("FAIL C1: sentinel --version = %q (code=%d), want to contain the stamped version", out, code)
+		}
+		// Round-4 review DEFECT, and its round-5 correction: a stray
+		// GOARCH=${TARGETARCH} knob combined with a stage-2
+		// --platform=linux/amd64 pin let an arm64 buildx host silently
+		// produce an arm64-Go-binary-in-an-amd64-labeled-image, and the
+		// build-time `sentinel --version` check could not catch it — a
+		// host executes a static ELF matching its OWN arch regardless of
+		// the image's declared platform (platform is manifest metadata,
+		// not an execution sandbox). Both stages now follow TARGETARCH
+		// (contracts/runtime.md R1, amended 32a4bac — arm64 support is
+		// required, not optional), so asserting a CONSTANT architecture
+		// here would fail every legitimate arm64 build. What must hold is
+		// COHERENCE: the image manifest's declared architecture, the Go
+		// binary's real ELF machine, AND agy's own real ELF machine must
+		// all agree with the platform THIS subtest requested
+		// (currentArch, set by forEachArch). agy's ELF is the signal
+		// round-4's fix did not check — it is the one a wrong
+		// AGY_URL_<ARCH>/AGY_SHA512_<ARCH> pairing would corrupt
+		// silently, since the extraction step never inspects the
+		// architecture of what it downloads.
+		wantArch := currentArch
+		archOut, archErr, archCode := runCmd(t, 15*time.Second, dockerBin(), "image", "inspect", imageTag, "--format", "{{.Architecture}}")
+		if archCode != 0 {
+			t.Fatalf("FAIL C1: docker image inspect --format {{.Architecture}} failed (code=%d): %s %s", archCode, archOut, archErr)
+		}
+		if arch := strings.TrimSpace(archOut); arch != wantArch {
+			t.Fatalf("FAIL C1: image Architecture = %q, want %q (built --platform linux/%s)", arch, wantArch, wantArch)
+		}
+		assertELFMachine(t, imageTag, "/usr/local/bin/sentinel", wantArch)
+		assertELFMachine(t, imageTag, "/usr/local/bin/agy", wantArch)
+		logPass(t, "PASS C1 (%s)", wantArch)
+	})
 }
 
 // --- C3: every ro mount rejects a write; /state and /tmp accept one ---
@@ -416,86 +592,87 @@ func hostPathExists(t *testing.T, hostPath string) bool {
 // REAL R4 mount set (real host paths, read-only) so a bind that lost its
 // `:ro` in compose would actually be caught here.
 func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
-	requireImage(t)
-	selinux := selinuxEnforcingOnDockerHost(t)
+	forEachArch(t, func(t *testing.T) {
+		selinux := selinuxEnforcingOnDockerHost(t)
 
-	// {container target, real host source, isDir}. Matches R4's mount
-	// list exactly (minus AGY_SECRET_DIR and /state/tmpfs, which are not
-	// "ro mount targets" — /state and /tmp are the rw exception C3 checks
-	// separately below).
-	type mount struct {
-		target string
-		host   string
-		isDir  bool
-	}
-	mounts := []mount{
-		{"/host/journal", "/var/log/journal", true},
-		{"/host/journal-volatile", "/run/log/journal", true},
-		{"/etc/machine-id", "/etc/machine-id", false},
-		{"/host/rasdaemon", "/var/lib/rasdaemon", true},
-		{"/host/proc", "/proc", true},
-		{"/host/sys", "/sys", true},
-		{"/etc/os-release", "/etc/os-release", false},
-		{"/host/root", "/", true},
-	}
+		// {container target, real host source, isDir}. Matches R4's mount
+		// list exactly (minus AGY_SECRET_DIR and /state/tmpfs, which are not
+		// "ro mount targets" — /state and /tmp are the rw exception C3 checks
+		// separately below).
+		type mount struct {
+			target string
+			host   string
+			isDir  bool
+		}
+		mounts := []mount{
+			{"/host/journal", "/var/log/journal", true},
+			{"/host/journal-volatile", "/run/log/journal", true},
+			{"/etc/machine-id", "/etc/machine-id", false},
+			{"/host/rasdaemon", "/var/lib/rasdaemon", true},
+			{"/host/proc", "/proc", true},
+			{"/host/sys", "/sys", true},
+			{"/etc/os-release", "/etc/os-release", false},
+			{"/host/root", "/", true},
+		}
 
-	for _, m := range mounts {
-		if !hostPathExists(t, m.host) {
-			t.Logf("SKIP C3 target %s: host path %s does not exist on this test host", m.target, m.host)
-			continue
+		for _, m := range mounts {
+			if !hostPathExists(t, m.host) {
+				t.Logf("SKIP C3 target %s: host path %s does not exist on this test host", m.target, m.host)
+				continue
+			}
+			var writeTarget string
+			if m.isDir {
+				writeTarget = strings.TrimRight(m.target, "/") + "/.w"
+			} else {
+				writeTarget = m.target // overwrite attempt on the file itself
+			}
+			script := fmt.Sprintf("echo x > %s 2>/dev/null; echo rc=$?", writeTarget)
+			args := []string{"run", "--rm",
+				"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+				"-u", "10001:10001", "--tmpfs", "/tmp",
+				"-v", m.host + ":" + m.target + ":ro"}
+			if selinux {
+				args = append(args, "--security-opt", "label=disable")
+			}
+			args = append(args, "--entrypoint", "sh", imageTag, "-c", script)
+			out, errOut, _ := runCmd(t, 15*time.Second, dockerBin(), args...)
+			if !strings.Contains(out, "rc=") || strings.Contains(out, "rc=0") {
+				t.Errorf("FAIL C3: write to %s (host %s) did not fail as expected: out=%q err=%q", m.target, m.host, out, errOut)
+			}
 		}
-		var writeTarget string
-		if m.isDir {
-			writeTarget = strings.TrimRight(m.target, "/") + "/.w"
-		} else {
-			writeTarget = m.target // overwrite attempt on the file itself
-		}
-		script := fmt.Sprintf("echo x > %s 2>/dev/null; echo rc=$?", writeTarget)
-		args := []string{"run", "--rm",
+
+		// /usr/local/bin has no host mount — it's part of the image itself,
+		// and read_only:true is what protects it.
+		out, _, _ := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
 			"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
 			"-u", "10001:10001", "--tmpfs", "/tmp",
-			"-v", m.host + ":" + m.target + ":ro"}
-		if selinux {
-			args = append(args, "--security-opt", "label=disable")
-		}
-		args = append(args, "--entrypoint", "sh", imageTag, "-c", script)
-		out, errOut, _ := runCmd(t, 15*time.Second, dockerBin(), args...)
+			"--entrypoint", "sh", imageTag, "-c", "echo x > /usr/local/bin/.w 2>/dev/null; echo rc=$?")
 		if !strings.Contains(out, "rc=") || strings.Contains(out, "rc=0") {
-			t.Errorf("FAIL C3: write to %s (host %s) did not fail as expected: out=%q err=%q", m.target, m.host, out, errOut)
+			t.Errorf("FAIL C3: write to /usr/local/bin did not fail as expected: %q", out)
 		}
-	}
 
-	// /usr/local/bin has no host mount — it's part of the image itself,
-	// and read_only:true is what protects it.
-	out, _, _ := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"-u", "10001:10001", "--tmpfs", "/tmp",
-		"--entrypoint", "sh", imageTag, "-c", "echo x > /usr/local/bin/.w 2>/dev/null; echo rc=$?")
-	if !strings.Contains(out, "rc=") || strings.Contains(out, "rc=0") {
-		t.Errorf("FAIL C3: write to /usr/local/bin did not fail as expected: %q", out)
-	}
-
-	// /state and /tmp are the two rw exceptions — must accept a write
-	// (R8 C3: "/state/.w and /tmp/.w succeed").
-	stateDir := t.TempDir()
-	if err := os.Chmod(stateDir, 0o777); err != nil { // container uid 10001 != host owner uid
-		t.Fatal(err)
-	}
-	out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"-u", "10001:10001", "--tmpfs", "/tmp", "-v", stateDir+":/state",
-		"--entrypoint", "sh", imageTag, "-c", "echo x > /state/.w 2>/dev/null; echo rc=$?")
-	if !strings.Contains(out, "rc=0") {
-		t.Fatalf("FAIL C3: write to /state should succeed: %q", out)
-	}
-	out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"-u", "10001:10001", "--tmpfs", "/tmp",
-		"--entrypoint", "sh", imageTag, "-c", "echo x > /tmp/.w 2>/dev/null; echo rc=$?")
-	if !strings.Contains(out, "rc=0") {
-		t.Fatalf("FAIL C3: write to /tmp should succeed: %q", out)
-	}
-	logPass(t, "PASS C3")
+		// /state and /tmp are the two rw exceptions — must accept a write
+		// (R8 C3: "/state/.w and /tmp/.w succeed").
+		stateDir := t.TempDir()
+		if err := os.Chmod(stateDir, 0o777); err != nil { // container uid 10001 != host owner uid
+			t.Fatal(err)
+		}
+		out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+			"-u", "10001:10001", "--tmpfs", "/tmp", "-v", stateDir+":/state",
+			"--entrypoint", "sh", imageTag, "-c", "echo x > /state/.w 2>/dev/null; echo rc=$?")
+		if !strings.Contains(out, "rc=0") {
+			t.Fatalf("FAIL C3: write to /state should succeed: %q", out)
+		}
+		out, _, _ = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+			"-u", "10001:10001", "--tmpfs", "/tmp",
+			"--entrypoint", "sh", imageTag, "-c", "echo x > /tmp/.w 2>/dev/null; echo rc=$?")
+		if !strings.Contains(out, "rc=0") {
+			t.Fatalf("FAIL C3: write to /tmp should succeed: %q", out)
+		}
+		logPass(t, "PASS C3")
+	})
 }
 
 // --- C2: journal readable via group_add ---
@@ -516,64 +693,64 @@ func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 // exercised even without real journal content. SKIPs loudly, never
 // silently, when neither path is set up on this host (C9).
 func TestContainer_C2_JournalViaGroupAdd(t *testing.T) {
-	requireImage(t)
+	forEachArch(t, func(t *testing.T) {
+		if gid, ok := hostSystemdJournalGID(t); ok {
+			selinux := selinuxEnforcingOnDockerHost(t)
+			base := []string{"run", "--rm", "-v", "/var/log/journal:/host/journal:ro",
+				"-u", "10001:10001", "--entrypoint", "journalctl"}
+			if selinux {
+				base = append(base, "--security-opt", "label=disable")
+			}
+			withoutArgs := append(append([]string{}, base...), imageTag, "-D", "/host/journal", "-n1", "-o", "json", "--no-pager")
+			_, _, codeWithout := runCmd(t, 15*time.Second, dockerBin(), withoutArgs...)
 
-	if gid, ok := hostSystemdJournalGID(t); ok {
-		selinux := selinuxEnforcingOnDockerHost(t)
-		base := []string{"run", "--rm", "-v", "/var/log/journal:/host/journal:ro",
-			"-u", "10001:10001", "--entrypoint", "journalctl"}
-		if selinux {
-			base = append(base, "--security-opt", "label=disable")
+			withArgs := append(append([]string{}, base[:2]...), append([]string{"--group-add", gid}, base[2:]...)...)
+			withArgs = append(withArgs, imageTag, "-D", "/host/journal", "-n1", "-o", "json", "--no-pager")
+			outWith, _, codeWith := runCmd(t, 15*time.Second, dockerBin(), withArgs...)
+
+			if codeWithout == 0 {
+				t.Log("NOTE C2: reading the real journal succeeded even without --group-add on this host — cannot prove the negative direction here, falling through to the positive assertion only")
+			}
+			if codeWith != 0 || strings.TrimSpace(outWith) == "" {
+				t.Fatalf("FAIL C2: --group-add %s could not read the real host journal (code=%d): %s", gid, codeWith, outWith)
+			}
+			logPass(t, "PASS C2 (real host journal, real systemd-journal gid)")
+			return
 		}
-		withoutArgs := append(append([]string{}, base...), imageTag, "-D", "/host/journal", "-n1", "-o", "json", "--no-pager")
-		_, _, codeWithout := runCmd(t, 15*time.Second, dockerBin(), withoutArgs...)
 
-		withArgs := append(append([]string{}, base[:2]...), append([]string{"--group-add", gid}, base[2:]...)...)
-		withArgs = append(withArgs, imageTag, "-D", "/host/journal", "-n1", "-o", "json", "--no-pager")
-		outWith, _, codeWith := runCmd(t, 15*time.Second, dockerBin(), withArgs...)
+		// Fallback: synthetic POSIX-permission probe.
+		dir := t.TempDir()
+		if out, errOut, code := runCmd(t, 10*time.Second, "chmod", "0750", dir); code != 0 {
+			t.Skipf("SKIP C2: chmod on host failed: %s %s", out, errOut)
+		}
+		const testGID = 54321 // throwaway, unlikely to collide with a real system group
+		if out, errOut, code := runCmd(t, 10*time.Second, "chown", ":"+fmt.Sprint(testGID), dir); code != 0 {
+			t.Skipf("SKIP C2: chown to gid %d failed (needs root or matching group on this host): %s %s", testGID, out, errOut)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "probe"), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if out, errOut, code := runCmd(t, 10*time.Second, "chown", ":"+fmt.Sprint(testGID), filepath.Join(dir, "probe")); code != 0 {
+			t.Skipf("SKIP C2: chown probe file failed: %s %s", out, errOut)
+		}
+
+		_, _, codeWithout := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-u", "10001:10001", "-v", dir+":/probe:ro",
+			"--entrypoint", "cat", imageTag, "/probe/probe")
+		_, _, codeWith := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-u", "10001:10001", "--group-add", fmt.Sprint(testGID),
+			"-v", dir+":/probe:ro",
+			"--entrypoint", "cat", imageTag, "/probe/probe")
 
 		if codeWithout == 0 {
-			t.Log("NOTE C2: reading the real journal succeeded even without --group-add on this host — cannot prove the negative direction here, falling through to the positive assertion only")
+			t.Skip("SKIP C2: this host does not enforce the group permission boundary the way a real Linux target does (probe was readable even without group_add) — inconclusive here, needs live-host validation")
 		}
-		if codeWith != 0 || strings.TrimSpace(outWith) == "" {
-			t.Fatalf("FAIL C2: --group-add %s could not read the real host journal (code=%d): %s", gid, codeWith, outWith)
+		if codeWith != 0 {
+			t.Errorf("FAIL C2: --group-add %d still could not read the probe file (code=%d)", testGID, codeWith)
+		} else {
+			logPass(t, "PASS C2 (synthetic gid fallback — no real host journal reachable in this environment)")
 		}
-		logPass(t, "PASS C2 (real host journal, real systemd-journal gid)")
-		return
-	}
-
-	// Fallback: synthetic POSIX-permission probe.
-	dir := t.TempDir()
-	if out, errOut, code := runCmd(t, 10*time.Second, "chmod", "0750", dir); code != 0 {
-		t.Skipf("SKIP C2: chmod on host failed: %s %s", out, errOut)
-	}
-	const testGID = 54321 // throwaway, unlikely to collide with a real system group
-	if out, errOut, code := runCmd(t, 10*time.Second, "chown", ":"+fmt.Sprint(testGID), dir); code != 0 {
-		t.Skipf("SKIP C2: chown to gid %d failed (needs root or matching group on this host): %s %s", testGID, out, errOut)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "probe"), []byte("x"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if out, errOut, code := runCmd(t, 10*time.Second, "chown", ":"+fmt.Sprint(testGID), filepath.Join(dir, "probe")); code != 0 {
-		t.Skipf("SKIP C2: chown probe file failed: %s %s", out, errOut)
-	}
-
-	_, _, codeWithout := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-u", "10001:10001", "-v", dir+":/probe:ro",
-		"--entrypoint", "cat", imageTag, "/probe/probe")
-	_, _, codeWith := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-u", "10001:10001", "--group-add", fmt.Sprint(testGID),
-		"-v", dir+":/probe:ro",
-		"--entrypoint", "cat", imageTag, "/probe/probe")
-
-	if codeWithout == 0 {
-		t.Skip("SKIP C2: this host does not enforce the group permission boundary the way a real Linux target does (probe was readable even without group_add) — inconclusive here, needs live-host validation")
-	}
-	if codeWith != 0 {
-		t.Errorf("FAIL C2: --group-add %d still could not read the probe file (code=%d)", testGID, codeWith)
-	} else {
-		logPass(t, "PASS C2 (synthetic gid fallback — no real host journal reachable in this environment)")
-	}
+	})
 }
 
 // hostSystemdJournalGID discovers the REAL systemd-journal gid on the
@@ -617,52 +794,52 @@ func selinuxEnforcingOnDockerHost(t *testing.T) bool {
 
 // --- C4: sensors -j ---
 func TestContainer_C4_SensorsJSON(t *testing.T) {
-	requireImage(t)
-	// sensors reads the container's OWN /sys (there is no CLI flag to
-	// point it at an arbitrary root), which under Docker/Podman is
-	// normally the real host's sysfs shared via the kernel — no /host/sys
-	// remapping needed for the standalone binary (that mapping is for
-	// collect's own code, contracts/collect.md). On a sandboxed dev VM
-	// with no physical sensor chips exposed, `sensors -j` prints "{}" AND
-	// exits 1 ("No sensors found!") — that combination is a legitimate
-	// "nothing detected" environment limitation, not a Dockerfile defect,
-	// so it SKIPs rather than fails; any other non-zero exit is a real
-	// failure.
-	out, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"--entrypoint", "sensors", imageTag, "-j")
-	if code != 0 {
-		if strings.TrimSpace(out) == "{}" {
-			t.Skipf("SKIP C4: sensors -j found no chips in this environment (exit=%d, stderr=%q) — ARCHITECTURE §2.6 unverified point, needs live-host validation (e.g. bam)", code, errOut)
+	forEachArch(t, func(t *testing.T) { // sensors reads the container's OWN /sys (there is no CLI flag to
+		// point it at an arbitrary root), which under Docker/Podman is
+		// normally the real host's sysfs shared via the kernel — no /host/sys
+		// remapping needed for the standalone binary (that mapping is for
+		// collect's own code, contracts/collect.md). On a sandboxed dev VM
+		// with no physical sensor chips exposed, `sensors -j` prints "{}" AND
+		// exits 1 ("No sensors found!") — that combination is a legitimate
+		// "nothing detected" environment limitation, not a Dockerfile defect,
+		// so it SKIPs rather than fails; any other non-zero exit is a real
+		// failure.
+		out, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"--entrypoint", "sensors", imageTag, "-j")
+		if code != 0 {
+			if strings.TrimSpace(out) == "{}" {
+				t.Skipf("SKIP C4: sensors -j found no chips in this environment (exit=%d, stderr=%q) — ARCHITECTURE §2.6 unverified point, needs live-host validation (e.g. bam)", code, errOut)
+			}
+			t.Fatalf("FAIL C4: sensors -j exit code = %d: %s %s", code, out, errOut)
 		}
-		t.Fatalf("FAIL C4: sensors -j exit code = %d: %s %s", code, out, errOut)
-	}
-	m := mustJSON(t, out)
-	if len(m) == 0 {
-		t.Skip("SKIP C4: sensors -j returned an empty object — no hwmon sensor chips detected in this environment (ARCHITECTURE §2.6 unverified point; needs live-host validation, e.g. bam)")
-	}
-	entries, err := os.ReadDir("/sys/class/hwmon")
-	if err != nil || len(entries) == 0 {
-		t.Skip("SKIP C4: /host/sys/class/hwmon not readable from the test process itself — cannot cross-check device names here")
-	}
-	var names []string
-	for _, e := range entries {
-		if nb, err := os.ReadFile(filepath.Join("/sys/class/hwmon", e.Name(), "name")); err == nil {
-			names = append(names, strings.TrimSpace(string(nb)))
+		m := mustJSON(t, out)
+		if len(m) == 0 {
+			t.Skip("SKIP C4: sensors -j returned an empty object — no hwmon sensor chips detected in this environment (ARCHITECTURE §2.6 unverified point; needs live-host validation, e.g. bam)")
 		}
-	}
-	found := false
-	for k := range m {
-		for _, n := range names {
-			if strings.Contains(k, n) {
-				found = true
+		entries, err := os.ReadDir("/sys/class/hwmon")
+		if err != nil || len(entries) == 0 {
+			t.Skip("SKIP C4: /host/sys/class/hwmon not readable from the test process itself — cannot cross-check device names here")
+		}
+		var names []string
+		for _, e := range entries {
+			if nb, err := os.ReadFile(filepath.Join("/sys/class/hwmon", e.Name(), "name")); err == nil {
+				names = append(names, strings.TrimSpace(string(nb)))
 			}
 		}
-	}
-	if !found {
-		t.Errorf("FAIL C4: none of sensors -j's keys (%v) matched a hwmon device name (%v)", keysOf(m), names)
-	} else {
-		logPass(t, "PASS C4")
-	}
+		found := false
+		for k := range m {
+			for _, n := range names {
+				if strings.Contains(k, n) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("FAIL C4: none of sensors -j's keys (%v) matched a hwmon device name (%v)", keysOf(m), names)
+		} else {
+			logPass(t, "PASS C4")
+		}
+	})
 }
 
 func keysOf(m map[string]any) []string {
@@ -675,120 +852,125 @@ func keysOf(m map[string]any) []string {
 
 // --- C5: rasdaemon path listable ---
 func TestContainer_C5_RasdaemonListable(t *testing.T) {
-	requireImage(t)
-	if _, err := os.Stat("/var/lib/rasdaemon"); err != nil {
-		t.Skip("SKIP C5: rasdaemon not present on this test host")
-	}
-	out, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-v", "/var/lib/rasdaemon:/host/rasdaemon:ro",
-		"--entrypoint", "ls", imageTag, "/host/rasdaemon")
-	if code != 0 {
-		t.Fatalf("FAIL C5: ls /host/rasdaemon: %s %s", out, errOut)
-	}
-	logPass(t, "PASS C5")
+	forEachArch(t, func(t *testing.T) {
+		if _, err := os.Stat("/var/lib/rasdaemon"); err != nil {
+			t.Skip("SKIP C5: rasdaemon not present on this test host")
+		}
+		out, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-v", "/var/lib/rasdaemon:/host/rasdaemon:ro",
+			"--entrypoint", "ls", imageTag, "/host/rasdaemon")
+		if code != 0 {
+			t.Fatalf("FAIL C5: ls /host/rasdaemon: %s %s", out, errOut)
+		}
+		logPass(t, "PASS C5")
+	})
 }
 
 // --- C7: ZED events under -t zed (0 hits is a pass) ---
 func TestContainer_C7_ZedUnderJournalctl(t *testing.T) {
-	requireImage(t)
-	dir := t.TempDir()
-	_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-v", dir+":/host/journal:ro",
-		"--entrypoint", "journalctl", imageTag, "-D", "/host/journal", "-t", "zed", "-n5")
-	if code != 0 {
-		t.Fatalf("FAIL C7: journalctl -t zed exit code = %d: %s", code, errOut)
-	}
-	logPass(t, "PASS C7 (0 hits on an empty synthetic journal dir is itself a pass per R8)")
+	forEachArch(t, func(t *testing.T) {
+		dir := t.TempDir()
+		_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-v", dir+":/host/journal:ro",
+			"--entrypoint", "journalctl", imageTag, "-D", "/host/journal", "-t", "zed", "-n5")
+		if code != 0 {
+			t.Fatalf("FAIL C7: journalctl -t zed exit code = %d: %s", code, errOut)
+		}
+		logPass(t, "PASS C7 (0 hits on an empty synthetic journal dir is itself a pass per R8)")
+	})
 }
 
 // --- C8: smartd decode (no NVMe -> SKIP) ---
 func TestContainer_C8_SmartdDecode(t *testing.T) {
-	requireImage(t)
-	dir := t.TempDir()
-	_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-v", dir+":/host/journal:ro",
-		"--entrypoint", "journalctl", imageTag, "-D", "/host/journal", "-t", "smartd")
-	if code != 0 {
-		t.Fatalf("FAIL C8: journalctl -t smartd exit code = %d: %s", code, errOut)
-	}
-	t.Skip("SKIP C8: no NVMe/smartd fixture data available in this environment (0-hit decode above is not itself the assertion — the contract wants a synthetic 'Killed process' entry to reach the kernel section, which needs a real journal fixture; deferred to internal/collect's own hermetic tests, which already cover kernel-section parsing with testdata/bin)")
+	forEachArch(t, func(t *testing.T) {
+		dir := t.TempDir()
+		_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-v", dir+":/host/journal:ro",
+			"--entrypoint", "journalctl", imageTag, "-D", "/host/journal", "-t", "smartd")
+		if code != 0 {
+			t.Fatalf("FAIL C8: journalctl -t smartd exit code = %d: %s", code, errOut)
+		}
+		t.Skip("SKIP C8: no NVMe/smartd fixture data available in this environment (0-hit decode above is not itself the assertion — the contract wants a synthetic 'Killed process' entry to reach the kernel section, which needs a real journal fixture; deferred to internal/collect's own hermetic tests, which already cover kernel-section parsing with testdata/bin)")
+	})
 }
 
 // --- C6: tmpfs/DNS ok under read_only ---
 
 func TestContainer_C6_TmpfsAndTZ(t *testing.T) {
-	requireImage(t)
-	out, _, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
-		"-u", "10001:10001", "--tmpfs", "/tmp",
-		"--entrypoint", "sh", imageTag, "-c", "echo x > /tmp/.w && echo tmp_ok; echo TZ=$TZ")
-	if code != 0 || !strings.Contains(out, "tmp_ok") {
-		t.Fatalf("FAIL C6: tmpfs write failed: %q (code=%d)", out, code)
-	}
-	if !strings.Contains(out, "TZ=UTC") {
-		t.Fatalf("FAIL C6: TZ != UTC: %q", out)
-	}
-	logPass(t, "PASS C6 (DNS resolution of `apprise` requires the compose network — asserted separately via `docker compose config`, not a bare `docker run`)")
+	forEachArch(t, func(t *testing.T) {
+		out, _, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
+			"-u", "10001:10001", "--tmpfs", "/tmp",
+			"--entrypoint", "sh", imageTag, "-c", "echo x > /tmp/.w && echo tmp_ok; echo TZ=$TZ")
+		if code != 0 || !strings.Contains(out, "tmp_ok") {
+			t.Fatalf("FAIL C6: tmpfs write failed: %q (code=%d)", out, code)
+		}
+		if !strings.Contains(out, "TZ=UTC") {
+			t.Fatalf("FAIL C6: TZ != UTC: %q", out)
+		}
+		logPass(t, "PASS C6 (DNS resolution of `apprise` requires the compose network — asserted separately via `docker compose config`, not a bare `docker run`)")
+	})
 }
 
 // --- C9: sentinel tick exit codes ---
 
 func TestContainer_C9_TickExitCodes(t *testing.T) {
-	requireImage(t)
-	stateDir := t.TempDir()
-	// The container runs as uid 10001 (Dockerfile USER sentinel), distinct
-	// from the host uid that owns a Go-created t.TempDir() (default 0700).
-	// A bind mount does not remap ownership, so without this the STATE_DIR
-	// write-probe fails for uid 10001 regardless of what's actually being
-	// tested here — chmod so the case under test (journal readability,
-	// not host/container uid mismatch) is what actually gates the result.
-	if err := os.Chmod(stateDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
+	forEachArch(t, func(t *testing.T) {
+		stateDir := t.TempDir()
+		// The container runs as uid 10001 (Dockerfile USER sentinel), distinct
+		// from the host uid that owns a Go-created t.TempDir() (default 0700).
+		// A bind mount does not remap ownership, so without this the STATE_DIR
+		// write-probe fails for uid 10001 regardless of what's actually being
+		// tested here — chmod so the case under test (journal readability,
+		// not host/container uid mismatch) is what actually gates the result.
+		if err := os.Chmod(stateDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
 
-	// TICK_INTERVAL=abc -> 78
-	_, _, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-e", "TICK_INTERVAL=abc", "-e", "STATE_DIR=/state",
-		"-v", stateDir+":/state",
-		imageTag, "tick", "--once")
-	if code != 78 {
-		t.Errorf("FAIL C9: TICK_INTERVAL=abc -> code=%d, want 78", code)
-	}
+		// TICK_INTERVAL=abc -> 78
+		_, _, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-e", "TICK_INTERVAL=abc", "-e", "STATE_DIR=/state",
+			"-v", stateDir+":/state",
+			imageTag, "tick", "--once")
+		if code != 78 {
+			t.Errorf("FAIL C9: TICK_INTERVAL=abc -> code=%d, want 78", code)
+		}
 
-	// STATE_DIR unwritable -> 69 (mount a read-only tmpfs-like dir)
-	roDir := t.TempDir()
-	os.Chmod(roDir, 0o500)
-	_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-v", roDir+":/state:ro",
-		"-e", "STATE_DIR=/state",
-		imageTag, "tick", "--once")
-	if code != 69 {
-		t.Errorf("FAIL C9: unwritable STATE_DIR -> code=%d, want 69", code)
-	}
+		// STATE_DIR unwritable -> 69 (mount a read-only tmpfs-like dir)
+		roDir := t.TempDir()
+		os.Chmod(roDir, 0o500)
+		_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-v", roDir+":/state:ro",
+			"-e", "STATE_DIR=/state",
+			imageTag, "tick", "--once")
+		if code != 69 {
+			t.Errorf("FAIL C9: unwritable STATE_DIR -> code=%d, want 69", code)
+		}
 
-	// neither journal dir readable -> 78 (defaults point at nonexistent
-	// /host/journal, /host/journal-volatile: no volume mounted)
-	_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
-		"-v", stateDir+":/state",
-		"-e", "STATE_DIR=/state",
-		imageTag, "tick", "--once")
-	if code != 78 {
-		t.Errorf("FAIL C9: no journal mount -> code=%d, want 78", code)
-	}
+		// neither journal dir readable -> 78 (defaults point at nonexistent
+		// /host/journal, /host/journal-volatile: no volume mounted)
+		_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
+			"-v", stateDir+":/state",
+			"-e", "STATE_DIR=/state",
+			imageTag, "tick", "--once")
+		if code != 78 {
+			t.Errorf("FAIL C9: no journal mount -> code=%d, want 78", code)
+		}
 
-	// --loop --once -> 64
-	_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "tick", "--loop", "--once")
-	if code != 64 {
-		t.Errorf("FAIL C9: --loop --once -> code=%d, want 64", code)
-	}
+		// --loop --once -> 64
+		_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "tick", "--loop", "--once")
+		if code != 64 {
+			t.Errorf("FAIL C9: --loop --once -> code=%d, want 64", code)
+		}
 
-	// positional argument -> 64
-	_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "tick", "extra-positional")
-	if code != 64 {
-		t.Errorf("FAIL C9: positional arg -> code=%d, want 64", code)
-	}
+		// positional argument -> 64
+		_, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "tick", "extra-positional")
+		if code != 64 {
+			t.Errorf("FAIL C9: positional arg -> code=%d, want 64", code)
+		}
 
-	t.Log("PASS/FAIL C9 reported per sub-case above")
+		t.Log("PASS/FAIL C9 reported per sub-case above")
+	})
 }
 
 // --- C10: compose security model, via `docker compose config` ---
@@ -934,71 +1116,72 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 // --- C11: SIGTERM shutdown + healthcheck ---
 
 func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
-	requireImage(t)
-	stateDir := t.TempDir()
-	// Container runs as uid 10001 (Dockerfile USER sentinel); a bind mount
-	// does not remap host ownership, so the STATE_DIR write-probe needs
-	// this to pass preflight at all (same reasoning as C9 above).
-	if err := os.Chmod(stateDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	hostProc := t.TempDir()
-	if err := os.WriteFile(filepath.Join(hostProc, "uptime"), []byte("1 0\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// checkJournalReadable (the T7 obligation) needs a journal that a real
-	// journalctl actually reads a record from — a bind-mounted empty temp
-	// dir legitimately fails preflight now (that IS the fix working), so
-	// this test needs the REAL host journal, gid-discovered, same as C2.
-	gid, gidOK := hostSystemdJournalGID(t)
-	if !gidOK {
-		t.Skip("SKIP C11: no real host journal reachable in this environment (needed since checkJournalReadable, the T7 fix, now correctly refuses to start on an empty/synthetic journal dir)")
-	}
-	selinux := selinuxEnforcingOnDockerHost(t)
-
-	name := "sentinel-c11-test"
-	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
-	args := []string{"run", "-d", "--name", name,
-		"-e", "STATE_DIR=/state", "-v", stateDir + ":/state",
-		"-e", "HOST_JOURNAL_DIR=/host/journal", "-v", "/var/log/journal:/host/journal:ro",
-		"-e", "HOST_JOURNAL_VOLATILE_DIR=/host/journal",
-		"-e", "HOST_PROC=/hp", "-v", hostProc + ":/hp",
-		"-e", "TICK_INTERVAL=60",
-		"-e", "MAILRISE_USER=u", "-e", "MAILRISE_PASS=changeme",
-		"--group-add", gid,
-	}
-	if selinux {
-		args = append(args, "--security-opt", "label=disable")
-	}
-	args = append(args, imageTag, "tick", "--loop")
-	_, errOut, code := runCmd(t, 20*time.Second, dockerBin(), args...)
-	if code != 0 {
-		t.Skipf("SKIP C11: could not start container (env limitation): %s", errOut)
-	}
-	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", name)
-
-	time.Sleep(3 * time.Second)
-	runCmd(t, 5*time.Second, dockerBin(), "kill", "-s", "TERM", name)
-
-	deadline := time.Now().Add(15 * time.Second)
-	var exited bool
-	for time.Now().Before(deadline) {
-		out, _, _ := runCmd(t, 5*time.Second, dockerBin(), "inspect", "-f", "{{.State.Running}}", name)
-		if strings.TrimSpace(out) == "false" {
-			exited = true
-			break
+	forEachArch(t, func(t *testing.T) {
+		stateDir := t.TempDir()
+		// Container runs as uid 10001 (Dockerfile USER sentinel); a bind mount
+		// does not remap host ownership, so the STATE_DIR write-probe needs
+		// this to pass preflight at all (same reasoning as C9 above).
+		if err := os.Chmod(stateDir, 0o777); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !exited {
-		t.Fatal("FAIL C11: container did not exit within 15s of SIGTERM")
-	}
-	out, _, _ := runCmd(t, 5*time.Second, dockerBin(), "inspect", "-f", "{{.State.ExitCode}}", name)
-	if strings.TrimSpace(out) != "0" {
-		t.Errorf("FAIL C11: exit code = %s, want 0", strings.TrimSpace(out))
-	}
-	logPass(t, "PASS C11")
+		hostProc := t.TempDir()
+		if err := os.WriteFile(filepath.Join(hostProc, "uptime"), []byte("1 0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// checkJournalReadable (the T7 obligation) needs a journal that a real
+		// journalctl actually reads a record from — a bind-mounted empty temp
+		// dir legitimately fails preflight now (that IS the fix working), so
+		// this test needs the REAL host journal, gid-discovered, same as C2.
+		gid, gidOK := hostSystemdJournalGID(t)
+		if !gidOK {
+			t.Skip("SKIP C11: no real host journal reachable in this environment (needed since checkJournalReadable, the T7 fix, now correctly refuses to start on an empty/synthetic journal dir)")
+		}
+		selinux := selinuxEnforcingOnDockerHost(t)
+
+		name := "sentinel-c11-test"
+		runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+		args := []string{"run", "-d", "--name", name,
+			"-e", "STATE_DIR=/state", "-v", stateDir + ":/state",
+			"-e", "HOST_JOURNAL_DIR=/host/journal", "-v", "/var/log/journal:/host/journal:ro",
+			"-e", "HOST_JOURNAL_VOLATILE_DIR=/host/journal",
+			"-e", "HOST_PROC=/hp", "-v", hostProc + ":/hp",
+			"-e", "TICK_INTERVAL=60",
+			"-e", "MAILRISE_USER=u", "-e", "MAILRISE_PASS=changeme",
+			"--group-add", gid,
+		}
+		if selinux {
+			args = append(args, "--security-opt", "label=disable")
+		}
+		args = append(args, imageTag, "tick", "--loop")
+		_, errOut, code := runCmd(t, 20*time.Second, dockerBin(), args...)
+		if code != 0 {
+			t.Skipf("SKIP C11: could not start container (env limitation): %s", errOut)
+		}
+		defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", name)
+
+		time.Sleep(3 * time.Second)
+		runCmd(t, 5*time.Second, dockerBin(), "kill", "-s", "TERM", name)
+
+		deadline := time.Now().Add(15 * time.Second)
+		var exited bool
+		for time.Now().Before(deadline) {
+			out, _, _ := runCmd(t, 5*time.Second, dockerBin(), "inspect", "-f", "{{.State.Running}}", name)
+			if strings.TrimSpace(out) == "false" {
+				exited = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !exited {
+			t.Fatal("FAIL C11: container did not exit within 15s of SIGTERM")
+		}
+		out, _, _ := runCmd(t, 5*time.Second, dockerBin(), "inspect", "-f", "{{.State.ExitCode}}", name)
+		if strings.TrimSpace(out) != "0" {
+			t.Errorf("FAIL C11: exit code = %s, want 0", strings.TrimSpace(out))
+		}
+		logPass(t, "PASS C11")
+	})
 }
 
 // --- C12: install-host.sh idempotency ---

@@ -82,20 +82,39 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
-          platforms: linux/amd64
+          # Both architectures, always — contracts/runtime.md R1 amended
+          # 32a4bac: arm64 is not optional. buildx supplies TARGETARCH
+          # per platform; the Dockerfile selects the matching
+          # AGY_URL_*/AGY_SHA512_* pair for each.
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            AGY_URL=${{ vars.AGY_URL }}
-            AGY_SHA512=${{ vars.AGY_SHA512 }}
+            AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}
+            AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}
+            AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}
+            AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}
             AGY_VERSION=${{ vars.AGY_VERSION }}
             VERSION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Pull and smoke-run the published image
+      - name: Pull and smoke-run the published image (both platforms)
         if: github.event_name != 'pull_request'
+        # A multi-arch push produces a manifest list (contracts/runtime.md
+        # R1/R6, amended b41d35a): `docker pull`/`docker run` with no
+        # --platform silently resolves to the runner's OWN architecture
+        # (amd64 on ubuntu-latest) and would leave arm64 completely
+        # untested here — a manifest list makes that failure mode quiet,
+        # since it is "correct" on every host by construction. Chosen
+        # explicitly: pull and run BOTH platforms rather than declaring
+        # this step single-arch-by-design, since the cost is two extra
+        # lines and the alternative is an architecture that ships
+        # untested by this step (the container suite covers it too, but
+        # this is the step that proves the PUBLISHED image specifically
+        # is pullable and runnable, not a locally built one).
+        #
         # GHCR requires a lowercase image path. This repository is
         # already all-lowercase so raw ${{ github.repository }} works
         # today, but it is latent breakage for any repo/org with
@@ -105,5 +124,9 @@ jobs:
         # hand, so it needs the same treatment).
         run: |
           IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel:${{ github.sha }}"
-          docker pull "$IMAGE"
-          docker run --rm "$IMAGE" --version
+          for PLATFORM in linux/amd64 linux/arm64; do
+            echo "::group::$PLATFORM"
+            docker pull --platform "$PLATFORM" "$IMAGE"
+            docker run --rm --platform "$PLATFORM" "$IMAGE" --version
+            echo "::endgroup::"
+          done

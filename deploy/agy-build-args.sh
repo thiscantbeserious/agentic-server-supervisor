@@ -1,25 +1,28 @@
 #!/bin/sh
 # deploy/agy-build-args.sh — R1 ops helper. Fetches the vendor's own
-# manifest and prints the --build-arg triple for the CURRENT agy release,
-# so nobody hand-assembles a download URL and the operator sees the
-# version they are about to pin before pinning it.
+# manifest — once per architecture, amd64 AND arm64 (contracts/runtime.md
+# R1, amended 32a4bac: the image is built and shipped for both) — and
+# prints the full --build-arg set for the CURRENT agy release, so nobody
+# hand-assembles a download URL and the operator sees the version they
+# are about to pin before pinning it.
 #
-#   docker build -f deploy/Dockerfile -t sentinel:dev \
+#   docker buildx build -f deploy/Dockerfile -t sentinel:dev \
+#     --platform linux/amd64,linux/arm64 \
 #     $(deploy/agy-build-args.sh) \
 #     .
 #
-# This script RESOLVES; it never builds and never downloads the tarball
-# itself. The vendor installer is deliberately not run here either — it
-# resolves to latest with no record of which version an image contains,
-# discarding the reproducibility the pin exists to provide
-# (contracts/runtime.md R1). POSIX sh, no jq — the vendor's own installer
-# parses this exact manifest with sed, so this reuses that approach
-# rather than adding a dependency (C1: stdlib/no-new-deps in the runtime
-# path; this is the one ops-side bash artifact already sanctioned for
-# install-host.sh, and the same reasoning applies here).
+# This script RESOLVES; it never builds and never downloads either
+# tarball itself. The vendor installer is deliberately not run here
+# either — it resolves to latest with no record of which version an
+# image contains, discarding the reproducibility the pin exists to
+# provide (contracts/runtime.md R1). POSIX sh, no jq — the vendor's own
+# installer parses this exact manifest with sed, so this reuses that
+# approach rather than adding a dependency (C1: stdlib/no-new-deps in the
+# runtime path; this is the one ops-side bash artifact already sanctioned
+# for install-host.sh, and the same reasoning applies here).
 set -eu
 
-MANIFEST_URL="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json"
+MANIFEST_BASE="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
 
 fetch() {
   if command -v curl >/dev/null 2>&1; then
@@ -32,65 +35,77 @@ fetch() {
   fi
 }
 
-json="$(fetch "$MANIFEST_URL")" || {
-  echo "agy-build-args.sh: could not fetch $MANIFEST_URL" >&2
-  exit 1
-}
-
 # Extract a top-level "key": "value" pair with sed — the manifest is
 # flat JSON today (no nesting), same assumption the vendor's own
-# installer makes about its own file. Round-4 review item 2: that
-# assumption is about a remote document that can change without notice,
-# and a greedy match would silently take the LAST occurrence instead of
-# failing if it ever nests — this round exists because a synthetic
-# fixture certified a wrong assumption about a vendor artifact, so the
-# same discipline applies here: count matches and refuse anything other
-# than exactly 1, rather than silently guessing.
+# installer makes about its own file. Round-4 review item 2 / its own
+# follow-up defect: the count guard must be exactly-one-occurrence, with
+# the key itself genuinely quoted in the grep pattern (a prior version
+# collapsed the quoting via adjacent string concatenation and refused
+# even the live, well-formed manifest — caught only by running it
+# against the real endpoint, not by reading it). `grep -o` emits one
+# line per occurrence (works on a single-line/minified document too),
+# and anchoring on the literal key-plus-colon means a VALUE containing
+# the substring cannot inflate the count.
 field() {
-  # Round-4 review DEFECT (their own proposal, their own catch): the
-  # previous count guard was `grep -c ""$1""`, which the shell collapses
-  # to `grep -c "$1"` — an UNQUOTED key name, so any value containing the
-  # substring inflates the count too — combined with `-c`, which counts
-  # matching LINES, not occurrences, so on a minified single-line
-  # manifest it can only ever return 0 or 1 regardless of how many times
-  # the key actually appears. Reproduced against a manifest with a
-  # nested second "url": the old guard reported 1, the greedy sed then
-  # took the LAST match, and the script emitted the wrong URL paired
-  # with the right (outer) digest — exactly the silent-wrong-guess this
-  # guard exists to refuse. `grep -o` emits one line per occurrence
-  # (works on a single-line document too), and anchoring the pattern on
-  # the literal key-plus-colon means a VALUE containing the substring
-  # cannot inflate the count.
-  key="$1"
-  count="$(printf '%s' "$json" | grep -o "\"$key\"[[:space:]]*:" | grep -c . || true)"
+  manifest_json="$1"
+  key="$2"
+  count="$(printf '%s' "$manifest_json" | grep -o "\"$key\"[[:space:]]*:" | grep -c . || true)"
   if [ "$count" -ne 1 ]; then
     echo "agy-build-args.sh: manifest has $count occurrences of \"$key\", expected exactly 1 — refusing to guess" >&2
     exit 1
   fi
-  printf '%s\n' "$json" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  printf '%s\n' "$manifest_json" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
-version="$(field version)"
-url="$(field url)"
-sha512="$(field sha512)"
+# resolve_arch ARCH prints "url sha512 version" (space-separated, none of
+# which can themselves contain a space in a well-formed manifest) for one
+# architecture's manifest. Every failure path names the architecture, so
+# a build breaks with something the operator can act on rather than a
+# bare "field missing".
+resolve_arch() {
+  arch="$1"
+  manifest_url="$MANIFEST_BASE/linux_${arch}.json"
+  manifest_json="$(fetch "$manifest_url")" || {
+    echo "agy-build-args.sh: could not fetch $manifest_url" >&2
+    exit 1
+  }
 
-if [ -z "$version" ] || [ -z "$url" ] || [ -z "$sha512" ]; then
-  echo "agy-build-args.sh: manifest missing version/url/sha512 — got:" >&2
-  printf '%s\n' "$json" >&2
-  exit 1
+  version="$(field "$manifest_json" version)"
+  url="$(field "$manifest_json" url)"
+  sha512="$(field "$manifest_json" sha512)"
+
+  if [ -z "$version" ] || [ -z "$url" ] || [ -z "$sha512" ]; then
+    echo "agy-build-args.sh: $manifest_url missing version/url/sha512 — got:" >&2
+    printf '%s\n' "$manifest_json" >&2
+    exit 1
+  fi
+
+  # Defense-in-depth, not a real integrity boundary (the sha512 comes
+  # from the same document as the URL) — but it costs one line to refuse
+  # a plaintext download outright rather than silently downgrading a
+  # value about to be handed straight to wget/curl.
+  case "$url" in
+    https://*) ;;
+    *) echo "agy-build-args.sh: $manifest_url URL is not https:// — refusing: $url" >&2; exit 1 ;;
+  esac
+
+  echo "agy-build-args.sh: resolved agy $version ($arch) from $manifest_url" >&2
+  printf '%s %s %s\n' "$url" "$sha512" "$version"
+}
+
+amd64_line="$(resolve_arch amd64)"
+arm64_line="$(resolve_arch arm64)"
+
+amd64_url="$(printf '%s' "$amd64_line" | cut -d' ' -f1)"
+amd64_sha512="$(printf '%s' "$amd64_line" | cut -d' ' -f2)"
+amd64_version="$(printf '%s' "$amd64_line" | cut -d' ' -f3)"
+arm64_url="$(printf '%s' "$arm64_line" | cut -d' ' -f1)"
+arm64_sha512="$(printf '%s' "$arm64_line" | cut -d' ' -f2)"
+arm64_version="$(printf '%s' "$arm64_line" | cut -d' ' -f3)"
+
+if [ "$amd64_version" != "$arm64_version" ]; then
+  echo "agy-build-args.sh: WARNING: amd64 manifest is $amd64_version but arm64 manifest is $arm64_version — the vendor has released asynchronously; using $amd64_version for AGY_VERSION (an OCI label only, does not affect which binary is fetched)" >&2
 fi
 
-# Item 1: the sha512 comes from the same document as the URL, so this is
-# defense-in-depth rather than a real integrity boundary (a compromised
-# manifest could serve a matching pair over either scheme) — but it costs
-# one line to refuse a plaintext download outright rather than silently
-# downgrading a value that is about to be handed straight to wget/curl.
-case "$url" in
-  https://*) ;;
-  *) echo "agy-build-args.sh: manifest URL is not https:// — refusing: $url" >&2; exit 1 ;;
-esac
-
-echo "agy-build-args.sh: resolved agy $version from $MANIFEST_URL" >&2
-
-printf -- '--build-arg AGY_URL=%s --build-arg AGY_SHA512=%s --build-arg AGY_VERSION=%s\n' \
-  "$url" "$sha512" "$version"
+printf -- '--build-arg AGY_URL_AMD64=%s --build-arg AGY_SHA512_AMD64=%s --build-arg AGY_URL_ARM64=%s --build-arg AGY_SHA512_ARM64=%s --build-arg AGY_VERSION=%s\n' \
+  "$amd64_url" "$amd64_sha512" "$arm64_url" "$arm64_sha512" "$amd64_version"

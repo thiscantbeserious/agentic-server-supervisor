@@ -4,14 +4,18 @@
 # ships /bin/bash and coreutils (measured; contracts/runtime.md R1 was
 # corrected to say so, f95693c). Build context is the repo root:
 #
-#   docker build -f deploy/Dockerfile -t sentinel:dev \
+#   docker buildx build -f deploy/Dockerfile -t sentinel:dev \
+#     --platform linux/amd64,linux/arm64 \
 #     $(deploy/agy-build-args.sh) \
 #     .
 #
-# deploy/agy-build-args.sh resolves the current AGY_URL/AGY_SHA512/
-# AGY_VERSION triple from the vendor's own manifest (never hand-assembled,
-# never guessed) — see R1 for why the vendor installer itself is not run
-# at build time instead.
+# deploy/agy-build-args.sh resolves the current per-architecture AGY_URL/
+# AGY_SHA512 pairs (one for amd64, one for arm64) plus AGY_VERSION from
+# the vendor's own manifest (never hand-assembled, never guessed) — see
+# R1 for why the vendor installer itself is not run at build time
+# instead. The build itself resolves nothing from the network: both
+# pairs are ops input, and the one matching TARGETARCH (which buildx
+# supplies per target) is selected inside the build.
 #
 # The binding spec is contracts/runtime.md R1.
 
@@ -19,18 +23,55 @@
 # Stage 1 — builder
 # ---------------------------------------------------------------------------
 ARG GO_IMAGE=golang:1.25-trixie
-FROM ${GO_IMAGE} AS builder
+# --platform=$BUILDPLATFORM (a buildx-supplied automatic ARG: the
+# architecture actually running `docker build`) pins this stage to build
+# NATIVELY regardless of which target(s) buildx is asked for. Without it,
+# `--platform linux/amd64,linux/arm64` runs this ENTIRE stage twice — once
+# per target — so the non-native pass runs gofmt/go vet/go test ./... (and
+# later the agy download + sha512sum + tar over ~205MB) under qemu-user
+# emulation: measured 5-10x slower, on every push, plus a real history of
+# `go test` timing flakiness under emulation that would land as
+# intermittent red CI blamed on the tests rather than on qemu.
+# CGO_ENABLED=0 already makes cross-compilation free, so building natively
+# here costs nothing — GOARCH=${TARGETARCH} below still produces the
+# correct target binary regardless of what this stage itself runs on.
+#
+# This is NOT a repeat of the bug that caused the original incoherent
+# image. That was `--platform=linux/amd64` — a CONSTANT, on the RUNTIME
+# stage, which EXECUTES target-architecture code (agy, sentinel) — so
+# freezing it while GOARCH followed the target produced a userland that
+# disagreed with the binaries inside it. This is $BUILDPLATFORM — a
+# VARIABLE, always equal to the build host's own architecture — on the
+# BUILDER stage, which executes nothing but the Go toolchain and this
+# repo's own tests; it decides WHERE compilation happens, not what
+# architecture the output is. GOARCH=${TARGETARCH} is what decides that,
+# unchanged either way. Do not delete this pin as "the same mistake as
+# before" — it is the opposite fix to the opposite stage.
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
 
-# AGY_URL/AGY_SHA512 are ops input, resolved from the vendor manifest via
-# deploy/agy-build-args.sh — never a guessed URL, never a self-computed
-# digest (R1: the vendor manifest publishes sha512, not sha256; pinning
-# OUR OWN sha256 of whatever we downloaded proves nothing about what the
-# vendor published). Declared after FROM so they survive into this stage
-# (build args declared before FROM are out of scope past it).
-ARG AGY_URL
-ARG AGY_SHA512
+# One URL/digest pair PER ARCHITECTURE, resolved from the vendor manifest
+# via deploy/agy-build-args.sh — never a guessed URL, never a
+# self-computed digest (R1: the vendor manifest publishes sha512, not
+# sha256; pinning OUR OWN sha256 of whatever we downloaded proves
+# nothing about what the vendor published). The one matching TARGETARCH
+# is selected below — this keeps the pin (the operator supplies exact
+# URLs and vendor digests for BOTH architectures; the build resolves
+# nothing from the network) while producing a correct image for
+# whichever target buildx is building. Declared after FROM so they
+# survive into this stage (build args declared before FROM are out of
+# scope past it).
+ARG AGY_URL_AMD64
+ARG AGY_SHA512_AMD64
+ARG AGY_URL_ARM64
+ARG AGY_SHA512_ARM64
 ARG AGY_VERSION=unknown
 ARG VERSION=dev
+# TARGETARCH is a predefined buildx arg: the architecture actually being
+# built (amd64/arm64), independent of the host running `docker build`.
+# Present without a default on any BuildKit-backed builder; the =amd64
+# fallback only matters for a legacy (non-BuildKit) builder, where it is
+# never populated at all.
+ARG TARGETARCH=amd64
 
 WORKDIR /src
 
@@ -45,49 +86,49 @@ RUN test -z "$(gofmt -l .)" || (echo "ERROR: gofmt found unformatted files:" >&2
 RUN go vet ./...
 RUN go test ./...
 
-# GOARCH is hardcoded, not a build knob. Not because agy lacks an arm64
-# artifact — it does not: the vendor also publishes
-# manifests/linux_arm64.json, a distinct tarball with its own sha512.
-# The reason is narrower: this image targets bam, which is amd64; CI
-# pins platforms: linux/amd64 (R6); and AGY_URL/AGY_SHA512 are a SINGLE
-# pinned pair resolved for one architecture at a time via
-# deploy/agy-build-args.sh. A multi-arch image would need the agy URL
-# and digest resolved per target (manifests/linux_<arch>.json, one
-# extra --build-arg pair per platform) — the vendor supports it, this
-# project has not been asked to, and pinning one architecture because
-# one artifact is resolved is a different, correct claim from pinning
-# it because no alternative exists.
-#
-# A round-3 review made this a TARGETARCH-driven ARG on the (at the
-# time reasonable, later-disproven) theory that hardcoding amd64 would
-# break a hypothetical arm64 build. The ARG did not enable multi-arch
-# support — nothing here resolves an arch-specific AGY_URL/AGY_SHA512 —
-# it just silently decoupled stage 1's cross-compile target from stage
-# 2's --platform pin. Verified by round-4 review: `docker build
-# --platform linux/arm64` succeeded, producing an arm64 Go binary in an
-# amd64-userland, arm64-labeled image, and the build-time
-# `sentinel --version` check could not catch it — an arm64 host
-# executes an arm64 static ELF regardless of the image's declared
-# platform (platform is manifest metadata, not an execution sandbox).
-# That image could not exec on a real amd64 host. Deletion is the fix;
-# C1's architecture assertion below is what would have caught it.
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+# GOARCH follows TARGETARCH — restored after two rounds of review found
+# opposite bugs in the two things this can be:
+#   - hardcoded amd64: silently breaks a real arm64 build (this round —
+#     the vendor DOES ship arm64, so a hardcoded value here is just
+#     wrong once the image supports both platforms).
+#   - a TARGETARCH ARG with stage 2 pinned to --platform=linux/amd64
+#     (round 4's finding): stage 1 followed TARGETARCH while stage 2 was
+#     frozen at amd64, so an arm64 build produced an arm64 Go binary
+#     inside an amd64-userland, amd64-labeled runtime image, and the
+#     build-time `sentinel --version` check could not catch it — an
+#     arm64 host executes an arm64 static ELF regardless of the image's
+#     declared platform.
+# The fix both times was incomplete: the safe combination is BOTH
+# stages following TARGETARCH consistently — see the runtime stage's
+# FROM line, which no longer pins a platform either. With both stages
+# tracking the same target, the incoherence cannot arise. C1's
+# coherence assertion (Go binary ELF machine, agy ELF machine, and the
+# image manifest architecture all agreeing with the requested platform)
+# is what verifies this held, for both targets, on every build.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/sentinel ./cmd/sentinel
 
-# agy: download, verify, unpack. AGY_URL/AGY_SHA512 are required — an empty
-# value fails the build with the exact message R1 specifies, never a
-# guessed URL. The tarball does NOT contain a file literally named "agy"
+# agy: select the URL/digest pair matching TARGETARCH, download, verify,
+# unpack. An empty value for the SELECTED pair fails the build naming
+# that pair specifically (e.g. "AGY_URL_ARM64"), never a guessed URL.
+# The tarball does NOT contain a file literally named "agy"
 # (contracts/runtime.md R1, amended 7547238) — the real artifact (verified
-# against version 1.1.15) is a single ELF executable named "antigravity";
-# the vendor's own installer is what renames it to "agy" on install. So
-# this locates THE executable in the archive by permission bit, never by
-# a hardcoded name (a future vendor rename must not break this build
-# again), and fails loudly if that search is ambiguous — zero matches or
-# more than one — rather than silently picking the wrong file.
+# against version 1.1.15, both architectures) is a single ELF executable
+# named "antigravity" on amd64 and on arm64; the vendor's own installer
+# is what renames it to "agy" on install. So this locates THE executable
+# in the archive by permission bit, never by a hardcoded name (a future
+# vendor rename must not break this build again), and fails loudly if
+# that search is ambiguous — zero matches or more than one — rather than
+# silently picking the wrong file.
 RUN set -e; \
-    if [ -z "$AGY_URL" ]; then echo "ERROR: AGY_URL build-arg is required" >&2; exit 1; fi; \
-    if [ -z "$AGY_SHA512" ]; then echo "ERROR: AGY_SHA512 build-arg is required" >&2; exit 1; fi; \
+    case "$TARGETARCH" in \
+      amd64) AGY_URL="$AGY_URL_AMD64"; AGY_SHA512="$AGY_SHA512_AMD64"; ARCH_TAG=AMD64 ;; \
+      arm64) AGY_URL="$AGY_URL_ARM64"; AGY_SHA512="$AGY_SHA512_ARM64"; ARCH_TAG=ARM64 ;; \
+      *) echo "ERROR: unsupported TARGETARCH: $TARGETARCH (agy ships amd64 and arm64 only)" >&2; exit 1 ;; \
+    esac; \
+    if [ -z "$AGY_URL" ]; then echo "ERROR: AGY_URL_${ARCH_TAG} build-arg is required" >&2; exit 1; fi; \
+    if [ -z "$AGY_SHA512" ]; then echo "ERROR: AGY_SHA512_${ARCH_TAG} build-arg is required" >&2; exit 1; fi; \
     mkdir -p /out /tmp/agy; \
     wget -q -O /tmp/agy.tar.gz "$AGY_URL"; \
     echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c -; \
@@ -108,22 +149,20 @@ RUN set -e; \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
-# Pinned to linux/amd64 explicitly (not left to the build host's native
-# arch): this image targets bam (amd64) and is built from a SINGLE
-# resolved AGY_URL/AGY_SHA512 pair (deploy/agy-build-args.sh resolves
-# one architecture per run) — not because the vendor lacks an arm64
-# artifact (it does not, see the GOARCH comment above). This stage is
-# where agy actually EXECUTES (the build-time verification below runs
-# it directly, not just copies it), so it must match the architecture
-# the pinned pair was resolved for, regardless of what machine runs
-# `docker build`. Stage 1 deliberately
-# does NOT get this pin: it only needs to cross-compile a static Go
-# binary (GOARCH=amd64, hardcoded — see that RUN step's comment), and
-# forcing stage 1 to amd64 too would put the ENTIRE go vet/test suite
-# under qemu-user emulation on a non-amd64 build host — measured:
-# 5-10x slower, with no correctness benefit since nothing in stage 1
-# executes target-architecture code.
-FROM --platform=linux/amd64 debian:trixie-slim AS runtime
+# NO --platform pin here, deliberately: buildx sets the platform per
+# target it is building (linux/amd64 and linux/arm64, R6), and this
+# stage is where agy actually EXECUTES (the build-time verification
+# below runs it directly, not just copies it), so it must track
+# whatever target is being built, not a hardcoded one. A round-4 review
+# found the previous version of this line (`--platform=linux/amd64`)
+# combined with stage 1 following TARGETARCH produced exactly the
+# three-way mismatch this file exists to prevent: an arm64 Go binary
+# cross-compiled in stage 1, copied into a stage 2 forced to amd64. The
+# fix is that BOTH stages now follow TARGETARCH — stage 1 via
+# GOARCH=${TARGETARCH} (see that RUN step), stage 2 by simply not
+# overriding the platform buildx already selected for it. Do not
+# reintroduce a platform constant on either stage.
+FROM debian:trixie-slim AS runtime
 
 ARG AGY_VERSION=unknown
 ARG VERSION=dev
