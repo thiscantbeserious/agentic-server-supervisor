@@ -33,8 +33,8 @@ import (
 // observe an escape by construction — that tautology is what let this
 // class through review more than once.
 //
-// Adapted from t5-review2's probe harness (used across three review
-// rounds; validated 15/15 FAIL on the pre-guard build, PASS on the fix).
+// Validated 15/15 FAIL on a build without the path-escape guard, PASS
+// once it is present.
 
 var hexKeyRe = regexp.MustCompile(`^[0-9a-f]{16}\.json$`)
 
@@ -142,8 +142,8 @@ func TestTraversal_ReportKeyKeepsWritesInsideStateDir(t *testing.T) {
 
 			// Do NOT abort on err. On a vulnerable build the write
 			// happens first and the error is raised afterwards by output
-			// validation; aborting here would hide the escape (this is
-			// the weak-guardian defect from round 1 of T5 review).
+			// validation; aborting here on the error would hide an
+			// escape that already happened before the error fired.
 			d, err := s.Process(reportWithKey(tc.key, "watch", "zfs", "probe evidence line for "+tc.name))
 			after := snap(t, root)
 
@@ -292,8 +292,8 @@ func TestTraversal_ResolvedDeleteUsesFilenameNotStoredKey(t *testing.T) {
 	}
 }
 
-// Class 2, sink B: BLOCKER 1 from t5-review2. Step (d)'s "exists" branch
-// loads an active alert via loadAlert(key) and, pre-fix, trusted
+// Class 2, sink B: step (d)'s "exists" branch loads an active alert via
+// loadAlert(key) and, without the fix, would trust
 // alert.Key from the record's own JSON body for the saveAlert rewrite
 // immediately after — a record at a legitimate filename whose body
 // claims "key":"../../pwned" would be rewritten straight back out to

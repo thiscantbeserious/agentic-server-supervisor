@@ -146,10 +146,10 @@ func TestLoop_Shutdown(t *testing.T) {
 	}
 }
 
-// TestNextTickSeq_MissingWarnsToo is round-3 item 9: R3.1 says "Missing or
-// unparseable ⇒ start at 1 and WARN" — the pre-fix code only warned on the
-// unparseable branch, so the far more common real case (a fresh $STATE_DIR
-// on first boot, tick-seq simply absent) started at 1 silently.
+// TestNextTickSeq_MissingWarnsToo asserts R3.1's "Missing or unparseable
+// ⇒ start at 1 and WARN" covers the missing case, not just unparseable —
+// the far more common real case (a fresh $STATE_DIR on first boot,
+// tick-seq simply absent) must not start at 1 silently.
 func TestNextTickSeq_MissingWarnsToo(t *testing.T) {
 	cfg := testConfig(t, tick0)
 	var logBuf bytes.Buffer

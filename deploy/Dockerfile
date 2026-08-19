@@ -87,25 +87,21 @@ RUN test -z "$(gofmt -l .)" || (echo "ERROR: gofmt found unformatted files:" >&2
 RUN go vet ./...
 RUN go test ./...
 
-# GOARCH follows TARGETARCH — restored after two rounds of review found
-# opposite bugs in the two things this can be:
-#   - hardcoded amd64: silently breaks a real arm64 build (this round —
-#     the vendor DOES ship arm64, so a hardcoded value here is just
-#     wrong once the image supports both platforms).
-#   - a TARGETARCH ARG with stage 2 pinned to --platform=linux/amd64
-#     (round 4's finding): stage 1 followed TARGETARCH while stage 2 was
-#     frozen at amd64, so an arm64 build produced an arm64 Go binary
-#     inside an amd64-userland, amd64-labeled runtime image, and the
-#     build-time `sentinel --version` check could not catch it — an
-#     arm64 host executes an arm64 static ELF regardless of the image's
-#     declared platform.
-# The fix both times was incomplete: the safe combination is BOTH
-# stages following TARGETARCH consistently — see the runtime stage's
-# FROM line, which no longer pins a platform either. With both stages
-# tracking the same target, the incoherence cannot arise. C1's
-# coherence assertion (Go binary ELF machine, agy ELF machine, and the
-# image manifest architecture all agreeing with the requested platform)
-# is what verifies this held, for both targets, on every build.
+# GOARCH follows TARGETARCH — the vendor ships arm64, so hardcoding
+# amd64 here silently breaks a real arm64 build. Doing this correctly
+# also requires the runtime stage (below) to NOT pin a platform: a
+# TARGETARCH-following stage 1 paired with a stage 2 frozen at
+# --platform=linux/amd64 produces an arm64 Go binary inside an
+# amd64-userland, amd64-labeled runtime image, and the build-time
+# `sentinel --version` check cannot catch it — an arm64 host executes an
+# arm64 static ELF regardless of the image's declared platform. The safe
+# combination is BOTH stages following TARGETARCH consistently — see the
+# runtime stage's FROM line, which does not pin a platform either. With
+# both stages tracking the same target, this incoherence cannot arise.
+# C1's coherence assertion (Go binary ELF machine, agy ELF machine, and
+# the image manifest architecture all agreeing with the requested
+# platform) is what verifies this held, for both targets, on every
+# build.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/sentinel ./cmd/sentinel

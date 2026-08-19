@@ -859,9 +859,9 @@ func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
-// TestOutboxTake_SkipsBodyIDFilenameMismatch is t5-review2's outbox
-// blocker: OutboxTake returned entry.ID straight from the file's JSON
-// body, not the filename it was read from. A body id of "../../pwned"
+// TestOutboxTake_SkipsBodyIDFilenameMismatch asserts OutboxTake does not
+// return entry.ID straight from the file's JSON body without checking it
+// against the filename it was read from. A body id of "../../pwned"
 // isn't itself a write escape (outboxIDRe still blocks OutboxAck's path
 // join), but tick can never ack an id that never matches outboxIDRe, so
 // the entry retries — and re-sends via SMTP once attempts crosses
@@ -876,8 +876,8 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 		bodyID   string
 	}{
 		{"body disagrees with filename", "1000-000.json", "../../pwned"},
-		// The agy gate found the door the first guard missed: filename and
-		// body AGREE, but on a value outboxIDRe (OutboxAck's own standard)
+		// A door an agreement-only guard misses: filename and body
+		// AGREE, but on a value outboxIDRe (OutboxAck's own standard)
 		// would refuse. Checking only "do the two sides agree with each
 		// other" lets this through — OutboxTake then hands tick a
 		// real-looking id that OutboxAck can never ack, so the entry
@@ -955,11 +955,10 @@ func captureStateLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestStateLogger_HonorsLogLevel is the T5 fix for a T2 foundation gap
-// (t5-review2, routed through main): outbox.go's stateLogger() used to
-// hardcode slog.LevelInfo regardless of cfg.LogLevel — LOG_LEVEL=DEBUG
-// produced no extra output and LOG_LEVEL=ERROR suppressed nothing.
-// Drives the real construction path: s.stateLogger(), the exact method
+// TestStateLogger_HonorsLogLevel asserts outbox.go's stateLogger() wires
+// cfg.LogLevel through rather than hardcoding slog.LevelInfo — otherwise
+// LOG_LEVEL=DEBUG would produce no extra output and LOG_LEVEL=ERROR would
+// suppress nothing. Drives the real construction path: s.stateLogger(), the exact method
 // trimOutbox calls, built from a Store whose cfg.LogLevel came through
 // unmodified — not a hand-built slog.Logger, which would pass even if
 // stateLogger() itself never read s.cfg.LogLevel.

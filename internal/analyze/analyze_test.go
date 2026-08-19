@@ -64,12 +64,11 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestNewLogger_HonorsLogLevel is the T5 fix for a T2 foundation gap
-// (t5-review2, routed through main): analyze.go's Run() used to call
-// newLogger() with no argument, which hardcoded slog.LevelInfo regardless
-// of cfg.LogLevel — LOG_LEVEL=DEBUG produced no extra output and
-// LOG_LEVEL=ERROR suppressed nothing, despite config.Load() validating
-// the variable strictly enough to refuse startup over a typo (exit 78).
+// TestNewLogger_HonorsLogLevel asserts Run() wires cfg.LogLevel through
+// to newLogger() rather than hardcoding slog.LevelInfo — otherwise
+// LOG_LEVEL=DEBUG would produce no extra output and LOG_LEVEL=ERROR would
+// suppress nothing, despite config.Load() validating the variable
+// strictly enough to refuse startup over a typo (exit 78).
 //
 // Drives the real construction path end to end — LOG_LEVEL through
 // config.Load(), then logging.ParseLevel(cfg.LogLevel) into newLogger(),
