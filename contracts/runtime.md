@@ -362,7 +362,22 @@ Requires root (`EUID=0`), else exit `77`. Requires Debian/`apt-get` + `systemctl
 2. `systemctl enable --now rasdaemon` — skipped when already enabled **and** active.
 3. Write `/etc/msmtprc`: smarthost `--mailrise-host:--mailrise-port`, `from sentinel@<hostname>`. Mode `0600`, owner `root:root`.
 
-   **When `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS` are present in the env file, write `auth on` together with `user <MAILRISE_SMTP_USER>` and `password <MAILRISE_SMTP_PASS>`.** `auth on` without both is not a weaker configuration, it is a broken one: msmtp exits `69` with `cannot use a secure authentication method` and `--debug` reports `user = (not set)`, `password = (not set)`. Verified against real msmtp on Debian 13 against a server advertising `AUTH PLAIN LOGIN`.
+   **When `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS` are present in the env file, write exactly:**
+   ```
+   auth plain
+   tls off
+   user <MAILRISE_SMTP_USER>
+   password <MAILRISE_SMTP_PASS>
+   ```
+
+   **`auth on` does not work here and neither does omitting the credentials.** Both were specified in earlier drafts of this clause and both were measured failing against real msmtp 1.8.28 on Debian 13, with a server advertising `AUTH PLAIN LOGIN` exactly as mailrise does:
+   - `auth on` with credentials ⇒ exit `69`, `cannot use a secure authentication method`. `auth on` means "auto-select the safest method", and msmtp's policy refuses PLAIN and LOGIN — the only methods a plaintext listener offers — under auto-selection. Adding `tls off` does not change it.
+   - `auth on` without credentials ⇒ the same exit `69`, with `--debug` reporting `user = (not set)`, `password = (not set)`.
+   - `auth plain` + `tls off` with credentials ⇒ exit `0`, real AUTH PLAIN handshake, mail delivered.
+
+   Naming the method explicitly is what bypasses the auto-selection guard.
+
+   **This is the same policy the Go side already had to work around, and the two must stay recognisable as one decision.** `internal/notify/smtpfallback.go` carries `plainAuthNoTLS`, a local `smtp.Auth`, precisely because Go's stdlib `smtp.PlainAuth` also refuses PLAIN over a non-TLS connection. `auth plain` is msmtp's equivalent of that bypass. Both exist for one reason: mailrise is a LAN-only plaintext listener (`mailrise.conf` `tls: off`). **Upgrade path, for both at once:** when the listener gets a certificate, this becomes `auth on` + STARTTLS and `plainAuthNoTLS` becomes `smtp.PlainAuth`. Change them together or the two SMTP clients drift apart.
 
    This is the production branch, not an edge case — R4 hard-requires both variables with `:?`, so on any real host they are set. And `auth off` is not a fallback, because mailrise enforces SMTP AUTH unconditionally (see the `smtpFallback` unconfigured rule in contracts/notify.md N.4). **Neither branch delivering means smartd and ZED cannot send mail at all** — that is the host-side LLM-free path, the one carrying SMART failures and ZFS pool events, and it would fail silently with `sentinel health` staying green.
 
