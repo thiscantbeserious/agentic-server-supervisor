@@ -946,6 +946,14 @@ func TestContainer_C6_TmpfsAndTZ(t *testing.T) {
 func TestContainer_C9_TickExitCodes(t *testing.T) {
 	forEachArch(t, func(t *testing.T) {
 		stateDir := t.TempDir()
+		// state.New(cfg) creates active-alerts/history/outbox under
+		// STATE_DIR at 0700 (internal/state/state.go) BEFORE any of the
+		// config/journal preflight checks these tick invocations exit on
+		// — every one of them reaches that far, not just the ones that
+		// go on to succeed. Same reclaim as C11 needs for AGY_HOME, same
+		// underlying cause: a directory the container creates under a
+		// bind-mounted STATE_DIR, owned by its own uid.
+		reclaimHostDir(t, stateDir)
 		// The container runs as uid 10001 (Dockerfile USER sentinel), distinct
 		// from the host uid that owns a Go-created t.TempDir() (default 0700).
 		// A bind mount does not remap ownership, so without this the STATE_DIR
@@ -1143,9 +1151,48 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 
 // --- C11: SIGTERM shutdown + healthcheck ---
 
+// reclaimHostDir registers a cleanup that chowns everything under hostDir
+// back to the invoking host user, via a throwaway root container, so
+// Go's own t.TempDir() removal — which runs as that host user — can
+// actually delete a tree the sentinel image wrote into as its own
+// container uid (10001). On rootful Docker (a real CI runner) that uid
+// is a foreign owner on the host side; a subdirectory the container
+// creates with a restrictive mode (e.g. seedAgyHome's 0700 AGY_HOME)
+// blocks the host user from recursing into it, and t.TempDir()'s
+// automatic RemoveAll then fails with "permission denied" — which is
+// exactly what surfaced running this suite against real Docker for the
+// first time. Rootless podman never shows this: it remaps the
+// container's uid to the invoking host user, so nothing it writes is
+// ever foreign ownership to begin with.
+//
+// t.Cleanup funcs run LIFO, so calling this AFTER t.TempDir() — never
+// before — makes it run BEFORE TempDir's own removal, leaving the tree
+// host-owned by the time Go's cleanup fires. It must be registered even
+// when this specific call turns out to have written nothing, since a
+// docker image is already required to reach this point (forEachArch's
+// requireImage already skipped otherwise) and the chown is a harmless
+// no-op on a tree the host user already owns.
+func reclaimHostDir(t *testing.T, hostDir string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm",
+			"-u", "0:0", "-v", hostDir+":/x",
+			"--entrypoint", "chown",
+			imageTag, "-R", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "/x")
+		if code != 0 {
+			// Loud, not silent: an ownership reclaim that fails and gets
+			// swallowed leaves root/foreign-uid files on the runner after
+			// every future run too — this test must not litter the host
+			// it ran on.
+			t.Errorf("cleanup: reclaiming host ownership of %s failed (code=%d): %s", hostDir, code, errOut)
+		}
+	})
+}
+
 func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 	forEachArch(t, func(t *testing.T) {
 		stateDir := t.TempDir()
+		reclaimHostDir(t, stateDir)
 		// Container runs as uid 10001 (Dockerfile USER sentinel); a bind mount
 		// does not remap host ownership, so the STATE_DIR write-probe needs
 		// this to pass preflight at all (same reasoning as C9 above).
