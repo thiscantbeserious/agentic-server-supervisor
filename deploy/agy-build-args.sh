@@ -1,10 +1,10 @@
 #!/bin/sh
 # deploy/agy-build-args.sh — R1 ops helper. Fetches the vendor's own
 # manifest — once per architecture, amd64 AND arm64 (contracts/runtime.md
-# R1, amended 32a4bac: the image is built and shipped for both) — and
-# prints the full --build-arg set for the CURRENT agy release, so nobody
-# hand-assembles a download URL and the operator sees the version they
-# are about to pin before pinning it.
+# R1: the image is built and shipped for both) — and prints the full
+# --build-arg set for the CURRENT agy release, so nobody hand-assembles
+# a download URL and the operator sees the version they are about to pin
+# before pinning it.
 #
 #   docker buildx build -f deploy/Dockerfile -t sentinel:dev \
 #     --platform linux/amd64,linux/arm64 \
@@ -37,15 +37,17 @@ fetch() {
 
 # Extract a top-level "key": "value" pair with sed — the manifest is
 # flat JSON today (no nesting), same assumption the vendor's own
-# installer makes about its own file. Round-4 review item 2 / its own
-# follow-up defect: the count guard must be exactly-one-occurrence, with
-# the key itself genuinely quoted in the grep pattern (a prior version
-# collapsed the quoting via adjacent string concatenation and refused
-# even the live, well-formed manifest — caught only by running it
-# against the real endpoint, not by reading it). `grep -o` emits one
-# line per occurrence (works on a single-line/minified document too),
-# and anchoring on the literal key-plus-colon means a VALUE containing
-# the substring cannot inflate the count.
+# installer makes about its own file. The occurrence count must be built
+# from a genuinely-quoted key: writing the pattern as adjacent strings —
+# `""$key""` — lets the shell collapse the empty-quote pairs around it,
+# so the grep pattern ends up unquoted and matches nothing against a
+# real, correctly-quoted manifest key. Assigning the key to its own
+# variable first and quoting it explicitly in the pattern
+# (`""$key"..."`) keeps the quoting literal instead of depending on
+# string concatenation. `grep -o` emits one line per occurrence (works
+# on a single-line/minified document too), and anchoring on the literal
+# key-plus-colon means a VALUE containing the substring cannot inflate
+# the count.
 field() {
   manifest_json="$1"
   key="$2"

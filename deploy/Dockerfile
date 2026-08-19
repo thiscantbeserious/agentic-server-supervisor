@@ -36,17 +36,18 @@ ARG GO_IMAGE=golang:1.25-trixie
 # here costs nothing — GOARCH=${TARGETARCH} below still produces the
 # correct target binary regardless of what this stage itself runs on.
 #
-# This is NOT a repeat of the bug that caused the original incoherent
-# image. That was `--platform=linux/amd64` — a CONSTANT, on the RUNTIME
-# stage, which EXECUTES target-architecture code (agy, sentinel) — so
-# freezing it while GOARCH followed the target produced a userland that
-# disagreed with the binaries inside it. This is $BUILDPLATFORM — a
-# VARIABLE, always equal to the build host's own architecture — on the
-# BUILDER stage, which executes nothing but the Go toolchain and this
-# repo's own tests; it decides WHERE compilation happens, not what
-# architecture the output is. GOARCH=${TARGETARCH} is what decides that,
-# unchanged either way. Do not delete this pin as "the same mistake as
-# before" — it is the opposite fix to the opposite stage.
+# The distinction that matters here is which stage a platform pin sits
+# on, not just that one exists. A CONSTANT platform on a stage that
+# EXECUTES target-architecture code (agy, sentinel, in the runtime
+# stage) produces a userland that disagrees with the binaries inside it
+# whenever the constant doesn't match the actual target. A VARIABLE like
+# $BUILDPLATFORM, always equal to the build host's own architecture, on
+# a stage that only COMPILES and runs this repo's own tests — never the
+# target binaries — decides WHERE compilation happens, not what
+# architecture the output is; GOARCH=${TARGETARCH} alone decides that,
+# unchanged either way. Do not delete this pin by pattern-matching it
+# against a platform-pinning mistake elsewhere: the two are the opposite
+# fix, on the opposite kind of stage.
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
 
 # One URL/digest pair PER ARCHITECTURE, resolved from the vendor manifest
@@ -112,15 +113,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
 # agy: select the URL/digest pair matching TARGETARCH, download, verify,
 # unpack. An empty value for the SELECTED pair fails the build naming
 # that pair specifically (e.g. "AGY_URL_ARM64"), never a guessed URL.
-# The tarball does NOT contain a file literally named "agy"
-# (contracts/runtime.md R1, amended 7547238) — the real artifact (verified
-# against version 1.1.15, both architectures) is a single ELF executable
-# named "antigravity" on amd64 and on arm64; the vendor's own installer
-# is what renames it to "agy" on install. So this locates THE executable
-# in the archive by permission bit, never by a hardcoded name (a future
-# vendor rename must not break this build again), and fails loudly if
-# that search is ambiguous — zero matches or more than one — rather than
-# silently picking the wrong file.
+# The tarball does NOT contain a file literally named "agy" — the real
+# artifact (verified against version 1.1.15, both architectures) is a
+# single ELF executable named "antigravity" on amd64 and on arm64; the
+# vendor's own installer is what renames it to "agy" on install. So this
+# locates THE executable in the archive by permission bit, never by a
+# hardcoded name (a future vendor rename must not break this build
+# again), and fails loudly if that search is ambiguous — zero matches or
+# more than one — rather than silently picking the wrong file.
 RUN set -e; \
     case "$TARGETARCH" in \
       amd64) AGY_URL="$AGY_URL_AMD64"; AGY_SHA512="$AGY_SHA512_AMD64"; ARCH_TAG=AMD64 ;; \
@@ -153,13 +153,12 @@ RUN set -e; \
 # target it is building (linux/amd64 and linux/arm64, R6), and this
 # stage is where agy actually EXECUTES (the build-time verification
 # below runs it directly, not just copies it), so it must track
-# whatever target is being built, not a hardcoded one. A round-4 review
-# found the previous version of this line (`--platform=linux/amd64`)
-# combined with stage 1 following TARGETARCH produced exactly the
-# three-way mismatch this file exists to prevent: an arm64 Go binary
-# cross-compiled in stage 1, copied into a stage 2 forced to amd64. The
-# fix is that BOTH stages now follow TARGETARCH — stage 1 via
-# GOARCH=${TARGETARCH} (see that RUN step), stage 2 by simply not
+# whatever target is being built, not a hardcoded one. A CONSTANT
+# platform here, combined with stage 1 following TARGETARCH, produces
+# exactly the three-way mismatch this file exists to prevent: a Go
+# binary cross-compiled for one architecture in stage 1, copied into a
+# stage 2 frozen at another. Both stages must follow TARGETARCH — stage
+# 1 via GOARCH=${TARGETARCH} (see that RUN step), stage 2 by simply not
 # overriding the platform buildx already selected for it. Do not
 # reintroduce a platform constant on either stage.
 FROM debian:trixie-slim AS runtime

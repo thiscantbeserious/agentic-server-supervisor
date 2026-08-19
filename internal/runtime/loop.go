@@ -79,8 +79,8 @@ func dirReadableNonEmpty(dir string) bool {
 	return err == nil && len(entries) > 0
 }
 
-// checkJournalReadable is the T7 obligation recorded in PLAN.md above the
-// T8 entry: R2's filesystem preflight (dirReadableNonEmpty above) proves
+// checkJournalReadable exists because R2's filesystem preflight
+// (dirReadableNonEmpty above) only proves
 // the configured journal directory exists and has files in it — it does
 // NOT prove journald will hand the unprivileged sentinel user any journal
 // CONTENT. A stale JOURNAL_GID, an ineffective group_add, or a wrong
@@ -232,11 +232,11 @@ func StartupPreflight(ctx context.Context, cfg *config.Config) (int, error) {
 		return 78, err
 	}
 
-	// T7 obligation (PLAN.md, above the T8 entry): the directory-level
-	// check above proves the mount exists and is listable; it does not
-	// prove journalctl can actually read journal CONTENT through it. Run
-	// before the first tick so a stale JOURNAL_GID fails loud at startup
-	// instead of silently reporting all-clear forever.
+	// The directory-level check above proves the mount exists and is
+	// listable; it does not prove journalctl can actually read journal
+	// CONTENT through it. Run before the first tick so a stale
+	// JOURNAL_GID fails loud at startup instead of silently reporting
+	// all-clear forever.
 	//
 	// ctx is deliberately NOT the shutdown-signal context both callers
 	// hold (Loop's sigCtx, --once's request context): wiring a

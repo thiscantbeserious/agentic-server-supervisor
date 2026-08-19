@@ -1,7 +1,7 @@
 //go:build container
 
-// Package test holds the T7 container smoke assertions (contracts/runtime.md
-// R8, table C1-C13). Run with:
+// Package test holds the container smoke assertions for the sentinel
+// image (contracts/runtime.md R8, table C1-C13). Run with:
 //
 //	go test -tags container ./test/...
 //
@@ -12,13 +12,13 @@
 // (R6) — only by a dedicated container job/local run on a real Linux host.
 //
 // AGY_URL_AMD64/AGY_SHA512_AMD64 and AGY_URL_ARM64/AGY_SHA512_ARM64: real
-// ops input (contracts/runtime.md R1, amended 32a4bac — the image builds
-// and works on BOTH architectures), never guessed here. If a given
-// architecture's pair is set in the environment, the real tarball for
-// that arch is used. Otherwise a SYNTHETIC local fixture (a fake "agy"
-// shell script, served by an in-process httptest.Server — arch-agnostic,
-// since it's an interpreted script) stands in, so the Dockerfile's OWN
-// mechanics (download, sha512 verify, unpack, permissions, build-time
+// ops input (contracts/runtime.md R1 — the image builds and works on
+// BOTH architectures), never guessed here. If a given architecture's
+// pair is set in the environment, the real tarball for that arch is
+// used. Otherwise a SYNTHETIC local fixture (a fake "agy" binary,
+// cross-compiled for the target architecture and served by an in-process
+// httptest.Server) stands in, so the Dockerfile's OWN mechanics
+// (download, sha512 verify, unpack, permissions, build-time
 // verification) are still exercised end to end for both platforms
 // without ever touching a real or guessed download location. Every case
 // that needs a built image runs against BOTH linux/amd64 and
@@ -56,9 +56,8 @@ import (
 // parameter through the ~25 call sites that reference it.
 var imageTag string
 
-// containerArches is the full build matrix, per contracts/runtime.md R1
-// (amended 32a4bac): "the image must build and work on linux/amd64 AND
-// linux/arm64. Both, now."
+// containerArches is the full build matrix, per contracts/runtime.md R1:
+// the image must build and work on both linux/amd64 and linux/arm64.
 var containerArches = []string{"amd64", "arm64"}
 
 func imageTagFor(arch string) string {
@@ -66,10 +65,9 @@ func imageTagFor(arch string) string {
 }
 
 // logPass logs a "PASS ..." line only when nothing in this test has
-// already failed (round-3 review finding: an unconditional t.Log("PASS
-// ...") after a loop of non-fatal t.Errorf calls prints PASS right below
-// the FAIL lines it contradicts — misleading in a document meant to be
-// the PR's gate record).
+// already failed. An unconditional t.Log("PASS ...") after a loop of
+// non-fatal t.Errorf calls prints PASS right below the FAIL lines it
+// contradicts — misleading in a document meant to be a gate record.
 func logPass(t *testing.T, format string, args ...any) {
 	t.Helper()
 	if !t.Failed() {
@@ -127,17 +125,16 @@ var (
 )
 
 // fakeAgyMain is a minimal Go program cross-compiled into a REAL,
-// architecture-correct static ELF binary — not a #!/bin/sh script.
-// Round-5 requirement: C1's coherence check now reads agy's own ELF
-// e_machine (main's explicit ask, "the piece a wrong URL pair would
-// corrupt silently"), and a shell script has no ELF header at all to
-// read — the very first attempt at this fixture produced garbage bytes
-// at the e_machine offset and would have failed C1 on every run,
-// synthetic-fixture or not. A cross-compiled Go binary is real ELF, for
-// whichever GOARCH it was built with, so the same coherence check that
-// verifies the real vendor artifact also verifies this fixture — and
-// building it deliberately for the WRONG architecture is exactly the
-// mutation main asked for ("build arm64 with the amd64 agy pair").
+// architecture-correct static ELF binary — not a #!/bin/sh script. C1's
+// coherence check reads agy's own ELF e_machine, since that is the
+// value a wrong URL/digest pair would corrupt silently, and a shell
+// script has no ELF header at all for that check to read — an empty
+// header reads as a mismatch on every run, synthetic-fixture or not. A
+// cross-compiled Go binary is real ELF, for whichever GOARCH it was
+// built with, so the same coherence check that verifies the real
+// vendor artifact also verifies this fixture, including when it is
+// deliberately cross-compiled for the WRONG architecture to prove the
+// check actually fires.
 const fakeAgySrc = `package main
 
 import (
@@ -159,12 +156,12 @@ func main() {
 // arch-specific content, not just an arch-specific tag).
 //
 // The fixture executable is deliberately named "not-agy", NOT "agy"
-// (contracts/runtime.md R1, amended 7547238): the real vendor tarball
-// contains a single ELF executable named "antigravity" — the vendor's own
-// installer is what renames it to "agy" on install — so a fixture literally
-// named "agy" was certifying exactly the extraction bug that broke the
-// real build (Dockerfile searched for a file already called "agy", which
-// matches nothing in the real archive). This fixture now exercises the
+// (contracts/runtime.md R1): the real vendor tarball contains a single
+// ELF executable named "antigravity" — the vendor's own installer is
+// what renames it to "agy" on install. A fixture literally named "agy"
+// would let the extraction step match on filename and mask the case
+// where the real archive has no such name to match. This fixture
+// exercises the
 // same shape: one executable, not named "agy", found by permission bit.
 func syntheticAgy(t *testing.T, arch string) (url, sha string) {
 	t.Helper()
@@ -293,10 +290,10 @@ func pick(arch, want, val string) string {
 }
 
 // dockerAvailable is a cheap, cached "is the Docker/Podman daemon even
-// reachable" probe — round-2 review item 8: requireImage used to map
-// EVERY build failure to a SKIP claiming "not a Dockerfile defect",
-// which would also SKIP a real Dockerfile regression silently instead of
-// failing the run. Checked once per test binary run.
+// reachable" probe, checked once per test binary run — kept separate
+// from a build failure so an unreachable daemon SKIPs while a real
+// Dockerfile regression still FAILs, rather than both collapsing into
+// the same "not a Dockerfile defect" SKIP.
 var (
 	dockerAvailOnce sync.Once
 	dockerAvailErr  error
@@ -339,8 +336,8 @@ func requireImage(t *testing.T, arch string) {
 // distinctly and does not prevent the other from running), building the
 // image for that architecture first via requireImage. This is what lets
 // every existing C-series test run against both linux/amd64 and
-// linux/arm64 (contracts/runtime.md R1, amended 32a4bac) without
-// threading an arch parameter through each test body.
+// linux/arm64 (contracts/runtime.md R1) without threading an arch
+// parameter through each test body.
 // currentArch is set by forEachArch before each subtest runs — same
 // package-var pattern as imageTag, safe for the same reason (no
 // t.Parallel anywhere in this file).
@@ -376,7 +373,7 @@ func wantELFMachine(arch string) string {
 // fails the test unless it matches arch. `od` (coreutils) is used
 // because `file` is not installed in the runtime image (R1's explicit
 // package list). This is one of the three coherence signals
-// contracts/runtime.md R1 (amended 32a4bac) requires C1 to check: "the
+// contracts/runtime.md R1 requires C1 to check: "the
 // Go binary's ELF machine, the image manifest's architecture, and the
 // agy binary's ELF machine all agree with the platform that was
 // requested."
@@ -432,15 +429,14 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 		t.Run(arch, func(t *testing.T) {
 			real := realAgyValues[arch]
 
-			// Round-4 review item 3: this URL is pinned to one specific
-			// vendor release (1.1.15) rather than re-resolved from the
-			// manifest each run, so when the vendor rotates it this URL
-			// can 404 for a reason that has nothing to do with this
-			// repo. Distinguish "the pinned artifact is gone" (SKIP,
-			// loudly, same as requireImage's daemon-unreachable case)
-			// from "the build itself is broken" (FAIL) with a cheap
-			// reachability check before spending minutes on a doomed
-			// build.
+			// This URL is pinned to one specific vendor release rather
+			// than re-resolved from the manifest each run, so when the
+			// vendor rotates it this URL can 404 for a reason that has
+			// nothing to do with this repo. Distinguish "the pinned
+			// artifact is gone" (SKIP, loudly, same as requireImage's
+			// daemon-unreachable case) from "the build itself is
+			// broken" (FAIL) with a cheap reachability check before
+			// spending minutes on a doomed build.
 			if resp, err := http.Head(real.url); err != nil {
 				t.Skipf("SKIP: %s unreachable (%v) — pinned to agy %s (%s), needs a refresh if the vendor has rotated past it", arch, err, real.version, arch)
 			} else {
@@ -538,25 +534,28 @@ func TestContainer_C1_StartsUnprivileged(t *testing.T) {
 		if code != 0 || !strings.Contains(out, "container-test") {
 			t.Fatalf("FAIL C1: sentinel --version = %q (code=%d), want to contain the stamped version", out, code)
 		}
-		// Round-4 review DEFECT, and its round-5 correction: a stray
-		// GOARCH=${TARGETARCH} knob combined with a stage-2
-		// --platform=linux/amd64 pin let an arm64 buildx host silently
-		// produce an arm64-Go-binary-in-an-amd64-labeled-image, and the
-		// build-time `sentinel --version` check could not catch it — a
-		// host executes a static ELF matching its OWN arch regardless of
-		// the image's declared platform (platform is manifest metadata,
-		// not an execution sandbox). Both stages now follow TARGETARCH
-		// (contracts/runtime.md R1, amended 32a4bac — arm64 support is
-		// required, not optional), so asserting a CONSTANT architecture
-		// here would fail every legitimate arm64 build. What must hold is
-		// COHERENCE: the image manifest's declared architecture, the Go
-		// binary's real ELF machine, AND agy's own real ELF machine must
-		// all agree with the platform THIS subtest requested
-		// (currentArch, set by forEachArch). agy's ELF is the signal
-		// round-4's fix did not check — it is the one a wrong
-		// AGY_URL_<ARCH>/AGY_SHA512_<ARCH> pairing would corrupt
-		// silently, since the extraction step never inspects the
-		// architecture of what it downloads.
+		// A host executes a static ELF matching its OWN architecture
+		// regardless of an image's declared platform — platform is
+		// manifest metadata, not an execution sandbox — so a stage that
+		// cross-compiles for one architecture while another stage is
+		// frozen at a different one can produce an image whose
+		// build-time `--version` check still passes cleanly. Because
+		// arm64 is a legitimate build target here, not just amd64,
+		// asserting a CONSTANT architecture would fail every legitimate
+		// arm64 build. What must hold instead is COHERENCE: the image
+		// manifest's declared architecture, the Go binary's real ELF
+		// machine, AND agy's own real ELF machine must all agree with
+		// the platform THIS subtest requested (currentArch, set by
+		// forEachArch). agy's ELF matters because the extraction step
+		// never inspects the architecture of what it downloads — a
+		// mismatched AGY_URL_<ARCH>/AGY_SHA512_<ARCH> pairing would
+		// corrupt agy silently while sentinel and the image label both
+		// stayed correct. This default (synthetic-fixture) path only
+		// ever passes the pair matching TARGETARCH (see pick() above),
+		// so it catches a MISSING pair loudly but cannot exercise a
+		// pair that is present yet mismatched — only
+		// TestContainer_RealAgyBuild, which supplies both real pairs at
+		// once, can catch a genuinely wrong-but-present binary.
 		wantArch := currentArch
 		archOut, archErr, archCode := runCmd(t, 15*time.Second, dockerBin(), "image", "inspect", imageTag, "--format", "{{.Architecture}}")
 		if archCode != 0 {
@@ -585,12 +584,12 @@ func hostPathExists(t *testing.T, hostPath string) bool {
 }
 
 // TestContainer_C3_ReadOnlySurfaces is R8 C3: "for EVERY ro mount target
-// of R4, creating a file fails". Round-2 review finding: the first
-// version ran `docker run --read-only` with NO bind mounts at all, so 8
-// of 9 "write failed" assertions were actually "path does not exist" —
-// green evidence for an assertion never made. This version attaches the
-// REAL R4 mount set (real host paths, read-only) so a bind that lost its
-// `:ro` in compose would actually be caught here.
+// of R4, creating a file fails". Running `docker run --read-only` with
+// no bind mounts attached would make most "write failed" assertions
+// actually "path does not exist" — green evidence for an assertion
+// never made — so this attaches the REAL R4 mount set (real host paths,
+// read-only) so a bind that lost its `:ro` in compose is actually
+// caught here.
 func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 	forEachArch(t, func(t *testing.T) {
 		selinux := selinuxEnforcingOnDockerHost(t)
@@ -981,13 +980,13 @@ func TestContainer_C9_TickExitCodes(t *testing.T) {
 // everything belonging to a service by 4+ spaces (verified against a real
 // render: "  apprise:", "  mailrise:", "  sentinel:", "  sentinel-net:"
 // all sit at column 2; every key under a service sits at column 4+).
-// Round-2 review finding: the previous version searched for the next
-// "\n  " (a TWO-space prefix) as the block end, but the service's own
-// keys are indented FOUR spaces — so "\n  " never matches inside the
-// block, the "end" is the very next line, and the window inspected is
-// the literal string "sentinel:" with nothing else. This version anchors
-// on the next line with EXACTLY a 2-space indent (any other top-level
-// service or the closing top-level key), which is the real boundary.
+// Anchoring on "\n  " (a two-space prefix) as the block end would never
+// match inside the block, since the service's own keys sit at four
+// spaces — the "end" would be the very next line, and the window
+// inspected would be the literal string "sentinel:" with nothing else.
+// This anchors on the next line with EXACTLY a 2-space indent (any
+// other top-level service or the closing top-level key), which is the
+// real boundary.
 func sentinelServiceBlock(t *testing.T, text string) string {
 	t.Helper()
 	re := regexp.MustCompile(`(?m)^  sentinel:\n`)
@@ -1008,12 +1007,12 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 	root := repoRoot(t)
 	deployDir := filepath.Join(root, "deploy")
 
-	// Round-2 review finding: skipping outright when deploy/.env (ops-
-	// provided, gitignored) is absent means the ONLY check of the
-	// security model disappears on every fresh clone and every CI
-	// runner — exactly where you'd most want it run. `docker compose`
-	// only needs the `:?`-required variables to render; synthesize a
-	// minimal env covering just those instead of depending on ops state.
+	// Skipping outright when deploy/.env (ops-provided, gitignored) is
+	// absent would make the ONLY check of the security model disappear
+	// on every fresh clone and every CI runner — exactly where you'd
+	// most want it run. `docker compose` only needs the `:?`-required
+	// variables to render; synthesize a minimal env covering just those
+	// instead of depending on ops state.
 	// Only the variables docker-compose.yml's sentinel service actually
 	// dereferences with `:?` — TELEGRAM_* is never read by this file
 	// (R4: the sentinel container gets no TELEGRAM_* variables at all).
@@ -1036,15 +1035,14 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 	block := sentinelServiceBlock(t, text)
 
 	// SERVICE-LEVEL read_only, anchored at the 4-space indent `docker
-	// compose config` uses for a service's own keys — round-2 review's
-	// own mutation exposed why a bare substring check is not enough
-	// here: every individual bind mount under `volumes:` also renders
-	// its own "read_only: true" (8+ space indent), so those never
-	// disappear even when the SERVICE-level flag is flipped to false.
-	// Worse, compose omits a false boolean from the render entirely
-	// rather than printing "read_only: false", so the negative case
-	// leaves no line to substring-match against at all — only an
-	// anchored "is this specific line present" check catches it.
+	// compose config` uses for a service's own keys. A bare substring
+	// check is not enough here: every individual bind mount under
+	// `volumes:` also renders its own "read_only: true" (8+ space
+	// indent), so those never disappear even when the SERVICE-level flag
+	// is flipped to false. Worse, compose omits a false boolean from the
+	// render entirely rather than printing "read_only: false", so the
+	// negative case leaves no line to substring-match against at all —
+	// only an anchored "is this specific line present" check catches it.
 	serviceReadOnlyRe := regexp.MustCompile(`(?m)^    read_only: true$`)
 	if !serviceReadOnlyRe.MatchString(block) {
 		t.Errorf("FAIL C10: sentinel service block missing the SERVICE-level read_only: true\nblock:\n%s", block)
@@ -1129,13 +1127,13 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// checkJournalReadable (the T7 obligation) needs a journal that a real
-		// journalctl actually reads a record from — a bind-mounted empty temp
-		// dir legitimately fails preflight now (that IS the fix working), so
-		// this test needs the REAL host journal, gid-discovered, same as C2.
+		// checkJournalReadable requires a journal that a real journalctl
+		// actually reads a record from — a bind-mounted empty temp dir
+		// correctly fails preflight, so this test needs the REAL host
+		// journal, gid-discovered, same as C2.
 		gid, gidOK := hostSystemdJournalGID(t)
 		if !gidOK {
-			t.Skip("SKIP C11: no real host journal reachable in this environment (needed since checkJournalReadable, the T7 fix, now correctly refuses to start on an empty/synthetic journal dir)")
+			t.Skip("SKIP C11: no real host journal reachable in this environment (checkJournalReadable correctly refuses to start on an empty/synthetic journal dir)")
 		}
 		selinux := selinuxEnforcingOnDockerHost(t)
 
@@ -1212,11 +1210,10 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 
 	// Prep a writable copy + systemd-journal group + apt update, all inside
 	// the throwaway container. The gid is deliberately NOT 999 (the real
-	// bam value, and also what a hardcoded implementation would happen to
-	// emit) — a non-999 value is the only way this test can actually
-	// distinguish "discovers the gid" from "hardcodes 999" (round-2
-	// review finding: the previous 999 prep passed identically either
-	// way).
+	// production value, and also what a hardcoded implementation would
+	// happen to emit) — a non-999 value is the only way this test can
+	// actually distinguish "discovers the gid" from "hardcodes 999";
+	// prepping with 999 would pass identically either way.
 	const testJournalGID = "7777"
 	prep := `set -e
 cp -r /work /root/deploy
@@ -1260,16 +1257,16 @@ chmod +x /root/deploy/install-host.sh`
 		// idempotency of whatever DID converge.
 		t.Logf("first run exit=%d (non-fatal for this idempotency check): %s %s", code1, out1, errOut1)
 	}
-	// Round-2 review finding: this throwaway container has no real PID 1
-	// systemd, so `systemctl enable --now rasdaemon` (step2) fails on
-	// EVERY run, always reports rc=75, and never contributes to
-	// `changed`. That means "changed=0 on the second run" is satisfied
-	// just as well by a run where nothing converged as by a run where
-	// everything did — it is not proof of convergence by itself. Assert
-	// the actual per-step "already converged" lines instead, for every
-	// step this environment CAN converge (everything except step2's
-	// service enable, which is a genuine environment limitation here,
-	// and step5, skipped because /etc/zfs/zed.d does not exist in this
+	// This throwaway container has no real PID 1 systemd, so
+	// `systemctl enable --now rasdaemon` (step2) fails on EVERY run,
+	// always reports rc=75, and never contributes to `changed`. That
+	// means "changed=0 on the second run" is satisfied just as well by
+	// a run where nothing converged as by a run where everything did —
+	// it is not proof of convergence by itself. Assert the actual
+	// per-step "already converged" lines instead, for every step this
+	// environment CAN converge (everything except step2's service
+	// enable, which is a genuine environment limitation here, and
+	// step5, skipped because /etc/zfs/zed.d does not exist in this
 	// container).
 	hash1 := hashFiles()
 
@@ -1299,22 +1296,15 @@ chmod +x /root/deploy/install-host.sh`
 	logPass(t, "PASS C12")
 }
 
-// TestContainer_C12_MsmtpDelivery is BLOCKER 1 from round-2 review: step3
-// of install-host.sh must produce a /etc/msmtprc that REAL msmtp can
-// actually authenticate and deliver through, not merely one containing the
-// string "auth on". Reproduces the reviewer's own probe: a real msmtp
-// binary, a real SMTP server requiring AUTH, and the exact config file the
-// script writes — asserting the stub actually received an authenticated
-// delivery, not that install-host.sh exited 0.
-// TestContainer_C12_EnvOwnerUnmappedUID is round-3 review MUST-FIX 1: step
-// 6 resolving the .env owner by NAME (stat -c %U) breaks silently for a
-// uid with no /etc/passwd entry — stat prints the literal string
-// "UNKNOWN", `install -o UNKNOWN` fails, and without a checked exit
-// status the step used to report "updated" while writing nothing.
-// C12's own .env is root-owned throughout (uid 0 always resolves), so
-// nothing else exercises this path — this test chown's it to a uid with
-// deliberately NO passwd entry (1000, present nowhere in a fresh
-// debian:trixie-slim's /etc/passwd) and asserts JOURNAL_GID still lands.
+// TestContainer_C12_EnvOwnerUnmappedUID: step 6 resolving the .env owner
+// by NAME (stat -c %U) breaks silently for a uid with no /etc/passwd
+// entry — stat prints the literal string "UNKNOWN", `install -o UNKNOWN`
+// fails, and without a checked exit status the step reports "updated"
+// while writing nothing. C12's own .env is root-owned throughout (uid 0
+// always resolves), so nothing else exercises this path — this test
+// chown's it to a uid with deliberately NO passwd entry (1000, present
+// nowhere in a fresh debian:trixie-slim's /etc/passwd) and asserts
+// JOURNAL_GID still lands.
 func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
@@ -1362,6 +1352,12 @@ chmod +x /root/deploy/install-host.sh
 	logPass(t, "PASS C12c (JOURNAL_GID written and owner preserved despite no /etc/passwd entry for the owning uid)")
 }
 
+// TestContainer_C12_MsmtpDelivery: step3 of install-host.sh must produce
+// a /etc/msmtprc that REAL msmtp can actually authenticate and deliver
+// through, not merely one containing the string "auth on". Uses a real
+// msmtp binary, a real SMTP server requiring AUTH, and the exact config
+// file the script writes — asserting the stub actually received an
+// authenticated delivery, not that install-host.sh exited 0.
 func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")

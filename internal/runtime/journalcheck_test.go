@@ -1,8 +1,8 @@
 package runtime
 
-// journalcheck_test.go: the T7 obligation recorded in PLAN.md above the T8
-// entry — "R2's preflight must verify the journal is actually readable
-// before the first tick". A stale JOURNAL_GID, an ineffective group_add,
+// journalcheck_test.go covers R2's preflight requirement that the journal
+// is actually readable before the first tick. A stale JOURNAL_GID, an
+// ineffective group_add,
 // or a wrong HOST_JOURNAL_DIR mount all produce the SAME symptom: the
 // container starts, the filesystem-level preflight (dir exists, has
 // files) already passed, but journalctl itself returns nothing — which
@@ -174,14 +174,14 @@ func TestStartupPreflight_JournalUnreadable_Exit78(t *testing.T) {
 		t.Error("err = nil, want non-nil naming the journal readability failure")
 	}
 
-	// Reviewer defect 1 (round 1): PLAN.md's T7 obligation is two clauses,
-	// not one — "log ERROR naming the likely cause (JOURNAL_GID /
-	// group_add / the /host/journal mount) AND exit 78". Every prior
-	// assertion here covered only the exit code; deleting the log line
-	// entirely, or stripping the cause hint from it, left the suite green.
-	// Assert on the emitted line itself: ERROR level, and it names at
-	// least one of the three named causes (substring on the cause token,
-	// not the whole sentence, so a prose rewrite doesn't trip this).
+	// The requirement is two clauses, not one — log ERROR naming the
+	// likely cause (JOURNAL_GID / group_add / the /host/journal mount)
+	// AND exit 78. Asserting only the exit code lets the log line be
+	// deleted entirely, or stripped of its cause hint, without failing
+	// the suite. Assert on the emitted line itself: ERROR level, and it
+	// names at least one of the three named causes (substring on the
+	// cause token, not the whole sentence, so a prose rewrite doesn't
+	// trip this).
 	logText := logBuf.String()
 	if !strings.Contains(logText, "ERROR") {
 		t.Errorf("stderr does not contain an ERROR line: %q", logText)

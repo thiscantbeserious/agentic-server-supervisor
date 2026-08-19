@@ -22,9 +22,9 @@ on:
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
 
-# Round-3 review SHOULD-FIX 7: packages:write scoped to the build job only
-# (it pushes to GHCR); the test job only checks out and runs the Go
-# toolchain and needs nothing beyond contents:read.
+# packages:write is scoped to the build job only (it pushes to GHCR); the
+# test job only checks out and runs the Go toolchain and needs nothing
+# beyond contents:read.
 permissions:
   contents: read
 
@@ -82,10 +82,10 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile
-          # Both architectures, always — contracts/runtime.md R1 amended
-          # 32a4bac: arm64 is not optional. buildx supplies TARGETARCH
-          # per platform; the Dockerfile selects the matching
-          # AGY_URL_*/AGY_SHA512_* pair for each.
+          # Both architectures, always — contracts/runtime.md R1: arm64 is
+          # not optional. buildx supplies TARGETARCH per platform; the
+          # Dockerfile selects the matching AGY_URL_*/AGY_SHA512_* pair
+          # for each.
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -103,8 +103,8 @@ jobs:
       - name: Pull and smoke-run the published image (both platforms)
         if: github.event_name != 'pull_request'
         # A multi-arch push produces a manifest list (contracts/runtime.md
-        # R1/R6, amended b41d35a): `docker pull`/`docker run` with no
-        # --platform silently resolves to the runner's OWN architecture
+        # R1/R6): `docker pull`/`docker run` with no --platform silently
+        # resolves to the runner's OWN architecture
         # (amd64 on ubuntu-latest) and would leave arm64 completely
         # untested here — a manifest list makes that failure mode quiet,
         # since it is "correct" on every host by construction. Chosen
