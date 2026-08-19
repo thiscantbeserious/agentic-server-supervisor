@@ -134,5 +134,16 @@ jobs:
             echo "::group::$PLATFORM"
             docker pull --platform "$PLATFORM" "$IMAGE"
             docker run --rm --platform "$PLATFORM" "$IMAGE" --version
+            # sentinel --version alone does not prove agy is present, or
+            # that it matches PLATFORM — the exact multi-arch mismatch
+            # this workflow's own build args exist to prevent, and the
+            # one a working sentinel binary cannot detect on its own.
+            docker run --rm --platform "$PLATFORM" --entrypoint /usr/local/bin/agy "$IMAGE" --version
+            WANT="3e 00"; [ "$PLATFORM" = "linux/arm64" ] && WANT="b7 00"
+            GOT="$(docker run --rm --platform "$PLATFORM" --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' ')"
+            case "$GOT" in
+              *"$WANT"*) ;;
+              *) echo "agy ELF e_machine mismatch on $PLATFORM: got '$GOT', want '$WANT'" >&2; exit 1 ;;
+            esac
             echo "::endgroup::"
           done

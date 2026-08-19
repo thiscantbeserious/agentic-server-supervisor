@@ -222,9 +222,11 @@ func syntheticAgy(t *testing.T, arch string) (url, sha string) {
 // tagged imageTagFor(arch), for --platform linux/<arch>. Real
 // AGY_URL_<ARCH>/AGY_SHA512_<ARCH> win if both are set for that arch;
 // otherwise the synthetic fixture above is used with --add-host so the
-// builder container can reach this process (the fixture is an
-// interpreted #!/bin/sh script, so the SAME tarball/digest is valid for
-// both architectures — nothing arch-specific about it). Every case that
+// builder container can reach this process. The fixture is now a
+// cross-compiled ELF built for the arch it stands in for (see
+// syntheticAgy), so the amd64 and arm64 tarballs/digests are distinct —
+// each must be fetched and verified separately, matching the real
+// vendor pairs. Every case that
 // needs a built image calls this first (via requireImage) and SKIPs
 // (never fails) if it returns an error — an unreachable Docker daemon or
 // a sandboxed CI runner without container-to-host networking is an
@@ -528,7 +530,7 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 			sizeOut, _, sizeCode := runCmd(t, 10*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Size}}")
 			if sizeCode == 0 {
 				if bytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
-					t.Logf("real-agy %s image size: %d bytes (%.1f MB) — T8 pulls this onto bam", arch, bytes, float64(bytes)/1e6)
+					t.Logf("real-agy %s image size: %d bytes (%.1f MB) — this is what a real host pulls", arch, bytes, float64(bytes)/1e6)
 				}
 			}
 			logPass(t, "PASS real-agy build (%s, version=%s)", arch, real.version)
@@ -590,10 +592,24 @@ func TestContainer_C1_StartsUnprivileged(t *testing.T) {
 // the Docker/Podman HOST's path — never the local Go test process's own
 // filesystem (the C2/C11 lesson: on a Podman Desktop/machine setup this
 // test binary runs on macOS while containers run in a separate Linux VM).
+//
+// Mounts the PARENT of hostPath, never hostPath itself: a rootful daemon
+// creates a missing bind-mount SOURCE directory on the host before the
+// container starts, so probing a path that does not exist yet would
+// itself create it — this test must never mutate the machine it runs
+// on. Every real R4 mount target's parent (/var/log, /run/log,
+// /var/lib, /, /etc) is guaranteed to exist, so mounting the parent
+// never triggers that auto-create, and testing for the child by name
+// inside the container is a pure read.
 func hostPathExists(t *testing.T, hostPath string) bool {
 	t.Helper()
+	if hostPath == "/" {
+		return true
+	}
+	parent := filepath.Dir(hostPath)
+	base := filepath.Base(hostPath)
 	_, _, code := runCmd(t, 10*time.Second, dockerBin(), "run", "--rm",
-		"-v", hostPath+":/probe:ro", "debian:trixie-slim", "test", "-e", "/probe")
+		"-v", parent+":/probe-parent:ro", "debian:trixie-slim", "test", "-e", "/probe-parent/"+base)
 	return code == 0
 }
 
@@ -1202,7 +1218,7 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	root := repoRoot(t)
 	// A throwaway Debian container with apt-get + systemd, network access
 	// for real package installs, is what "throwaway rootfs" means here —
-	// never run against a real host outside T8.
+	// this test never runs install-host.sh against a real host.
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
 		t.Skipf("SKIP C12: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
@@ -1242,7 +1258,7 @@ apt-get install -y -qq systemd >/dev/null 2>&1 || true
 		// Force it to the test gid with groupmod, falling back to
 		// groupadd only if the group somehow does not exist yet.
 		`groupmod -g ` + testJournalGID + ` systemd-journal 2>/dev/null || groupadd -g ` + testJournalGID + ` systemd-journal
-: > /root/deploy/.env
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/deploy/.env
 chmod +x /root/deploy/install-host.sh`
 	if out, errOut, code := exec_(prep); code != 0 {
 		t.Skipf("SKIP C12: throwaway container prep failed: %s %s", out, errOut)

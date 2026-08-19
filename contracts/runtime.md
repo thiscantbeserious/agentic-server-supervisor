@@ -383,7 +383,7 @@ Invariants asserted by the container test: no `ports:` on `sentinel`; every bind
 
 ### R5. `deploy/install-host.sh`
 
-`// ponytail: the one deliberate bash artifact. It runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to bam to write three config files is more moving parts than a 120-line idempotent script. Upgrade path: a "sentinel install-host" subcommand if the host part ever grows.`
+`// ponytail: kept as a single bash script rather than promoted to a Go subcommand — it runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to bam just to write a handful of config files is more moving parts than an idempotent script. Upgrade path: a "sentinel install-host" subcommand if the host part ever grows.`
 
 **CLI**
 ```

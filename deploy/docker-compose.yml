@@ -1,10 +1,10 @@
-# Sentinel stack: apprise + mailrise (T1) + the sentinel supervisor itself
-# (T7), exactly as specified in contracts/runtime.md R4 — one definition,
-# no drift between contract and file.
+# Sentinel stack: apprise + mailrise, plus the sentinel supervisor itself,
+# exactly as specified in contracts/runtime.md R4 — one definition, no
+# drift between contract and file.
 #
 # Bring up:   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up -d
-# Verify:     see the two V commands in PLAN.md §3 (T1); T7/T8 add the
-#             sentinel-specific checks (test/container_test.go, rollout).
+# Verify:     see the notification-stack V commands in PLAN.md §3; the
+#             sentinel-specific checks live in test/container_test.go.
 #
 # The Telegram bot token lives ONLY in this stack. The sentinel container gets
 # no /config mount and no TELEGRAM_* variables (contracts/runtime.md): the token

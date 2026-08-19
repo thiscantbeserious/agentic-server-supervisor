@@ -1,16 +1,14 @@
 #!/bin/bash
 # deploy/install-host.sh — R5. The one deliberate bash artifact in this
 # repo: it runs on the host as root before the sentinel image exists,
-# needs apt-get and systemctl, and shipping a second Go binary to bam just
-# to write three config files is more moving parts than a ~150-line
-# idempotent script. Upgrade path: a "sentinel install-host" subcommand if
-# the host part ever grows.
+# needs apt-get and systemctl, and shipping a second Go binary to bam
+# just to write a handful of config files is more moving parts than an
+# idempotent script. Upgrade path: a "sentinel install-host" subcommand
+# if the host part ever grows.
 #
-# ponytail: the one deliberate bash artifact. It runs on the host as root
-# before the image exists, needs apt-get and systemctl, and shipping a
-# second Go binary to bam to write three config files is more moving parts
-# than a 120-line idempotent script. Upgrade path: a "sentinel
-# install-host" subcommand if the host part ever grows.
+# ponytail: kept as a single bash script rather than promoted to a Go
+# subcommand for that reason — the ceiling is "the host part grows past
+# what a shell script can do cleanly," not a line count.
 #
 # The binding spec is contracts/runtime.md R5.
 set -u
@@ -67,6 +65,17 @@ if ! command -v apt-get >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&
 fi
 
 TRANSIENT_FAIL=0
+
+# Whether the package each later step depends on is actually present.
+# Set by step1 after it knows the real outcome (already-installed,
+# freshly installed, or failed) — never assumed from step1's own exit
+# status alone, since apt-get install with multiple packages does not
+# guarantee all-or-nothing. A step that configures a service or a mail
+# target for a package that isn't there is the half-configured host this
+# script exists to prevent, so each dependent step checks this instead
+# of running blind after a package failure.
+RASDAEMON_OK=0
+MSMTP_OK=0
 
 # --- helpers -----------------------------------------------------------
 
@@ -173,13 +182,22 @@ step1() {
   done
   if [ "${#need[@]}" -eq 0 ]; then
     note "step1 packages: already installed (rasdaemon lm-sensors msmtp msmtp-mta)"
+    RASDAEMON_OK=1
+    MSMTP_OK=1
     return
   fi
   note "step1 packages: installing ${need[*]}"
-  if [ "$CHECK" -eq 1 ]; then changed=$((changed+1)); return; fi
+  if [ "$CHECK" -eq 1 ]; then
+    changed=$((changed+1))
+    RASDAEMON_OK=1
+    MSMTP_OK=1
+    return
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would run: apt-get install -y --no-install-recommends ${need[*]}"
     changed=$((changed+1))
+    RASDAEMON_OK=1
+    MSMTP_OK=1
     return
   fi
   # A host with stale apt lists fails with "Unable to locate package"
@@ -191,14 +209,30 @@ step1() {
   if ! apt-get install -y --no-install-recommends "${need[@]}"; then
     echo "$PROG: apt-get install failed" >&2
     TRANSIENT_FAIL=1
-    return
+  else
+    changed=$((changed+1))
   fi
-  changed=$((changed+1))
+  # Checked directly rather than inferred from apt-get's own exit status:
+  # a multi-package `apt-get install` is not guaranteed all-or-nothing, so
+  # the steps below skip only the ones whose actual dependency is still
+  # missing, not every package named in this run.
+  pkg_installed rasdaemon && RASDAEMON_OK=1
+  { pkg_installed msmtp || pkg_installed msmtp-mta; } && MSMTP_OK=1
+  if [ "$RASDAEMON_OK" -ne 1 ]; then
+    note "step1 packages: rasdaemon not installed — step2 will be skipped"
+  fi
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    note "step1 packages: msmtp not installed — steps 3-5's mail delivery will be skipped"
+  fi
 }
 
 # --- step 2: rasdaemon service -------------------------------------------
 
 step2() {
+  if [ "$RASDAEMON_OK" -ne 1 ]; then
+    note "step2 rasdaemon: skipped (rasdaemon package not installed)"
+    return
+  fi
   enabled=0; active=0
   systemctl is-enabled --quiet rasdaemon 2>/dev/null && enabled=1
   systemctl is-active --quiet rasdaemon 2>/dev/null && active=1
@@ -224,36 +258,55 @@ step2() {
 # --- step 3: /etc/msmtprc -------------------------------------------------
 
 step3() {
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    note "step3 /etc/msmtprc: skipped (msmtp package not installed)"
+    return
+  fi
   file="/etc/msmtprc"
-  auth_line="auth off"
-  cred_lines=""
   smtp_user=""
   smtp_pass=""
   if [ -f "$ENV_FILE" ]; then
     smtp_user="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
     smtp_pass="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
   fi
-  if [ -n "$smtp_user" ] && [ -n "$smtp_pass" ]; then
-    # mailrise enforces SMTP AUTH unconditionally (R4) and runs
-    # tls: off on the LAN (internal/notify/smtpfallback.go's own comment
-    # and its plainAuthNoTLS type document the same fact for sentinel's
-    # own SMTP client). "auth on" tells msmtp to auto-pick the "safest"
-    # method, and msmtp refuses PLAIN/LOGIN — the only methods a plain
-    # mailrise listener offers — over a non-TLS connection even with
-    # "tls off" set explicitly: verified against real msmtp 1.8.28 on
-    # Debian 13 against a stub advertising "AUTH PLAIN LOGIN", "auth on"
-    # + user/password + tls off still exits 69 "cannot use a secure
-    # authentication method". Forcing the method explicitly ("auth
-    # plain") is what bypasses that guard — the exact same fix
-    # smtpfallback.go already applies on the Go side for the identical
-    # reason, so this keeps both SMTP clients doing the same thing
-    # against the same server.
-    auth_line="auth plain
+  if [ -z "$smtp_user" ] || [ -z "$smtp_pass" ]; then
+    # mailrise enforces SMTP AUTH unconditionally (R4 requires both
+    # MAILRISE_SMTP_USER and MAILRISE_SMTP_PASS with `:?`), so a real
+    # host always has them. An operator who has not filled .env in yet
+    # needs telling, not a config that writes "auth off" and looks
+    # converged while every mail send fails silently — the same failure
+    # mode this script has now fixed twice already for the other two
+    # ways an unusable msmtp config can look valid.
+    echo "$PROG: MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS missing or empty in $ENV_FILE — not writing $file" >&2
+    note "step3 $file: skipped — mail credentials missing, mail is not configured"
+    # --check/--dry-run promise "change nothing, exit 0/0-or-1" — this is
+    # a real-run-only failure signal. Both modes already never reach a
+    # write, so there is nothing to warn them off; only the real run
+    # needs the exit-75 "safe to re-run once .env is filled in" signal.
+    if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+      TRANSIENT_FAIL=1
+    fi
+    return
+  fi
+  # mailrise enforces SMTP AUTH unconditionally (R4) and runs
+  # tls: off on the LAN (internal/notify/smtpfallback.go's own comment
+  # and its plainAuthNoTLS type document the same fact for sentinel's
+  # own SMTP client). "auth on" tells msmtp to auto-pick the "safest"
+  # method, and msmtp refuses PLAIN/LOGIN — the only methods a plain
+  # mailrise listener offers — over a non-TLS connection even with
+  # "tls off" set explicitly: verified against real msmtp 1.8.28 on
+  # Debian 13 against a stub advertising "AUTH PLAIN LOGIN", "auth on"
+  # + user/password + tls off still exits 69 "cannot use a secure
+  # authentication method". Forcing the method explicitly ("auth
+  # plain") is what bypasses that guard — the exact same fix
+  # smtpfallback.go already applies on the Go side for the identical
+  # reason, so this keeps both SMTP clients doing the same thing
+  # against the same server.
+  auth_line="auth plain
 tls off"
-    cred_lines="user ${smtp_user}
+  cred_lines="user ${smtp_user}
 password ${smtp_pass}
 "
-  fi
   hn="$(hostname -f 2>/dev/null || hostname)"
   body="account sentinel
 host ${MAILRISE_HOST}
@@ -277,6 +330,10 @@ SMARTD_LINE='DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m smartd@mailris
 DISABLED_MARK="# disabled by agentic-server-supervisor: "
 
 step4() {
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    note "step4 /etc/smartd.conf: skipped (msmtp package not installed — the DEVICESCAN mail target it configures cannot deliver)"
+    return
+  fi
   file="/etc/smartd.conf"
   preamble=""
   # Captured BEFORE any edit in this function, including the in-place
@@ -341,9 +398,21 @@ step4() {
         (!inblock) && /^[^#].*-m / {print mark $0; next}
         {print}
       ' "$file" > "$tmp_m"
-      install -m 0644 -o root -g root "$tmp_m" "$file"
-      rm -f "$tmp_m"
-      note "step4 smartd: pre-existing -m line found, commented out where it stands"
+      if ! install -m 0644 -o root -g root "$tmp_m" "$file"; then
+        # Same failure this function's own comment already documents for
+        # render_managed_block's install call above: an unchecked
+        # install (read-only /etc, full disk) would report the -m line
+        # as commented out while nothing was actually written. Fail
+        # loud instead — TRANSIENT_FAIL surfaces as exit 75, and the
+        # note says what actually happened.
+        echo "$PROG: failed to install $file (commenting out pre-existing -m line)" >&2
+        TRANSIENT_FAIL=1
+        rm -f "$tmp_m"
+        note "step4 smartd: failed to comment out pre-existing -m line"
+      else
+        rm -f "$tmp_m"
+        note "step4 smartd: pre-existing -m line found, commented out where it stands"
+      fi
       # Re-read after the in-place edit — the preamble below is derived
       # from the PERSISTENT marker (next block), not from this pre-edit
       # scan, so the recorded fact survives every future run even after
@@ -403,6 +472,10 @@ step4() {
 # --- step 5: ZED --------------------------------------------------------
 
 step5() {
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    note "step5 ZED: skipped (msmtp package not installed — ZED_EMAIL_PROG=msmtp would be unusable)"
+    return
+  fi
   dir="/etc/zfs/zed.d"
   file="${dir}/zed.rc"
   if [ ! -d "$dir" ]; then
