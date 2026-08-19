@@ -39,6 +39,8 @@ That manifest publishes **sha512 only**. Requiring a sha256 forced the operator 
 
 **The tarball does NOT contain a file named `agy`.** Verified against the real artifact 2026-08-19 (version 1.1.15): the archive contains a single ELF x86-64 executable named **`antigravity`**, ~205 MB. The vendor installer extracts it and *installs* it as `agy` (`BINARY_PATH="$TARGET_DIR/agy"`), which is why the installed binary carries that name — and why an implementation written against a synthetic fixture named `agy` builds cleanly and then fails on the real artifact. **The Dockerfile must locate the executable in the tarball and install it as `/usr/local/bin/agy`, not search for a file already called `agy`.**
 
+**A multi-arch push produces a manifest list, so R6's post-push smoke step validates only the runner's own architecture** unless it names one. Either pull and run each platform explicitly, or state in the workflow that the smoke step is single-architecture by design and the other is covered by the container suite. Do not leave it ambiguous: a manifest list makes `docker run` silently correct on every host, which is exactly why an untested architecture stays untested quietly. Note also for T8: `docker compose pull` on `bam` now selects amd64 from a list rather than pulling a single-architecture image — same result, different mechanism.
+
 **The image is built for `linux/amd64` AND `linux/arm64`, and both must work.** The vendor ships a distinct artifact per architecture and both are verified:
 
 ```
@@ -48,7 +50,20 @@ manifests/linux_arm64.json -> linux-arm/cli_linux_arm64.tar.gz   ELF aarch64, sh
 
 Both downloaded and checked against the vendor digest on 2026-08-19; each archive contains a single executable named `antigravity`.
 
-**Selection is by `TARGETARCH`, which buildx supplies**, choosing between the two pinned pairs. That keeps the pin — the operator still supplies exact URLs and vendor digests, and the build never resolves anything from the network on its own — while producing a correct image for either target. `GOARCH=${TARGETARCH}` in the builder and **no `--platform` pin on the runtime stage**: buildx sets the platform per target, and hardcoding one there is what previously let an arm64 build emit an arm64 Go binary into an amd64 userland.
+**The builder stage is pinned to `$BUILDPLATFORM` and cross-compiles; the runtime stage is not pinned at all.**
+
+```dockerfile
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build ...
+
+FROM debian:trixie-slim AS runtime      # no --platform: buildx sets it per target
+```
+
+Without the builder pin, buildx runs stage 1 once **per platform**, so the non-native pass executes the entire `gofmt`/`go vet`/`go test ./...` suite under qemu — the measured 5-10x penalty, paid on every push, with `go test` under emulation carrying a real history of timing flakiness that would surface as intermittent red CI blamed on our tests rather than on emulation. The agy download, `sha512sum` and the `tar` of a ~205 MB payload would also run emulated on that pass. `CGO_ENABLED=0` already makes cross-compilation free, so there is nothing to gain by paying for it.
+
+**This pin is not the one that caused the earlier defect, and must not be "fixed" back out as though it were.** That was `--platform=linux/amd64` — a **constant**, on the **runtime** stage, the stage that executes target-architecture code. This is `$BUILDPLATFORM` — a **variable**, on the **builder** stage, which executes nothing but the compiler and the test suite. The first froze the userland while `GOARCH` followed the target and produced an incoherent image; the second cannot, because the only thing it fixes is where compilation happens, and `GOARCH=${TARGETARCH}` still decides what comes out.
+
+**Selection of the agy artifact is by `TARGETARCH`, which buildx supplies**, choosing between the two pinned pairs. That keeps the pin — the operator still supplies exact URLs and vendor digests, and the build never resolves anything from the network on its own — while producing a correct image for either target. `GOARCH=${TARGETARCH}` in the builder and **no `--platform` pin on the runtime stage**: buildx sets the platform per target, and hardcoding one there is what previously let an arm64 build emit an arm64 Go binary into an amd64 userland.
 
 **The architecture assertion tests coherence, not a constant.** Asserting `Architecture == amd64` would fail every legitimate arm64 build. What must hold is that the Go binary's ELF machine, the image manifest's architecture, and the agy binary's ELF machine all agree with the platform that was requested. A three-way mismatch is the defect; a particular value is not.
 
@@ -445,10 +460,10 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}` — skipped on `pull_request`
 4. `docker/metadata-action@v5` → `images: ghcr.io/${{ github.repository }}/sentinel`, tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
-5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64,linux/arm64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL=${{ vars.AGY_URL }}`, `AGY_SHA512=${{ vars.AGY_SHA512 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
+5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64,linux/arm64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}`, `AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}`, `AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}`, `AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
 6. On non-PR runs: `docker pull ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }}` and `docker run --rm <that image> --version` — proves the published image is pullable and runnable.
 
-`AGY_URL`/`AGY_SHA512`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
+`AGY_URL_AMD64`/`AGY_SHA512_AMD64`/`AGY_URL_ARM64`/`AGY_SHA512_ARM64`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). **All four architecture values are required**, because both platforms are built on every push — a missing one fails only the platform it belongs to, which is the confusing half-failure worth naming here rather than debugging later. Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
 
 ---
 
