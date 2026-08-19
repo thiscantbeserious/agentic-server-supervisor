@@ -1,6 +1,6 @@
 # Working Rules for Claude Code
 
-Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [PLAN.md](PLAN.md) · Field-level contracts (authoritative): [CONTRACTS.md](CONTRACTS.md) · Execution protocol (TDD + gates): PLAN.md §4
+How everything here is written (comments, docs, commits): [AGENTS.md](AGENTS.md) · Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [PLAN.md](PLAN.md) · Field-level contracts (authoritative): [CONTRACTS.md](CONTRACTS.md) · Execution protocol (TDD + gates): PLAN.md §4
 
 ## Ground Rules
 - **No TODO starts without the user's explicit go.** Feedback is not a go.
@@ -9,7 +9,7 @@ Architecture: [ARCHITECTURE.md](ARCHITECTURE.md) · Technical plan with TODOs: [
 - **Live validation before proposing a merge** (from T3 on): the code runs in a real Linux container under the production security flags, and its assumptions are checked read-only against `bam`. Fixtures only prove that the code agrees with whoever wrote the fixtures. Anything that cannot be validated without deploying is named as uncovered in the PR, never implied to be covered.
 - **Read-only towards the target server `bam`** (doh@192.168.1.151, key `~/.ssh/sentinel_ed25519`): strictly read commands only; every action there is announced first. Installs/deploys only in T8 after approval.
 - Local development/tests: Podman (`docker` shim available). Secrets only in `.env` (gitignored), never in code, commits, or logs.
-- All repo documents, comments, and commit messages are written in **English**. Diagrams are **Mermaid**, never ASCII art.
+- All repo documents, comments, and commit messages follow [AGENTS.md](AGENTS.md): **English**, **Mermaid** not ASCII art, and — the rule most often broken — **no milestone or process references**. A comment earns its place by explaining why the code is the way it is, never by recording which review round produced it. Git history holds that, keyed to the exact lines.
 - **One branch per TODO**, named `t<n>-<slug>` (e.g. `t4-analyze`), branched from `main`. The TODO's work — including any contract amendments it forces — lands there, and it reaches `main` only through a PR merged with `--no-ff`, so `main` carries one merge commit per TODO. The PR body is the gate record: reviewer verdict, agy findings, RED/GREEN evidence, and any live validation. No direct commits to `main`, no shared long-lived integration branch.
 - One commit per completed TODO: `T<n>: <deliverable>`.
 - TDD first — RED → GREEN → REFACTOR, then gates, then review. Full protocol: PLAN.md §4.
