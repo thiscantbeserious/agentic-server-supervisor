@@ -130,27 +130,52 @@ jobs:
         # hand, so it needs the same treatment).
         run: |
           IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel:${{ github.sha }}"
+          RUNNER_ARCH="$(dpkg --print-architecture)"
           for PLATFORM in linux/amd64 linux/arm64; do
             echo "::group::$PLATFORM"
             docker pull --platform "$PLATFORM" "$IMAGE"
-            docker run --rm --platform "$PLATFORM" "$IMAGE" --version
-            # sentinel --version alone does not prove agy is present, or
-            # that it matches PLATFORM — the exact multi-arch mismatch
-            # this workflow's own build args exist to prevent, and the
-            # one a working sentinel binary cannot detect on its own.
-            #
-            # Invoked through a shell, not as a direct --entrypoint exec:
-            # direct exec of /usr/local/bin/agy failed here once on a
-            # GitHub runner (exit 255, "no such file or directory") on
-            # the NATIVE platform, not under emulation, while the same
-            # binary in the same image ran correctly via a shell and via
-            # direct exec on podman locally — cause not established.
-            docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
+
+            # ELF e_machine read FIRST, for BOTH platforms: it reads
+            # bytes rather than executing anything, so it always works
+            # regardless of whether this runner can emulate PLATFORM,
+            # and it proves the property that actually matters — the
+            # right architecture binary is in the right image. A bare
+            # `--version` cannot prove that on its own; it is the exact
+            # multi-arch mismatch this workflow's own build args exist
+            # to prevent.
             WANT="3e 00"; [ "$PLATFORM" = "linux/arm64" ] && WANT="b7 00"
             GOT="$(docker run --rm --platform "$PLATFORM" --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' ')"
             case "$GOT" in
               *"$WANT"*) ;;
               *) echo "agy ELF e_machine mismatch on $PLATFORM: got '$GOT', want '$WANT'" >&2; exit 1 ;;
             esac
+
+            # sentinel is a static Go binary and executes correctly
+            # under this runner's emulation on both platforms.
+            docker run --rm --platform "$PLATFORM" "$IMAGE" --version
+
+            # agy is dynamically linked (interpreter /lib64/ld-linux-*.so.*).
+            # Measured on this runner, at both build time (Dockerfile RUN,
+            # exit 127) and now at run time (this step: native amd64
+            # passed, emulated arm64 failed with the same 127 signature)
+            # — a dynamically-linked target-architecture binary cannot be
+            # relied on to execute under this runner's QEMU emulation, at
+            # either stage. So agy is only ever EXECUTED here on
+            # whichever platform is native to this runner; architecture
+            # on the other platform is already proven above by the ELF
+            # read, and execution there is proven by the local container
+            # suite, which builds and runs agy natively per host arch.
+            #
+            # Still invoked through a shell rather than as a direct
+            # --entrypoint exec: direct exec of agy on this runner's
+            # native amd64 has also failed once (exit 255) where the
+            # shell form passed — cause not established, kept as the
+            # form known to work.
+            PLATFORM_ARCH="${PLATFORM#linux/}"
+            if [ "$PLATFORM_ARCH" = "$RUNNER_ARCH" ]; then
+              docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
+            else
+              echo "SKIP: not executing agy for $PLATFORM on this $RUNNER_ARCH runner — a dynamically-linked binary is not reliably executable under emulation here (see comment above); architecture already verified by the ELF read"
+            fi
             echo "::endgroup::"
           done
