@@ -86,7 +86,7 @@ Without the builder pin, buildx runs stage 1 once **per platform**, so the non-n
 - User `sentinel`, uid **10001**, gid **10001**, home `/home/sentinel` (unused — `$HOME` is `$AGY_HOME`, a persistent named volume).
 - `COPY --from=builder /out/sentinel /usr/local/bin/sentinel` and `/out/agy` → `/usr/local/bin/agy`, both mode `0555`, owner `root:root`.
 - **No `/opt/sentinel`, no prompt or schema files.** `role.md`, `report.schema.json` and `facts.schema.json` are `go:embed`ed in their owning packages (C1); the image ships two binaries and nothing writable.
-- Build-time verification (any failure fails the build): `sentinel --version`, `agy --version`, `journalctl --version`, `sensors -v`.
+- Build-time verification (any failure fails the build): `sentinel --version`, `journalctl --version`, `sensors -v`, and an **ELF `e_machine` read** of `/usr/local/bin/agy` against `TARGETARCH`.
 - `ENV LANG=C.UTF-8 TZ=UTC PATH=/usr/local/bin:/usr/bin:/bin`
 - `USER sentinel`, `WORKDIR /`, `ENTRYPOINT ["/usr/local/bin/sentinel"]`, `CMD ["tick", "--loop"]`.
 - OCI labels `org.opencontainers.image.source`, `.revision`, `.version=${AGY_VERSION}`.
