@@ -69,10 +69,13 @@ ARG AGY_VERSION=unknown
 ARG VERSION=dev
 # TARGETARCH is a predefined buildx arg: the architecture actually being
 # built (amd64/arm64), independent of the host running `docker build`.
-# Present without a default on any BuildKit-backed builder; the =amd64
-# fallback only matters for a legacy (non-BuildKit) builder, where it is
-# never populated at all.
-ARG TARGETARCH=amd64
+# Declared WITHOUT a default, deliberately: giving it a literal default
+# (`=amd64`) stops BuildKit from auto-populating it with the real target
+# — measured against a real GHCR push, where every platform silently
+# built as amd64 because of exactly that default. An undefaulted ARG
+# with this exact name is what BuildKit auto-populates; anything else
+# makes it an ordinary build arg that just happens to share the name.
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -165,8 +168,15 @@ ARG VERSION=dev
 # built; re-declared here because an ARG's scope ends at the FROM that
 # follows its declaration (the builder stage's own TARGETARCH, above,
 # does not carry over) and the ELF check below needs to know which
-# machine type agy is supposed to be.
-ARG TARGETARCH=amd64
+# machine type agy is supposed to be. No default — see the builder
+# stage's TARGETARCH comment for why one is never safe here.
+ARG TARGETARCH
+# TARGETPLATFORM (e.g. "linux/arm64") is a SEPARATE buildx-injected arg
+# from TARGETARCH, never touched by the selection logic in the builder
+# stage. Declared here so the verification below can derive its
+# expectation from a source independent of the one that chose the
+# binaries — see that RUN step for why this independence is the point.
+ARG TARGETPLATFORM
 
 LABEL org.opencontainers.image.source="https://github.com/thiscantbeserious/agentic-server-supervisor" \
       org.opencontainers.image.revision="${VERSION}" \
@@ -210,23 +220,49 @@ ENV LANG=C.UTF-8 \
 # for real. journalctl and sensors are this stage's OWN architecture,
 # native either way, so running them proves nothing about TARGETARCH.
 #
-# What actually needs proving — agy is the RIGHT architecture binary, not
-# that it can be executed on whatever host happens to be building this
-# image — is read, not run: agy's ELF e_machine field (byte offset 18,
-# little-endian uint16), the same check C1 performs against a running
-# container. A read cannot be defeated by missing emulation support, so
-# it is strictly the better check here, not just the emulation-safe one.
+# What actually needs proving — both binaries are the RIGHT architecture,
+# not that they can be executed on whatever host happens to be building
+# this image — is read, not run: their ELF e_machine field (byte offset
+# 18, little-endian uint16), the same check C1 performs against a
+# running container. A read cannot be defeated by missing emulation
+# support, so it is strictly the better check here, not just the
+# emulation-safe one.
+#
+# The expectation is derived from TARGETPLATFORM, never from TARGETARCH
+# — TARGETARCH is also what the builder stage used to CHOOSE which
+# binaries to embed, so a check that reused it would only prove the
+# artifact agrees with itself: whatever TARGETARCH is, right or wrong,
+# both the selection and the check would agree, and this exact class of
+# bug — TARGETARCH silently wrong on every platform, both stages seeing
+# the same wrong value — shipped to GHCR undetected because of exactly
+# that. TARGETPLATFORM is populated by BuildKit independently of
+# TARGETARCH, so a real ELF read against IT catches a wrong TARGETARCH
+# instead of rubber-stamping it. TARGETARCH is still cross-checked
+# against it below, so the two are asserted to agree rather than assumed
+# to.
 RUN /usr/local/bin/sentinel --version && \
     journalctl --version && \
     sensors -v && \
-    case "$TARGETARCH" in \
-      amd64) want="3e 00" ;; \
-      arm64) want="b7 00" ;; \
-      *) echo "ERROR: unsupported TARGETARCH: $TARGETARCH (agy ships amd64 and arm64 only)" >&2; exit 1 ;; \
+    if [ -z "$TARGETPLATFORM" ]; then \
+      echo "ERROR: TARGETPLATFORM is unset — buildx did not inject it" >&2; exit 1; \
+    fi && \
+    case "$TARGETPLATFORM" in \
+      linux/amd64) want="3e 00"; want_arch=amd64 ;; \
+      linux/arm64) want="b7 00"; want_arch=arm64 ;; \
+      *) echo "ERROR: unsupported TARGETPLATFORM: $TARGETPLATFORM (expected linux/amd64 or linux/arm64)" >&2; exit 1 ;; \
     esac && \
-    got="$(od -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' \t' ' ' | sed -e 's/^ *//' -e 's/ *$//')" && \
-    if [ "$got" != "$want" ]; then \
-      echo "ERROR: agy ELF e_machine = [$got], want [$want] for TARGETARCH=$TARGETARCH" >&2; \
+    if [ "$TARGETARCH" != "$want_arch" ]; then \
+      echo "ERROR: TARGETARCH ($TARGETARCH) disagrees with TARGETPLATFORM ($TARGETPLATFORM) — these must never diverge" >&2; \
+      exit 1; \
+    fi && \
+    got_sentinel="$(od -An -tx1 -j18 -N2 /usr/local/bin/sentinel | tr -s ' \t' ' ' | sed -e 's/^ *//' -e 's/ *$//')" && \
+    if [ "$got_sentinel" != "$want" ]; then \
+      echo "ERROR: sentinel ELF e_machine = [$got_sentinel], want [$want] for TARGETPLATFORM=$TARGETPLATFORM" >&2; \
+      exit 1; \
+    fi && \
+    got_agy="$(od -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' \t' ' ' | sed -e 's/^ *//' -e 's/ *$//')" && \
+    if [ "$got_agy" != "$want" ]; then \
+      echo "ERROR: agy ELF e_machine = [$got_agy], want [$want] for TARGETPLATFORM=$TARGETPLATFORM" >&2; \
       exit 1; \
     fi
 
