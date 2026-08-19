@@ -161,6 +161,12 @@ FROM debian:trixie-slim AS runtime
 
 ARG AGY_VERSION=unknown
 ARG VERSION=dev
+# TARGETARCH is buildx's predefined arg for the platform actually being
+# built; re-declared here because an ARG's scope ends at the FROM that
+# follows its declaration (the builder stage's own TARGETARCH, above,
+# does not carry over) and the ELF check below needs to know which
+# machine type agy is supposed to be.
+ARG TARGETARCH=amd64
 
 LABEL org.opencontainers.image.source="https://github.com/thiscantbeserious/agentic-server-supervisor" \
       org.opencontainers.image.revision="${VERSION}" \
@@ -193,10 +199,36 @@ ENV LANG=C.UTF-8 \
     PATH=/usr/local/bin:/usr/bin:/bin
 
 # Build-time verification — any failure fails the build.
+#
+# agy is NOT executed here, deliberately. It is a dynamically linked ELF
+# (interpreter /lib64/ld-linux-*.so.*), and on a non-native pass (e.g. an
+# arm64 build on an amd64 CI runner) qemu-user cannot resolve that
+# interpreter, failing with exit 127 — a missing-interpreter symptom that
+# looks like a broken artifact but means only "this host is emulating".
+# sentinel is a static Go binary, which qemu-user runs natively under
+# emulation with no such gap, so `sentinel --version` still executes it
+# for real. journalctl and sensors are this stage's OWN architecture,
+# native either way, so running them proves nothing about TARGETARCH.
+#
+# What actually needs proving — agy is the RIGHT architecture binary, not
+# that it can be executed on whatever host happens to be building this
+# image — is read, not run: agy's ELF e_machine field (byte offset 18,
+# little-endian uint16), the same check C1 performs against a running
+# container. A read cannot be defeated by missing emulation support, so
+# it is strictly the better check here, not just the emulation-safe one.
 RUN /usr/local/bin/sentinel --version && \
-    /usr/local/bin/agy --version && \
     journalctl --version && \
-    sensors -v
+    sensors -v && \
+    case "$TARGETARCH" in \
+      amd64) want="3e 00" ;; \
+      arm64) want="b7 00" ;; \
+      *) echo "ERROR: unsupported TARGETARCH: $TARGETARCH (agy ships amd64 and arm64 only)" >&2; exit 1 ;; \
+    esac && \
+    got="$(od -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' \t' ' ' | sed -e 's/^ *//' -e 's/ *$//')" && \
+    if [ "$got" != "$want" ]; then \
+      echo "ERROR: agy ELF e_machine = [$got], want [$want] for TARGETARCH=$TARGETARCH" >&2; \
+      exit 1; \
+    fi
 
 USER sentinel
 WORKDIR /
