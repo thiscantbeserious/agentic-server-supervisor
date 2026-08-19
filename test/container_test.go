@@ -46,6 +46,18 @@ import (
 
 const imageTag = "sentinel:container-test"
 
+// logPass logs a "PASS ..." line only when nothing in this test has
+// already failed (round-3 review finding: an unconditional t.Log("PASS
+// ...") after a loop of non-fatal t.Errorf calls prints PASS right below
+// the FAIL lines it contradicts — misleading in a document meant to be
+// the PR's gate record).
+func logPass(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if !t.Failed() {
+		t.Logf(format, args...)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
@@ -222,7 +234,7 @@ func TestContainer_C1_StartsUnprivileged(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "container-test") {
 		t.Fatalf("FAIL C1: sentinel --version = %q (code=%d), want to contain the stamped version", out, code)
 	}
-	t.Log("PASS C1")
+	logPass(t, "PASS C1")
 }
 
 // --- C3: every ro mount rejects a write; /state and /tmp accept one ---
@@ -325,7 +337,7 @@ func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 	if !strings.Contains(out, "rc=0") {
 		t.Fatalf("FAIL C3: write to /tmp should succeed: %q", out)
 	}
-	t.Log("PASS C3")
+	logPass(t, "PASS C3")
 }
 
 // --- C2: journal readable via group_add ---
@@ -368,7 +380,7 @@ func TestContainer_C2_JournalViaGroupAdd(t *testing.T) {
 		if codeWith != 0 || strings.TrimSpace(outWith) == "" {
 			t.Fatalf("FAIL C2: --group-add %s could not read the real host journal (code=%d): %s", gid, codeWith, outWith)
 		}
-		t.Log("PASS C2 (real host journal, real systemd-journal gid)")
+		logPass(t, "PASS C2 (real host journal, real systemd-journal gid)")
 		return
 	}
 
@@ -402,7 +414,7 @@ func TestContainer_C2_JournalViaGroupAdd(t *testing.T) {
 	if codeWith != 0 {
 		t.Errorf("FAIL C2: --group-add %d still could not read the probe file (code=%d)", testGID, codeWith)
 	} else {
-		t.Log("PASS C2 (synthetic gid fallback — no real host journal reachable in this environment)")
+		logPass(t, "PASS C2 (synthetic gid fallback — no real host journal reachable in this environment)")
 	}
 }
 
@@ -491,7 +503,7 @@ func TestContainer_C4_SensorsJSON(t *testing.T) {
 	if !found {
 		t.Errorf("FAIL C4: none of sensors -j's keys (%v) matched a hwmon device name (%v)", keysOf(m), names)
 	} else {
-		t.Log("PASS C4")
+		logPass(t, "PASS C4")
 	}
 }
 
@@ -515,7 +527,7 @@ func TestContainer_C5_RasdaemonListable(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("FAIL C5: ls /host/rasdaemon: %s %s", out, errOut)
 	}
-	t.Log("PASS C5")
+	logPass(t, "PASS C5")
 }
 
 // --- C7: ZED events under -t zed (0 hits is a pass) ---
@@ -528,7 +540,7 @@ func TestContainer_C7_ZedUnderJournalctl(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("FAIL C7: journalctl -t zed exit code = %d: %s", code, errOut)
 	}
-	t.Log("PASS C7 (0 hits on an empty synthetic journal dir is itself a pass per R8)")
+	logPass(t, "PASS C7 (0 hits on an empty synthetic journal dir is itself a pass per R8)")
 }
 
 // --- C8: smartd decode (no NVMe -> SKIP) ---
@@ -558,7 +570,7 @@ func TestContainer_C6_TmpfsAndTZ(t *testing.T) {
 	if !strings.Contains(out, "TZ=UTC") {
 		t.Fatalf("FAIL C6: TZ != UTC: %q", out)
 	}
-	t.Log("PASS C6 (DNS resolution of `apprise` requires the compose network — asserted separately via `docker compose config`, not a bare `docker run`)")
+	logPass(t, "PASS C6 (DNS resolution of `apprise` requires the compose network — asserted separately via `docker compose config`, not a bare `docker run`)")
 }
 
 // --- C9: sentinel tick exit codes ---
@@ -758,7 +770,7 @@ func TestContainer_C10_ComposeConfig(t *testing.T) {
 			t.Errorf("FAIL C10: sentinel environment missing %s", v)
 		}
 	}
-	t.Log("PASS C10")
+	logPass(t, "PASS C10")
 }
 
 // --- C11: SIGTERM shutdown + healthcheck ---
@@ -828,7 +840,7 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 	if strings.TrimSpace(out) != "0" {
 		t.Errorf("FAIL C11: exit code = %s, want 0", strings.TrimSpace(out))
 	}
-	t.Log("PASS C11")
+	logPass(t, "PASS C11")
 }
 
 // --- C12: install-host.sh idempotency ---
@@ -878,7 +890,7 @@ apt-get install -y -qq systemd >/dev/null 2>&1 || true
 		// Force it to the test gid with groupmod, falling back to
 		// groupadd only if the group somehow does not exist yet.
 		`groupmod -g ` + testJournalGID + ` systemd-journal 2>/dev/null || groupadd -g ` + testJournalGID + ` systemd-journal
-touch /root/deploy/.env
+: > /root/deploy/.env
 chmod +x /root/deploy/install-host.sh`
 	if out, errOut, code := exec_(prep); code != 0 {
 		t.Skipf("SKIP C12: throwaway container prep failed: %s %s", out, errOut)
@@ -943,7 +955,7 @@ chmod +x /root/deploy/install-host.sh`
 	if !strings.Contains(envContent, "JOURNAL_GID="+testJournalGID) {
 		t.Errorf("FAIL C12: /root/deploy/.env does not contain JOURNAL_GID=%s (got: %s) — gid must be DISCOVERED via getent, never hardcoded", testJournalGID, envContent)
 	}
-	t.Log("PASS C12")
+	logPass(t, "PASS C12")
 }
 
 // TestContainer_C12_MsmtpDelivery is BLOCKER 1 from round-2 review: step3
@@ -953,6 +965,62 @@ chmod +x /root/deploy/install-host.sh`
 // binary, a real SMTP server requiring AUTH, and the exact config file the
 // script writes — asserting the stub actually received an authenticated
 // delivery, not that install-host.sh exited 0.
+// TestContainer_C12_EnvOwnerUnmappedUID is round-3 review MUST-FIX 1: step
+// 6 resolving the .env owner by NAME (stat -c %U) breaks silently for a
+// uid with no /etc/passwd entry — stat prints the literal string
+// "UNKNOWN", `install -o UNKNOWN` fails, and without a checked exit
+// status the step used to report "updated" while writing nothing.
+// C12's own .env is root-owned throughout (uid 0 always resolves), so
+// nothing else exercises this path — this test chown's it to a uid with
+// deliberately NO passwd entry (1000, present nowhere in a fresh
+// debian:trixie-slim's /etc/passwd) and asserts JOURNAL_GID still lands.
+func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		t.Skipf("SKIP C12c: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	name := "sentinel-c12c-test"
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"debian:trixie-slim", "sleep", "300")
+	if code != 0 {
+		t.Skipf("SKIP C12c: could not start throwaway container: %s", errOut)
+	}
+	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 60*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	prep := `set -e
+cp -r /work /root/deploy
+apt-get update -qq
+apt-get install -y -qq systemd >/dev/null 2>&1 || true
+groupmod -g 7777 systemd-journal 2>/dev/null || groupadd -g 7777 systemd-journal
+: > /root/deploy/.env
+chown 1000:1000 /root/deploy/.env
+chmod 600 /root/deploy/.env
+chmod +x /root/deploy/install-host.sh
+! getent passwd 1000 >/dev/null 2>&1` // the whole point: uid 1000 must have NO passwd entry
+	if out, errOut, code := exec_(prep); code != 0 {
+		t.Skipf("SKIP C12c: throwaway container prep failed (or uid 1000 unexpectedly has a passwd entry in this base image): %s %s", out, errOut)
+	}
+
+	out, errOut, _ = exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	envContent, _, _ := exec_("cat /root/deploy/.env")
+	if !strings.Contains(envContent, "JOURNAL_GID=7777") {
+		t.Fatalf("FAIL C12c: JOURNAL_GID=7777 missing from .env after install-host.sh against an unmapped-uid-owned .env (stdout=%q stderr=%q .env=%q)", out, errOut, envContent)
+	}
+	ownerAfter, _, _ := exec_("stat -c '%u:%g' /root/deploy/.env")
+	if strings.TrimSpace(ownerAfter) != "1000:1000" {
+		t.Errorf("FAIL C12c: .env owner changed to %q, want preserved 1000:1000", strings.TrimSpace(ownerAfter))
+	}
+	logPass(t, "PASS C12c (JOURNAL_GID written and owner preserved despite no /etc/passwd entry for the owning uid)")
+}
+
 func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
@@ -1018,7 +1086,7 @@ printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/de
 			if !strings.Contains(dataText, "probe body") {
 				t.Fatalf("FAIL C12b: delivered message did not carry the expected body: %q", dataText)
 			}
-			t.Log("PASS C12b (real msmtp, real AUTH, real delivery)")
+			logPass(t, "PASS C12b (real msmtp, real AUTH, real delivery)")
 			return
 		}
 		t.Logf("C12b: alias %s did not deliver (code=%d): %s %s", alias, sendCode, sendOut, sendErr)
@@ -1151,7 +1219,7 @@ func TestContainer_C13_WorkflowShape(t *testing.T) {
 	if code != 0 {
 		t.Errorf("FAIL C13: actionlint: %s %s", out, errOut)
 	}
-	t.Log("PASS C13 (workflow shape); pull+run verification is CI-only (needs a published GHCR image, not buildable from a local run)")
+	logPass(t, "PASS C13 (workflow shape); pull+run verification is CI-only (needs a published GHCR image, not buildable from a local run)")
 }
 
 // --- json sanity helper used by multiple cases indirectly (kept small) ---

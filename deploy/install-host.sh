@@ -145,6 +145,25 @@ pkg_installed() {
   dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
+# strip_quotes removes ONE matched pair of surrounding single or double
+# quotes from an env-file value. Round-3 review MUST-FIX 4: quoting a
+# value (MAILRISE_SMTP_PASS="secret") is ordinary env-file style and
+# .env.example being unquoted does not mean an operator's real .env is —
+# unstripped, msmtp receives the quote characters as part of the
+# password and authentication fails against the real value while a
+# string check on the config file would still look fine.
+strip_quotes() {
+  local v="$1"
+  if [ "${#v}" -ge 2 ]; then
+    if [[ "$v" == \"*\" && "$v" == *\" ]]; then
+      v="${v:1:-1}"
+    elif [[ "$v" == \'*\' && "$v" == *\' ]]; then
+      v="${v:1:-1}"
+    fi
+  fi
+  printf '%s' "$v"
+}
+
 # --- step 1: packages ----------------------------------------------------
 
 step1() {
@@ -211,8 +230,8 @@ step3() {
   smtp_user=""
   smtp_pass=""
   if [ -f "$ENV_FILE" ]; then
-    smtp_user="$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)"
-    smtp_pass="$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+    smtp_user="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
+    smtp_pass="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
   fi
   if [ -n "$smtp_user" ] && [ -n "$smtp_pass" ]; then
     # mailrise enforces SMTP AUTH unconditionally (R4) and runs
@@ -260,6 +279,18 @@ DISABLED_MARK="# disabled by agentic-server-supervisor: "
 step4() {
   file="/etc/smartd.conf"
   preamble=""
+  # Round-3 review SHOULD-FIX 8: captured BEFORE any edit in this
+  # function (including the in-place -m comment below), not just before
+  # render_managed_block's own rewrite. Capturing it after the -m edit
+  # meant that edit's own change to the file was invisible to the
+  # before/after diff render_managed_block uses to decide whether to
+  # restart smartd and count `changed` — if the managed block itself
+  # happened to already match (nothing for render_managed_block to
+  # rewrite), the -m comment-in-place edit landed on disk with smartd
+  # never restarted and `changed` never incremented for it, leaving the
+  # operator's old mail target live under a "converged" summary.
+  before_hash=""
+  [ -f "$file" ] && before_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
   # A pre-existing unmanaged -m line is commented out WHERE IT STANDS
   # (contracts/runtime.md R5, amended 3fbb0cc) — not merely noted in the
   # managed block's preamble while staying live at the top of the file.
@@ -288,8 +319,22 @@ step4() {
         cp -p "$file" "${file}.bak-$(date +%s)" 2>/dev/null || true
       fi
       tmp_m="$(mktemp)"
-      awk -v mark="$DISABLED_MARK" '
-        /^[^#].*-m / {print mark $0; next}
+      # CRITICAL: scoped to content OUTSIDE the managed block, exactly
+      # like the detection scan above. Without the b/e tracking here,
+      # this awk matches EVERY "-m "-containing line in the whole file —
+      # including the managed block's own live DEVICESCAN line, which is
+      # never prefixed with "#" and matches the same pattern. Found by
+      # constructing the case where a managed block already exists
+      # alongside a still-live unmanaged line: this awk commented OUT
+      # the real DEVICESCAN monitoring line along with the operator's
+      # old one, which is a correctness break, not a cosmetic one — it
+      # would have taken smartd monitoring down entirely on the next
+      # `install-host.sh` run against a host that already had a prior
+      # unmanaged -m line AND an established managed block.
+      awk -v mark="$DISABLED_MARK" -v b="$MARK_BEGIN" -v e="$MARK_END" '
+        $0==b {inblock=1}
+        $0==e {inblock=0}
+        (!inblock) && /^[^#].*-m / {print mark $0; next}
         {print}
       ' "$file" > "$tmp_m"
       install -m 0644 -o root -g root "$tmp_m" "$file"
@@ -323,23 +368,32 @@ step4() {
     fi
   fi
 
-  before_hash=""
-  [ -f "$file" ] && before_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
-
+  did_update=0
   if render_managed_block "$file" "$preamble" "$SMARTD_LINE" 0644; then
     note "step4 /etc/smartd.conf: updated"
     changed=$((changed+1))
-    if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
-      after_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
-      if [ "$before_hash" != "$after_hash" ]; then
-        systemctl restart smartd 2>/dev/null || {
-          echo "$PROG: systemctl restart smartd failed" >&2
-          TRANSIENT_FAIL=1
-        }
-      fi
-    fi
+    did_update=1
   else
     note "step4 /etc/smartd.conf: already converged"
+  fi
+
+  # Round-3 review SHOULD-FIX 8, continued: this must fire even when
+  # render_managed_block itself found nothing to rewrite (did_update=0)
+  # — the -m in-place comment edit earlier in this function is a real
+  # change render_managed_block never sees, so gating the restart+changed
+  # bookkeeping on render_managed_block's own return value alone (the
+  # original bug) missed exactly that case.
+  if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+    after_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+    if [ "$before_hash" != "$after_hash" ]; then
+      if [ "$did_update" -eq 0 ]; then
+        changed=$((changed+1))
+      fi
+      systemctl restart smartd 2>/dev/null || {
+        echo "$PROG: systemctl restart smartd failed" >&2
+        TRANSIENT_FAIL=1
+      }
+    fi
   fi
 }
 
@@ -412,6 +466,15 @@ step6() {
       sed "s/^JOURNAL_GID=.*/${desired}/" "$ENV_FILE" > "$tmp"
     else
       cp "$ENV_FILE" "$tmp"
+      # Round-3 review MUST-FIX 3: a .env with no trailing newline (common
+      # from a hand-edited or backup-restored file) means this append
+      # lands on the SAME line as the previous value with no separator —
+      # verified: "MAILRISE_SMTP_PASS=secret" + append becomes
+      # "MAILRISE_SMTP_PASS=secretJOURNAL_GID=7777", destroying both
+      # values, on the mail-delivery path this has already broken twice.
+      if [ -n "$(tail -c1 "$tmp")" ]; then
+        printf '\n' >> "$tmp"
+      fi
       printf '%s\n' "$desired" >> "$tmp"
     fi
   else
@@ -425,15 +488,28 @@ step6() {
   # writes into it) and stays owned by whoever created it. A fresh file
   # (this script creating .env for the first time) has no prior owner to
   # preserve, so it falls back to root:root, same as before.
-  install_owner="root"
-  install_group="root"
+  install_owner="0"
+  install_group="0"
   if [ -f "$ENV_FILE" ]; then
-    existing_owner="$(stat -c '%U' "$ENV_FILE" 2>/dev/null || stat -f '%Su' "$ENV_FILE" 2>/dev/null)"
-    existing_group="$(stat -c '%G' "$ENV_FILE" 2>/dev/null || stat -f '%Sg' "$ENV_FILE" 2>/dev/null)"
+    # Round-3 review finding: resolving by NAME (stat %U/%G) breaks for a
+    # uid with no /etc/passwd entry (an .env restored from backup, copied
+    # off another host, or living on a shared folder with foreign
+    # ownership) — stat then prints the literal string "UNKNOWN", install
+    # rejects it ("invalid user 'UNKNOWN'"), and without a checked exit
+    # status the step reported "updated" and counted it in changed while
+    # writing nothing. Numeric ids never hit that: stat -c %u/%g always
+    # returns a number, and install always accepts a number.
+    existing_owner="$(stat -c '%u' "$ENV_FILE" 2>/dev/null || stat -f '%u' "$ENV_FILE" 2>/dev/null)"
+    existing_group="$(stat -c '%g' "$ENV_FILE" 2>/dev/null || stat -f '%g' "$ENV_FILE" 2>/dev/null)"
     [ -n "$existing_owner" ] && install_owner="$existing_owner"
     [ -n "$existing_group" ] && install_group="$existing_group"
   fi
-  install -m 0600 -o "$install_owner" -g "$install_group" "$tmp" "$ENV_FILE"
+  if ! install -m 0600 -o "$install_owner" -g "$install_group" "$tmp" "$ENV_FILE"; then
+    echo "$PROG: failed to install $ENV_FILE" >&2
+    TRANSIENT_FAIL=1
+    rm -f "$tmp"
+    return
+  fi
   rm -f "$tmp"
   changed=$((changed+1))
 }

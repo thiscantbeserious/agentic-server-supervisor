@@ -1,5 +1,8 @@
-# deploy/Dockerfile — R1. Two stages, CGO_ENABLED=0, no bash/jq/curl/
-# coreutils in the runtime layer. Build context is the repo root:
+# deploy/Dockerfile — R1. Two stages, CGO_ENABLED=0. Sentinel installs
+# nothing beyond the packages listed in stage 2 and executes only
+# journalctl, sensors -j and agy — but the debian:trixie-slim base still
+# ships /bin/bash and coreutils (measured; contracts/runtime.md R1 was
+# corrected to say so, f95693c). Build context is the repo root:
 #
 #   docker build -f deploy/Dockerfile -t sentinel:dev \
 #     --build-arg AGY_URL=<https url to the agy linux-amd64 tarball> \
@@ -21,6 +24,14 @@ ARG AGY_URL
 ARG AGY_SHA256
 ARG AGY_VERSION=unknown
 ARG VERSION=dev
+# TARGETARCH is a buildx-populated automatic arg (empty on plain `docker
+# build`, in which case it falls back to amd64 — bam's real arch, and
+# R1's own documented build command has no --platform flag). Round-3
+# review SHOULD-FIX: a hardcoded GOARCH=amd64 builds a binary that
+# Exec-format-errors on an arm64 build (which the build-time
+# `sentinel --version` check would then fail on), even though bam itself
+# is amd64 and never hits this.
+ARG TARGETARCH=amd64
 
 WORKDIR /src
 
@@ -35,7 +46,7 @@ RUN test -z "$(gofmt -l .)" || (echo "ERROR: gofmt found unformatted files:" >&2
 RUN go vet ./...
 RUN go test ./...
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/sentinel ./cmd/sentinel
 

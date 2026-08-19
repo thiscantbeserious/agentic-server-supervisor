@@ -1,0 +1,14 @@
+# Secrets that must never enter a build layer or the exported build
+# cache (round-3 review MUST-FIX 2). Multi-stage keeps the final image
+# clean, but COPY . . in the builder stage still puts these into a
+# builder layer / any cache export unless excluded here.
+.env
+deploy/.env
+deploy/mailrise/mailrise.conf
+deploy/apprise/*.filled
+
+# .git is not needed inside the build context; excluding it also means
+# TestNoSecretsInRepo (run by the builder stage's `go test ./...`) hits
+# its "not a git checkout" branch and skips LOUDLY (t.Skipf, C9) rather
+# than silently passing — see internal/notify/notify_test.go.
+.git

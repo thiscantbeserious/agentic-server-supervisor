@@ -22,9 +22,11 @@ on:
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
 
+# Round-3 review SHOULD-FIX 7: packages:write scoped to the build job only
+# (it pushes to GHCR); the test job only checks out and runs the Go
+# toolchain and needs nothing beyond contents:read.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   test:
@@ -50,6 +52,9 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     concurrency:
       group: build-${{ github.ref }}
       cancel-in-progress: true
@@ -91,6 +96,14 @@ jobs:
 
       - name: Pull and smoke-run the published image
         if: github.event_name != 'pull_request'
+        # GHCR requires a lowercase image path. This repository is
+        # already all-lowercase so raw ${{ github.repository }} works
+        # today, but it is latent breakage for any repo/org with
+        # capitals — lowercase it explicitly rather than relying on that
+        # (the metadata-action step above does this automatically for
+        # the tags it builds; this step reconstructs the reference by
+        # hand, so it needs the same treatment).
         run: |
-          docker pull ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }}
-          docker run --rm ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }} --version
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel:${{ github.sha }}"
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" --version
