@@ -24,8 +24,8 @@ Build context = repo root.
 
 | ARG | Required | Default | Meaning |
 |---|---|---|---|
-| `AGY_URL` | **yes** | — | download URL of the Antigravity CLI release tarball (linux/amd64). Empty ⇒ build fails with `ERROR: AGY_URL build-arg is required`. Ops input — resolved from the vendor manifest, never guessed. |
-| `AGY_SHA512` | **yes** | — | the **vendor-published** sha512 of that tarball, copied from the manifest; mismatch fails the build. Replaces `AGY_SHA256`. |
+| `AGY_URL_AMD64` / `AGY_URL_ARM64` | **yes** | — | download URL of the Antigravity CLI release tarball for each architecture. The one matching `TARGETARCH` is selected inside the build. Empty for the target being built ⇒ `ERROR: AGY_URL_<ARCH> build-arg is required`. Ops input — resolved from the vendor manifest, never guessed. |
+| `AGY_SHA512_AMD64` / `AGY_SHA512_ARM64` | **yes** | — | the **vendor-published** sha512 of the corresponding tarball, copied from the manifest; mismatch fails the build. |
 | `AGY_VERSION` | no | `unknown` | OCI label only |
 
 **Where the ops values come from, and why sha512 rather than sha256.** The vendor's own installer (`https://antigravity.google/cli/install.sh`) resolves a platform to an artifact through a manifest:
@@ -39,6 +39,19 @@ That manifest publishes **sha512 only**. Requiring a sha256 forced the operator 
 
 **The tarball does NOT contain a file named `agy`.** Verified against the real artifact 2026-08-19 (version 1.1.15): the archive contains a single ELF x86-64 executable named **`antigravity`**, ~205 MB. The vendor installer extracts it and *installs* it as `agy` (`BINARY_PATH="$TARGET_DIR/agy"`), which is why the installed binary carries that name — and why an implementation written against a synthetic fixture named `agy` builds cleanly and then fails on the real artifact. **The Dockerfile must locate the executable in the tarball and install it as `/usr/local/bin/agy`, not search for a file already called `agy`.**
 
+**The image is built for `linux/amd64` AND `linux/arm64`, and both must work.** The vendor ships a distinct artifact per architecture and both are verified:
+
+```
+manifests/linux_amd64.json -> linux-x64/cli_linux_x64.tar.gz     ELF x86-64,  sha512 7d6020ca…
+manifests/linux_arm64.json -> linux-arm/cli_linux_arm64.tar.gz   ELF aarch64, sha512 2571031d…
+```
+
+Both downloaded and checked against the vendor digest on 2026-08-19; each archive contains a single executable named `antigravity`.
+
+**Selection is by `TARGETARCH`, which buildx supplies**, choosing between the two pinned pairs. That keeps the pin — the operator still supplies exact URLs and vendor digests, and the build never resolves anything from the network on its own — while producing a correct image for either target. `GOARCH=${TARGETARCH}` in the builder and **no `--platform` pin on the runtime stage**: buildx sets the platform per target, and hardcoding one there is what previously let an arm64 build emit an arm64 Go binary into an amd64 userland.
+
+**The architecture assertion tests coherence, not a constant.** Asserting `Architecture == amd64` would fail every legitimate arm64 build. What must hold is that the Go binary's ELF machine, the image manifest's architecture, and the agy binary's ELF machine all agree with the platform that was requested. A three-way mismatch is the defect; a particular value is not.
+
 **The vendor installer is deliberately NOT run at build time.** It resolves to *latest* through the manifest, so piping it into the build would make every rebuild a different analyzer version with no record of which one an image contains — destroying the reproducibility the pinned URL and digest exist to provide, and removing our integrity check in favour of executing whatever the vendor serves at that moment. It also targets a user bin directory and stages through `$HOME/.cache`, neither of which suits a multi-stage build. Pinning is the point; the manifest is how the pin is *found*, not a substitute for it.
 
 **Ops helper:** `deploy/agy-build-args.sh` fetches the manifest and prints the `--build-arg` pair for the current release, so the operator never hand-assembles a URL. They see the version they are about to pin before pinning it. The helper resolves; it does not build.
@@ -50,7 +63,7 @@ That manifest publishes **sha512 only**. Requiring a sha256 forced the operator 
 - `COPY . .`
 - `gofmt -l .` (must be empty), `go vet ./...`, `go test ./...` — any failure fails the build. This is where the T6 tables gate the image.
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/sentinel ./cmd/sentinel`
-- `agy`: download `${AGY_URL}`, verify `${AGY_SHA512}` with `sha512sum -c`, unpack, locate the **single executable** in the archive (by permission bit, never by filename — the vendor tarball ships it as `antigravity`), and place it at `/out/agy`. Zero or more than one executable candidate ⇒ fail the build naming what was found.
+- `agy`: select the URL/digest pair matching `TARGETARCH`, download it, verify with `sha512sum -c`, unpack, locate the **single executable** in the archive (by permission bit, never by filename — the vendor tarball ships it as `antigravity` on both architectures), and place it at `/out/agy`. Zero or more than one executable candidate ⇒ fail the build naming what was found.
 
 **Stage 2 — runtime (`debian:trixie-slim`)** — matches the target's Debian 13 journal format (ARCHITECTURE §2.7).
 - apt, `--no-install-recommends`, lists deleted in the same layer, exactly: `systemd` (provides `journalctl`), `lm-sensors`, `ca-certificates`, `tzdata`.
@@ -432,7 +445,7 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}` — skipped on `pull_request`
 4. `docker/metadata-action@v5` → `images: ghcr.io/${{ github.repository }}/sentinel`, tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
-5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL=${{ vars.AGY_URL }}`, `AGY_SHA512=${{ vars.AGY_SHA512 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
+5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64,linux/arm64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL=${{ vars.AGY_URL }}`, `AGY_SHA512=${{ vars.AGY_SHA512 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
 6. On non-PR runs: `docker pull ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }}` and `docker run --rm <that image> --version` — proves the published image is pullable and runnable.
 
 `AGY_URL`/`AGY_SHA512`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
