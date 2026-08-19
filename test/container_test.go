@@ -11,7 +11,7 @@
 // they are NOT run by `go test ./...` (no build tag) or by CI's `test` job
 // (R6) — only by a dedicated container job/local run on a real Linux host.
 //
-// AGY_URL/AGY_SHA256: real ops input (contracts/runtime.md R1), never
+// AGY_URL/AGY_SHA512: real ops input (contracts/runtime.md R1), never
 // guessed here. If both are set in the environment, the real tarball is
 // used. Otherwise a SYNTHETIC local fixture (a fake "agy" shell script,
 // served by an in-process httptest.Server) stands in, so the Dockerfile's
@@ -26,7 +26,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -101,33 +101,51 @@ var (
 	buildErr   error
 	fakeAgySrv *httptest.Server
 	agyURL     string
-	agySHA256  string
+	agySHA512  string
 )
 
-// syntheticAgy starts an in-process HTTP server serving a fake "agy" tarball
-// and returns its URL + sha256. Purely local — never a guessed remote
+// syntheticAgy starts an in-process HTTP server serving a fake agy tarball
+// and returns its URL + sha512. Purely local — never a guessed remote
 // location.
+//
+// The fixture executable is deliberately named "not-agy", NOT "agy"
+// (contracts/runtime.md R1, amended 7547238): the real vendor tarball
+// contains a single ELF executable named "antigravity" — the vendor's own
+// installer is what renames it to "agy" on install — so a fixture literally
+// named "agy" was certifying exactly the extraction bug that broke the
+// real build (Dockerfile searched for a file already called "agy", which
+// matches nothing in the real archive). This fixture now exercises the
+// same shape: one executable, not named "agy", found by permission bit.
 func syntheticAgy(t *testing.T) (url, sha string) {
 	t.Helper()
 	if fakeAgySrv != nil {
-		return agyURL, agySHA256
+		return agyURL, agySHA512
 	}
 	dir := t.TempDir()
 	script := []byte("#!/bin/sh\ncase \"$1\" in\n  --version) echo 'agy container-test 0.0.0-test'; exit 0 ;;\n  *) exit 0 ;;\nesac\n")
-	agyPath := filepath.Join(dir, "agy")
+	agyPath := filepath.Join(dir, "not-agy")
 	if err := os.WriteFile(agyPath, script, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	tarPath := filepath.Join(dir, "agy.tar.gz")
-	if out, errOut, code := runCmd(t, 30*time.Second, "tar", "-czf", tarPath, "-C", dir, "agy"); code != 0 {
+	// COPYFILE_DISABLE=1: macOS's tar otherwise embeds an AppleDouble
+	// sidecar file (._not-agy) alongside the real one — extracted on
+	// Linux it ALSO carries the executable bit, so the Dockerfile's
+	// "exactly one executable" check (correctly) refuses to guess and
+	// fails the build with 2 candidates. That is the Dockerfile doing
+	// its job; the sidecar file is purely an artifact of building this
+	// FIXTURE on macOS and has nothing to do with the real vendor
+	// tarball, so it belongs suppressed here, not tolerated there.
+	t.Setenv("COPYFILE_DISABLE", "1")
+	if out, errOut, code := runCmd(t, 30*time.Second, "tar", "-czf", tarPath, "-C", dir, "not-agy"); code != 0 {
 		t.Fatalf("tar: %s %s", out, errOut)
 	}
 	data, err := os.ReadFile(tarPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(data)
-	agySHA256 = hex.EncodeToString(sum[:])
+	sum := sha512.Sum512(data)
+	agySHA512 = hex.EncodeToString(sum[:])
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agy.tar.gz", func(w http.ResponseWriter, r *http.Request) {
@@ -136,11 +154,11 @@ func syntheticAgy(t *testing.T) (url, sha string) {
 	})
 	fakeAgySrv = httptest.NewServer(mux)
 	agyURL = fakeAgySrv.URL + "/agy.tar.gz"
-	return agyURL, agySHA256
+	return agyURL, agySHA512
 }
 
 // buildSentinelImage builds deploy/Dockerfile once, tagged imageTag. Real
-// AGY_URL/AGY_SHA256 win if both are set; otherwise the synthetic fixture
+// AGY_URL/AGY_SHA512 win if both are set; otherwise the synthetic fixture
 // above is used with --add-host so the builder container can reach this
 // process. Every case that needs a built image calls this first and SKIPs
 // (never fails) if it returns an error — an unreachable Docker daemon or a
@@ -151,7 +169,7 @@ func buildSentinelImage(t *testing.T) error {
 	buildOnce.Do(func() {
 		root := repoRoot(t)
 		url := os.Getenv("AGY_URL")
-		sha := os.Getenv("AGY_SHA256")
+		sha := os.Getenv("AGY_SHA512")
 		hostFlag := ""
 		if url == "" || sha == "" {
 			url, sha = syntheticAgy(t)
@@ -164,8 +182,12 @@ func buildSentinelImage(t *testing.T) error {
 			hostFlag = "host.docker.internal:host-gateway"
 		}
 		args := []string{"build", "-f", "deploy/Dockerfile", "-t", imageTag,
+			// No --platform here: the Dockerfile pins stage 2 to
+			// linux/amd64 itself (where it matters — the stage that
+			// executes agy), while stage 1 builds natively for speed.
+			// See that FROM line's comment for the full reasoning.
 			"--build-arg", "AGY_URL=" + url,
-			"--build-arg", "AGY_SHA256=" + sha,
+			"--build-arg", "AGY_SHA512=" + sha,
 			"--build-arg", "VERSION=container-test",
 		}
 		if hostFlag != "" {
@@ -220,6 +242,87 @@ func requireImage(t *testing.T) {
 	if err := buildSentinelImage(t); err != nil {
 		t.Fatalf("FAIL: could not build %s: %v", imageTag, err)
 	}
+}
+
+// TestContainer_RealAgyBuild is the check the coordinator named as the one
+// that would have caught the extraction bug no synthetic fixture could:
+// "Build the image with these real values at least once." Gated on
+// SENTINEL_REAL_AGY=1 (same gate C9/CLAUDE.md already use for real-agy
+// interaction) since it downloads the real ~53 MB tarball (~205 MB
+// extracted) from the vendor over the network — not something a default
+// `go test ./...` or even the default container suite should do.
+//
+// The values below are the ones the coordinator independently verified
+// (fetched, sha512-checked) on 2026-08-19 for agy 1.1.15. They are NOT
+// Dockerfile/compose defaults — R1 requires AGY_URL/AGY_SHA512 as ops
+// input with no default, on purpose — these are fixture literals for this
+// one gated verification, the same way a table-driven test's fixture data
+// is not a production default just because it lives in the repo.
+const (
+	realAgyVersion = "1.1.15"
+	realAgyURL     = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.15-5350383476932608/linux-x64/cli_linux_x64.tar.gz"
+	realAgySHA512  = "7d6020caff2e06a5ddf2553f2d9d5b428e3becc69727d11032f10e40609b938db428578ccd5c72694bab5e4da483de9ad3121578cc172adf174aa5263ce51dcc"
+)
+
+func TestContainer_RealAgyBuild(t *testing.T) {
+	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
+		t.Skip("SKIP: SENTINEL_REAL_AGY != 1 — set it to build the image against the REAL agy tarball over the network (~53MB download, ~205MB extracted)")
+	}
+	root := repoRoot(t)
+	tag := "sentinel:real-agy-test"
+
+	args := []string{"build", "-f", "deploy/Dockerfile", "-t", tag,
+		// The Dockerfile itself pins stage 2 (runtime, where agy actually
+		// EXECUTES) to linux/amd64 — see that FROM line for why: without
+		// it, an arm64 dev host resolves stage 2 to the arm64 debian
+		// base, and the real agy binary (dynamically linked against
+		// glibc) fails with "qemu-x86_64-static: Could not open
+		// '/lib64/ld-linux-x86-64.so.2'" — that file exists, just for the
+		// wrong arch. No --platform flag needed here; the Dockerfile
+		// itself is now correct regardless of build host.
+		"--build-arg", "AGY_URL=" + realAgyURL,
+		"--build-arg", "AGY_SHA512=" + realAgySHA512,
+		"--build-arg", "AGY_VERSION=" + realAgyVersion,
+		"--build-arg", "VERSION=real-agy-test",
+		".",
+	}
+	// -f is relative to the docker CLI's own cwd, and "." is the build
+	// context — both need cmd.Dir=root, exactly like buildSentinelImage
+	// does; runCmd (used everywhere else in this file) has no cwd
+	// override and would resolve "deploy/Dockerfile" against the test
+	// binary's own working directory instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, dockerBin(), args...)
+	cmd.Dir = root
+	var buildOut bytes.Buffer
+	cmd.Stdout = &buildOut
+	cmd.Stderr = &buildOut
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("FAIL: real-agy build failed: %v\n%s", err, buildOut.String())
+	}
+	defer runCmd(t, 30*time.Second, dockerBin(), "rmi", tag)
+
+	// The real agy --version output and a real sentinel --version, both
+	// out of the ACTUAL built image — not the synthetic fixture's stub.
+	verOut, verErr, verCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "agy", tag, "--version")
+	if verCode != 0 {
+		t.Fatalf("FAIL: agy --version in the real-agy image (code=%d): %s %s", verCode, verOut, verErr)
+	}
+	t.Logf("real agy --version: %s", strings.TrimSpace(verOut))
+
+	sentOut, sentErr, sentCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", tag, "--version")
+	if sentCode != 0 {
+		t.Fatalf("FAIL: sentinel --version in the real-agy image (code=%d): %s %s", sentCode, sentOut, sentErr)
+	}
+
+	sizeOut, _, sizeCode := runCmd(t, 10*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Size}}")
+	if sizeCode == 0 {
+		if bytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
+			t.Logf("real-agy image size: %d bytes (%.1f MB) — T8 pulls this onto bam", bytes, float64(bytes)/1e6)
+		}
+	}
+	logPass(t, "PASS real-agy build (version=%s)", realAgyVersion)
 }
 
 // --- C1: container starts unprivileged ---
