@@ -22,8 +22,9 @@ on:
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
 
-# packages:write is scoped to the build job only (it pushes to GHCR); the
-# test job only checks out and runs the Go toolchain and needs nothing
+# packages:write is scoped to the build/merge jobs only (they push to
+# GHCR); test and container only check out and run the Go toolchain
+# (plus, for container, a local docker build/run) and need nothing
 # beyond contents:read.
 permissions:
   contents: read
@@ -32,7 +33,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -49,16 +50,18 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
-  # The C1-C13 container suite (test/container_test.go, build tag
-  # `container`) had never run in CI — only the unit suite above did.
+  # The C1-C13 container suite, run once per architecture on a runner
+  # NATIVE to it — never both inside one job, never under emulation.
+  # Architecture is the matrix's job, not this suite's or the runner's:
+  # test/container_test.go takes its own arch from runtime.GOARCH, which
+  # is exactly the platform this job's runner actually is.
+  #
   # C1's coherence assertion is independent of any build arg (it derives
-  # its expectation from the test's own platform loop, not from
-  # anything the build produced) and would have caught the TARGETARCH
-  # ARG-scoping defect that shipped an amd64 image labelled arm64 — it
-  # simply never ran anywhere but podman, which never had that defect.
-  # This job is the fix for that: the same suite, on the same kind of
-  # builder (real BuildKit-backed Docker, not podman) that produces what
-  # ships.
+  # its expectation from the process's own arch, not from anything the
+  # build produced) and would have caught the TARGETARCH ARG-scoping
+  # defect that once shipped an amd64 image labelled arm64 — it simply
+  # never ran on real BuildKit before this job existed, only on podman,
+  # which never had that defect.
   #
   # needs: test rather than running in parallel — this suite takes
   # several minutes and downloads real artifacts over the network; no
@@ -66,32 +69,34 @@ jobs:
   # already broken.
   container:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      # Same requirement as the build job: the suite builds and runs
-      # images for both platforms, including the one non-native to this
-      # runner.
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: go test -tags container
         # AGY_URL_*/AGY_SHA512_* from repository variables, never
         # hardcoded here — same values the build job's build-args use.
-        # Set, they make buildSentinelImage() build every test image
-        # from the REAL vendor artifact instead of the synthetic
+        # Set, they make buildSentinelImage() build this job's test
+        # image from the REAL vendor artifact instead of the synthetic
         # fixture, for every case in this run, not only the ones gated
         # on SENTINEL_REAL_AGY.
         #
         # SENTINEL_REAL_AGY=1 additionally runs TestContainer_RealAgyBuild,
-        # which downloads and builds against the real tarballs directly
-        # (its own fixture literals, not these vars — see that test's
-        # own comment for why) rather than through buildSentinelImage.
+        # which downloads and builds against the real tarball directly
+        # (its own fixture literal for THIS matrix leg's arch, not these
+        # vars — see that test's own comment for why) rather than
+        # through buildSentinelImage.
         #
         # SENTINEL_E2E is deliberately NOT set here: TestE2E needs
         # apprise, mailrise, and the Telegram bot token as a secret —
@@ -106,23 +111,30 @@ jobs:
           SENTINEL_REAL_AGY: "1"
         run: go test -tags container -v -timeout 25m ./test/...
 
+  # Built per architecture, on a runner native to it, and pushed by
+  # digest rather than by tag — no tag exists yet for a single-arch
+  # push, only after `merge` below assembles all of them into one
+  # manifest list and tags THAT. This is what makes the design
+  # genuinely architecture-independent: a third architecture later is
+  # one more matrix row here (and in `container` above) and nothing
+  # else — no workflow logic branches on which architectures exist.
   build:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     concurrency:
-      group: build-${{ github.ref }}
+      group: build-${{ matrix.arch }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
-
-      # The arm64 pass executes arm64 code twice on this amd64 runner —
-      # once for the in-build agy/sentinel verification steps, again for
-      # the smoke-run step below — so the host needs binfmt_misc handlers
-      # registered before buildx can run anything non-native.
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -133,6 +145,128 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # GHCR requires a lowercase image path. This repository is already
+      # all-lowercase so raw ${{ github.repository }} works today, but
+      # it is latent breakage for any repo/org with capitals — lowercase
+      # it explicitly rather than relying on that. Computed once here so
+      # every later step (the build's own tag, the smoke pull, the
+      # digest artifact) references the same value.
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          # Single platform — this job's own, matching the runner it is
+          # already executing on. buildx supplies TARGETARCH/TARGETPLATFORM
+          # for it; the Dockerfile selects the matching
+          # AGY_URL_*/AGY_SHA512_* pair.
+          platforms: ${{ matrix.platform }}
+          # No tag: pushed by digest only. `merge` assembles the
+          # manifest list from every architecture's digest and applies
+          # the real tags to THAT, so a tag never points at a
+          # single-architecture image even transiently.
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          build-args: |
+            AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}
+            AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}
+            AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}
+            AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}
+            AGY_VERSION=${{ vars.AGY_VERSION }}
+            VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+
+      - name: Smoke-test this architecture's pushed digest, natively
+        if: github.event_name != 'pull_request'
+        # No --platform anywhere below: this runner IS matrix.arch, so
+        # every docker run here executes natively. Nothing to emulate,
+        # nothing to branch on.
+        run: |
+          IMAGE="${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}"
+          docker pull "$IMAGE"
+
+          # ELF e_machine read FIRST, for BOTH binaries: it reads bytes
+          # rather than executing anything, and proves the property
+          # that actually matters — the right architecture binaries are
+          # in the right image. A bare `--version` cannot prove that on
+          # its own; a Dockerfile ARG-scoping defect once produced
+          # amd64 binaries inside an image labelled and manifested as
+          # arm64, with every execution-based check (including
+          # `sentinel --version`, which a static binary happily runs
+          # regardless of its real architecture) passing anyway.
+          WANT="3e 00"; [ "${{ matrix.arch }}" = "arm64" ] && WANT="b7 00"
+          for BIN in sentinel agy; do
+            GOT="$(docker run --rm --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/$BIN | tr -s ' ')"
+            case "$GOT" in
+              *"$WANT"*) ;;
+              *) echo "$BIN ELF e_machine mismatch: got '$GOT', want '$WANT'" >&2; exit 1 ;;
+            esac
+          done
+
+          docker run --rm "$IMAGE" --version
+
+          # Invoked through a shell rather than as a direct --entrypoint
+          # exec: direct exec of agy on a GitHub runner has failed once
+          # (exit 255) where the shell form passed — cause not
+          # established, kept as the form known to work.
+          docker run --rm --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
+
+      - name: Export this architecture's digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload the digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assembles every architecture's digest (needs: build waits for the
+  # WHOLE matrix, and fails if any leg failed — fail-fast: false on
+  # `build` means one architecture failing is still visible on its own,
+  # but a manifest list is never published missing the architecture
+  # that failed) into one manifest list and tags it. A third
+  # architecture later needs no change here: it is picked up by
+  # downloading its digest artifact along with the others.
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download every architecture's digest
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -141,91 +275,20 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long,prefix=
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          # Both architectures, always — contracts/runtime.md R1: arm64 is
-          # not optional. buildx supplies TARGETARCH per platform; the
-          # Dockerfile selects the matching AGY_URL_*/AGY_SHA512_* pair
-          # for each.
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}
-            AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}
-            AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}
-            AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}
-            AGY_VERSION=${{ vars.AGY_VERSION }}
-            VERSION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Pull and smoke-run the published image (both platforms)
-        if: github.event_name != 'pull_request'
-        # A multi-arch push produces a manifest list (contracts/runtime.md
-        # R1/R6): `docker pull`/`docker run` with no --platform silently
-        # resolves to the runner's OWN architecture
-        # (amd64 on ubuntu-latest) and would leave arm64 completely
-        # untested here — a manifest list makes that failure mode quiet,
-        # since it is "correct" on every host by construction. Chosen
-        # explicitly: pull and run BOTH platforms rather than declaring
-        # this step single-arch-by-design, since the cost is two extra
-        # lines and the alternative is an architecture that ships
-        # untested by this step (the container suite covers it too, but
-        # this is the step that proves the PUBLISHED image specifically
-        # is pullable and runnable, not a locally built one).
-        #
-        # GHCR requires a lowercase image path. This repository is
-        # already all-lowercase so raw ${{ github.repository }} works
-        # today, but it is latent breakage for any repo/org with
-        # capitals — lowercase it explicitly rather than relying on that
-        # (the metadata-action step above does this automatically for
-        # the tags it builds; this step reconstructs the reference by
-        # hand, so it needs the same treatment).
+      - name: Create the manifest list and push it, tagged
+        working-directory: /tmp/digests
         run: |
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel:${{ github.sha }}"
-          for PLATFORM in linux/amd64 linux/arm64; do
-            echo "::group::$PLATFORM"
-            docker pull --platform "$PLATFORM" "$IMAGE"
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
 
-            # ELF e_machine read FIRST, for BOTH platforms and BOTH
-            # binaries: it reads bytes rather than executing anything,
-            # so it always works regardless of whether this runner can
-            # emulate PLATFORM, and it proves the property that actually
-            # matters — the right architecture binaries are in the right
-            # image. A bare `--version` cannot prove that on its own; a
-            # Dockerfile ARG-scoping defect once produced amd64 binaries
-            # inside an image labelled and manifested as arm64, with
-            # every execution-based check (including `sentinel
-            # --version`, which a static binary passes under emulation
-            # regardless of its real architecture) passing anyway.
-            WANT="3e 00"; [ "$PLATFORM" = "linux/arm64" ] && WANT="b7 00"
-            for BIN in sentinel agy; do
-              GOT="$(docker run --rm --platform "$PLATFORM" --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/$BIN | tr -s ' ')"
-              case "$GOT" in
-                *"$WANT"*) ;;
-                *) echo "$BIN ELF e_machine mismatch on $PLATFORM: got '$GOT', want '$WANT'" >&2; exit 1 ;;
-              esac
-            done
-
-            # sentinel is a static Go binary and executes correctly
-            # under this runner's emulation on both platforms.
-            docker run --rm --platform "$PLATFORM" "$IMAGE" --version
-
-            # agy is dynamically linked (interpreter /lib64/ld-linux-*.so.*)
-            # and, with the ARG-scoping defect above fixed, is the
-            # correct target-architecture binary — executing it here on
-            # BOTH platforms, including under emulation, is a genuine
-            # test again.
-            #
-            # Invoked through a shell rather than as a direct
-            # --entrypoint exec: direct exec of agy on this runner's
-            # native amd64 has failed once (exit 255) where the shell
-            # form passed — cause not established, kept as the form
-            # known to work.
-            docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
-            echo "::endgroup::"
+      - name: Verify the manifest list advertises every architecture
+        run: |
+          REF="${{ steps.image.outputs.name }}:${{ github.sha }}"
+          docker buildx imagetools inspect "$REF"
+          PLATFORMS="$(docker buildx imagetools inspect "$REF" --raw | jq -r '.manifests[].platform | select(.os=="linux") | .os+"/"+.architecture' | sort -u)"
+          for want in linux/amd64 linux/arm64; do
+            echo "$PLATFORMS" | grep -qx "$want" || { echo "manifest list missing $want" >&2; exit 1; }
           done
