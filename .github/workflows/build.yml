@@ -138,7 +138,14 @@ jobs:
             # that it matches PLATFORM — the exact multi-arch mismatch
             # this workflow's own build args exist to prevent, and the
             # one a working sentinel binary cannot detect on its own.
-            docker run --rm --platform "$PLATFORM" --entrypoint /usr/local/bin/agy "$IMAGE" --version
+            #
+            # Invoked through a shell, not as a direct --entrypoint exec:
+            # direct exec of /usr/local/bin/agy failed here once on a
+            # GitHub runner (exit 255, "no such file or directory") on
+            # the NATIVE platform, not under emulation, while the same
+            # binary in the same image ran correctly via a shell and via
+            # direct exec on podman locally — cause not established.
+            docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
             WANT="3e 00"; [ "$PLATFORM" = "linux/arm64" ] && WANT="b7 00"
             GOT="$(docker run --rm --platform "$PLATFORM" --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/agy | tr -s ' ')"
             case "$GOT" in
