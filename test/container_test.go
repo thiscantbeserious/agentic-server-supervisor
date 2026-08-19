@@ -343,15 +343,29 @@ func requireImage(t *testing.T, arch string) {
 // t.Parallel anywhere in this file).
 var currentArch string
 
+// forEachArch skips the parent test, naming the reason, when every
+// per-architecture subtest skipped — otherwise a parent whose subtests
+// are all `t.Skip`ped (e.g. a test that only runs meaningfully against a
+// real host, per the C4/C5/C8 gates below) still reports `--- PASS` on
+// the parent, indistinguishable from a parent that ran real assertions.
 func forEachArch(t *testing.T, f func(t *testing.T)) {
 	t.Helper()
+	skipped := 0
 	for _, arch := range containerArches {
 		arch := arch
-		t.Run(arch, func(t *testing.T) {
+		var subT *testing.T
+		t.Run(arch, func(st *testing.T) {
+			subT = st
 			currentArch = arch
-			requireImage(t, arch)
-			f(t)
+			requireImage(st, arch)
+			f(st)
 		})
+		if subT != nil && subT.Skipped() {
+			skipped++
+		}
+	}
+	if skipped == len(containerArches) {
+		t.Skip("every architecture subtest skipped; see subtest output for the reason")
 	}
 }
 

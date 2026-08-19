@@ -61,6 +61,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The arm64 pass executes arm64 code twice on this amd64 runner —
+      # once for the in-build agy/sentinel verification steps, again for
+      # the smoke-run step below — so the host needs binfmt_misc handlers
+      # registered before buildx can run anything non-native.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
