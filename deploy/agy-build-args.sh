@@ -38,10 +38,21 @@ json="$(fetch "$MANIFEST_URL")" || {
 }
 
 # Extract a top-level "key": "value" pair with sed — the manifest is
-# flat JSON (no nesting to worry about), same assumption the vendor's own
-# installer makes about its own file.
+# flat JSON today (no nesting), same assumption the vendor's own
+# installer makes about its own file. Round-4 review item 2: that
+# assumption is about a remote document that can change without notice,
+# and a greedy match would silently take the LAST occurrence instead of
+# failing if it ever nests — this round exists because a synthetic
+# fixture certified a wrong assumption about a vendor artifact, so the
+# same discipline applies here: count matches and refuse anything other
+# than exactly 1, rather than silently guessing.
 field() {
-  printf '%s\n' "$json" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+  count="$(printf '%s\n' "$json" | grep -c ""$1"" || true)"
+  if [ "$count" -ne 1 ]; then
+    echo "agy-build-args.sh: manifest has $count occurrences of "$1", expected exactly 1 — refusing to guess" >&2
+    exit 1
+  fi
+  printf '%s\n' "$json" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
 version="$(field version)"
@@ -53,6 +64,16 @@ if [ -z "$version" ] || [ -z "$url" ] || [ -z "$sha512" ]; then
   printf '%s\n' "$json" >&2
   exit 1
 fi
+
+# Item 1: the sha512 comes from the same document as the URL, so this is
+# defense-in-depth rather than a real integrity boundary (a compromised
+# manifest could serve a matching pair over either scheme) — but it costs
+# one line to refuse a plaintext download outright rather than silently
+# downgrading a value that is about to be handed straight to wget/curl.
+case "$url" in
+  https://*) ;;
+  *) echo "agy-build-args.sh: manifest URL is not https:// — refusing: $url" >&2; exit 1 ;;
+esac
 
 echo "agy-build-args.sh: resolved agy $version from $MANIFEST_URL" >&2
 

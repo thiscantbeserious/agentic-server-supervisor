@@ -31,14 +31,6 @@ ARG AGY_URL
 ARG AGY_SHA512
 ARG AGY_VERSION=unknown
 ARG VERSION=dev
-# TARGETARCH is a buildx-populated automatic arg (empty on plain `docker
-# build`, in which case it falls back to amd64 — bam's real arch, and
-# R1's own documented build command has no --platform flag). Round-3
-# review SHOULD-FIX: a hardcoded GOARCH=amd64 builds a binary that
-# Exec-format-errors on an arm64 build (which the build-time
-# `sentinel --version` check would then fail on), even though bam itself
-# is amd64 and never hits this.
-ARG TARGETARCH=amd64
 
 WORKDIR /src
 
@@ -53,7 +45,33 @@ RUN test -z "$(gofmt -l .)" || (echo "ERROR: gofmt found unformatted files:" >&2
 RUN go vet ./...
 RUN go test ./...
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+# GOARCH is hardcoded, not a build knob. Not because agy lacks an arm64
+# artifact — it does not: the vendor also publishes
+# manifests/linux_arm64.json, a distinct tarball with its own sha512.
+# The reason is narrower: this image targets bam, which is amd64; CI
+# pins platforms: linux/amd64 (R6); and AGY_URL/AGY_SHA512 are a SINGLE
+# pinned pair resolved for one architecture at a time via
+# deploy/agy-build-args.sh. A multi-arch image would need the agy URL
+# and digest resolved per target (manifests/linux_<arch>.json, one
+# extra --build-arg pair per platform) — the vendor supports it, this
+# project has not been asked to, and pinning one architecture because
+# one artifact is resolved is a different, correct claim from pinning
+# it because no alternative exists.
+#
+# A round-3 review made this a TARGETARCH-driven ARG on the (at the
+# time reasonable, later-disproven) theory that hardcoding amd64 would
+# break a hypothetical arm64 build. The ARG did not enable multi-arch
+# support — nothing here resolves an arch-specific AGY_URL/AGY_SHA512 —
+# it just silently decoupled stage 1's cross-compile target from stage
+# 2's --platform pin. Verified by round-4 review: `docker build
+# --platform linux/arm64` succeeded, producing an arm64 Go binary in an
+# amd64-userland, arm64-labeled image, and the build-time
+# `sentinel --version` check could not catch it — an arm64 host
+# executes an arm64 static ELF regardless of the image's declared
+# platform (platform is manifest metadata, not an execution sandbox).
+# That image could not exec on a real amd64 host. Deletion is the fix;
+# C1's architecture assertion below is what would have caught it.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/sentinel ./cmd/sentinel
 
@@ -91,16 +109,20 @@ RUN set -e; \
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
 # Pinned to linux/amd64 explicitly (not left to the build host's native
-# arch): agy's vendor manifest only ships a linux/amd64 artifact, and this
-# stage is where it actually EXECUTES (the build-time verification below
-# runs it directly, not just copies it) — so this stage must be amd64
-# regardless of what machine runs `docker build`. Stage 1 deliberately
+# arch): this image targets bam (amd64) and is built from a SINGLE
+# resolved AGY_URL/AGY_SHA512 pair (deploy/agy-build-args.sh resolves
+# one architecture per run) — not because the vendor lacks an arm64
+# artifact (it does not, see the GOARCH comment above). This stage is
+# where agy actually EXECUTES (the build-time verification below runs
+# it directly, not just copies it), so it must match the architecture
+# the pinned pair was resolved for, regardless of what machine runs
+# `docker build`. Stage 1 deliberately
 # does NOT get this pin: it only needs to cross-compile a static Go
-# binary (GOARCH=${TARGETARCH} already handles that with no emulation
-# required), and forcing it to amd64 too would put the ENTIRE go
-# vet/test suite under qemu-user emulation on a non-amd64 build host —
-# measured: 5-10x slower, with no correctness benefit since nothing in
-# stage 1 executes target-architecture code.
+# binary (GOARCH=amd64, hardcoded — see that RUN step's comment), and
+# forcing stage 1 to amd64 too would put the ENTIRE go vet/test suite
+# under qemu-user emulation on a non-amd64 build host — measured:
+# 5-10x slower, with no correctness benefit since nothing in stage 1
+# executes target-architecture code.
 FROM --platform=linux/amd64 debian:trixie-slim AS runtime
 
 ARG AGY_VERSION=unknown

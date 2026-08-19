@@ -268,6 +268,24 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
 		t.Skip("SKIP: SENTINEL_REAL_AGY != 1 — set it to build the image against the REAL agy tarball over the network (~53MB download, ~205MB extracted)")
 	}
+
+	// Round-4 review item 3: realAgyURL is pinned to one specific vendor
+	// release (1.1.15) rather than re-resolved from the manifest each
+	// run, so when the vendor rotates it this URL can 404 for a reason
+	// that has nothing to do with this repo. Distinguish "the pinned
+	// artifact is gone" (SKIP, loudly, same as requireImage's daemon-
+	// unreachable case) from "the build itself is broken" (FAIL) with a
+	// cheap reachability check before spending 15 minutes on a doomed
+	// build.
+	if resp, err := http.Head(realAgyURL); err != nil {
+		t.Skipf("SKIP: realAgyURL unreachable (%v) — pinned to agy %s, needs a refresh if the vendor has rotated past it", err, realAgyVersion)
+	} else {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Skipf("SKIP: realAgyURL returned HTTP %d — pinned to agy %s, needs a refresh if the vendor has rotated past it", resp.StatusCode, realAgyVersion)
+		}
+	}
+
 	root := repoRoot(t)
 	tag := "sentinel:real-agy-test"
 
@@ -336,6 +354,43 @@ func TestContainer_C1_StartsUnprivileged(t *testing.T) {
 	out, _, code = runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", imageTag, "--version")
 	if code != 0 || !strings.Contains(out, "container-test") {
 		t.Fatalf("FAIL C1: sentinel --version = %q (code=%d), want to contain the stamped version", out, code)
+	}
+	// Round-4 review DEFECT: a stray GOARCH=${TARGETARCH} knob (already
+	// removed from the Dockerfile) let an arm64 buildx host silently
+	// produce an arm64-Go-binary-in-an-amd64-labeled-image, and the
+	// build-time `sentinel --version` check could not catch it — an
+	// arm64 host executes an arm64 static ELF regardless of the image's
+	// declared platform (platform is manifest metadata, not an execution
+	// sandbox). This is NOT because agy lacks an arm64 artifact — it has
+	// one (manifests/linux_arm64.json, a distinct tarball and sha512) —
+	// the image is pinned to amd64 because that is what bam runs and
+	// what AGY_URL/AGY_SHA512 are resolved for, one architecture per
+	// deploy/agy-build-args.sh run (main's ruling on this round's
+	// REJECT). Assert the built image's actual architecture directly
+	// rather than relying on a check that is blind to exactly this
+	// failure. Two independent signals: the image manifest's declared
+	// Architecture, and the real ELF e_machine field read out of the
+	// binary itself — the manifest signal is what a stray TARGETARCH
+	// knob left wrong in round 4's finding; the ELF signal is what
+	// actually determines whether the binary can exec on the target.
+	archOut, archErr, archCode := runCmd(t, 15*time.Second, dockerBin(), "image", "inspect", imageTag, "--format", "{{.Architecture}}")
+	if archCode != 0 {
+		t.Fatalf("FAIL C1: docker image inspect --format {{.Architecture}} failed (code=%d): %s %s", archCode, archOut, archErr)
+	}
+	if arch := strings.TrimSpace(archOut); arch != "amd64" {
+		t.Fatalf("FAIL C1: image Architecture = %q, want amd64", arch)
+	}
+	// ELF e_machine is a little-endian uint16 at byte offset 18. EM_X86_64
+	// = 62 = 0x3e00 on the wire (low byte first); EM_AARCH64 = 183 =
+	// 0xb700. od (coreutils, present in the runtime image per R1) reads
+	// it without needing `file`, which is not installed.
+	elfOut, elfErr, elfCode := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "od",
+		imageTag, "-An", "-tx1", "-j18", "-N2", "/usr/local/bin/sentinel")
+	if elfCode != 0 {
+		t.Fatalf("FAIL C1: reading ELF e_machine from /usr/local/bin/sentinel failed (code=%d): %s %s", elfCode, elfOut, elfErr)
+	}
+	if machine := strings.Join(strings.Fields(elfOut), " "); machine != "3e 00" {
+		t.Fatalf(`FAIL C1: /usr/local/bin/sentinel ELF e_machine = %q, want "3e 00" (EM_X86_64) — got a non-amd64 binary`, machine)
 	}
 	logPass(t, "PASS C1")
 }
