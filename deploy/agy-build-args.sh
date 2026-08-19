@@ -47,9 +47,24 @@ json="$(fetch "$MANIFEST_URL")" || {
 # same discipline applies here: count matches and refuse anything other
 # than exactly 1, rather than silently guessing.
 field() {
-  count="$(printf '%s\n' "$json" | grep -c ""$1"" || true)"
+  # Round-4 review DEFECT (their own proposal, their own catch): the
+  # previous count guard was `grep -c ""$1""`, which the shell collapses
+  # to `grep -c "$1"` — an UNQUOTED key name, so any value containing the
+  # substring inflates the count too — combined with `-c`, which counts
+  # matching LINES, not occurrences, so on a minified single-line
+  # manifest it can only ever return 0 or 1 regardless of how many times
+  # the key actually appears. Reproduced against a manifest with a
+  # nested second "url": the old guard reported 1, the greedy sed then
+  # took the LAST match, and the script emitted the wrong URL paired
+  # with the right (outer) digest — exactly the silent-wrong-guess this
+  # guard exists to refuse. `grep -o` emits one line per occurrence
+  # (works on a single-line document too), and anchoring the pattern on
+  # the literal key-plus-colon means a VALUE containing the substring
+  # cannot inflate the count.
+  key="$1"
+  count="$(printf '%s' "$json" | grep -o "\"$key\"[[:space:]]*:" | grep -c . || true)"
   if [ "$count" -ne 1 ]; then
-    echo "agy-build-args.sh: manifest has $count occurrences of "$1", expected exactly 1 — refusing to guess" >&2
+    echo "agy-build-args.sh: manifest has $count occurrences of \"$key\", expected exactly 1 — refusing to guess" >&2
     exit 1
   fi
   printf '%s\n' "$json" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
