@@ -17,7 +17,7 @@ Two stages, `CGO_ENABLED=0`. **No Go toolchain, no build tools and none of the p
 ```
 docker build -f deploy/Dockerfile -t sentinel:dev \
   --build-arg AGY_URL=<https url to the agy linux-amd64 tarball> \
-  --build-arg AGY_SHA256=<hex> \
+  --build-arg AGY_SHA512=<hex> \
   .
 ```
 Build context = repo root.
@@ -50,7 +50,7 @@ That manifest publishes **sha512 only**. Requiring a sha256 forced the operator 
 - `COPY . .`
 - `gofmt -l .` (must be empty), `go vet ./...`, `go test ./...` — any failure fails the build. This is where the T6 tables gate the image.
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/sentinel ./cmd/sentinel`
-- `agy`: download `${AGY_URL}`, verify `${AGY_SHA256}` with `sha256sum -c`, unpack, place at `/out/agy`.
+- `agy`: download `${AGY_URL}`, verify `${AGY_SHA512}` with `sha512sum -c`, unpack, locate the **single executable** in the archive (by permission bit, never by filename — the vendor tarball ships it as `antigravity`), and place it at `/out/agy`. Zero or more than one executable candidate ⇒ fail the build naming what was found.
 
 **Stage 2 — runtime (`debian:trixie-slim`)** — matches the target's Debian 13 journal format (ARCHITECTURE §2.7).
 - apt, `--no-install-recommends`, lists deleted in the same layer, exactly: `systemd` (provides `journalctl`), `lm-sensors`, `ca-certificates`, `tzdata`.
@@ -432,10 +432,10 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}` — skipped on `pull_request`
 4. `docker/metadata-action@v5` → `images: ghcr.io/${{ github.repository }}/sentinel`, tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
-5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL=${{ vars.AGY_URL }}`, `AGY_SHA256=${{ vars.AGY_SHA256 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
+5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL=${{ vars.AGY_URL }}`, `AGY_SHA512=${{ vars.AGY_SHA512 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
 6. On non-PR runs: `docker pull ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }}` and `docker run --rm <that image> --version` — proves the published image is pullable and runnable.
 
-`AGY_URL`/`AGY_SHA256`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
+`AGY_URL`/`AGY_SHA512`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
 
 ---
 
