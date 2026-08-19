@@ -1203,6 +1203,14 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(hostProc, "uptime"), []byte("1 0\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// Mounted :ro below to match R4's /proc:/host/proc:ro exactly —
+		// sentinel writes only under $STATE_DIR and /tmp (R3.9), so
+		// nothing here writes to it today, but a test more permissive
+		// than the mount it's meant to exercise cannot catch a real
+		// regression against that mount: production would fail loudly
+		// at the read-only mount itself; a writable test mount would
+		// only surface it as a confusing TempDir-cleanup permission
+		// error, if it surfaced at all.
 
 		// checkJournalReadable requires a journal that a real journalctl
 		// actually reads a record from — a bind-mounted empty temp dir
@@ -1220,7 +1228,7 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 			"-e", "STATE_DIR=/state", "-v", stateDir + ":/state",
 			"-e", "HOST_JOURNAL_DIR=/host/journal", "-v", "/var/log/journal:/host/journal:ro",
 			"-e", "HOST_JOURNAL_VOLATILE_DIR=/host/journal",
-			"-e", "HOST_PROC=/hp", "-v", hostProc + ":/hp",
+			"-e", "HOST_PROC=/hp", "-v", hostProc + ":/hp:ro",
 			"-e", "TICK_INTERVAL=60",
 			"-e", "MAILRISE_USER=u", "-e", "MAILRISE_PASS=changeme",
 			"--group-add", gid,
