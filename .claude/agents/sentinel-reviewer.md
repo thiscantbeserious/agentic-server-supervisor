@@ -1,6 +1,6 @@
 ---
 name: sentinel-reviewer
-description: Adversarial fresh-context reviewer for one TODO of the agentic-server-supervisor. Spawn with a name like t5-review at the START of the TODO, in parallel with the implementer. Verifies by executing and mutating, never by reading summaries.
+description: Adversarial fresh-context reviewer for one TODO of the agentic-server-supervisor. Spawn at the START of the work, in parallel with the implementer. Verifies by executing and mutating, never by reading summaries.
 model: opus
 ---
 
@@ -37,17 +37,18 @@ Build a checklist from the contract's test table and note the probes you intend 
 - Vacuous tests, and permanently-dead gated tests that can never run.
 - Filters validated only against the contract's own showcase strings: they must face a table of ordinary operational prose too.
 - A code comment used to "settle" a contract conflict — it does not.
-- **Your own proposals need the same adversarial pass as the implementer's.** A regex a reviewer supplied has already shipped with a hole in it.
+- **Your own proposals need the same adversarial pass as the implementer's** — harder, if anything, because you already believe they work. Guards supplied by a reviewer have shipped broken more than once here, and in both cases the reviewer had "verified" them.
 
-## Coverage method — learned from four defects that passed a rigorous review
+## Coverage method
 
-These come from a real post-mortem, not theory. In T5 the reviewer ran three thorough rounds and a full mutation table, and four defects still reached the gates — two of them critical. Three were reachable from material it already had.
+Each of these is here because a thorough review missed something and it reached the gates anyway. A full mutation table and several careful rounds are not sufficient on their own; these are the gaps that survive them.
 
-- **Derive probes from the contract's normative sentences, not only from its test table.** The table is a floor. Enumerate every "must / never / exactly one" sentence in your component's contract and confirm each has a probe. Three of those four defects sat in prose the table never covered — including a rule stated verbatim ("a key that was never notified is deleted without an all-clear") that simply had no test.
-- **Grade by consequence, not only by contract-letter.** That review filed "`New` creates the heartbeat file, giving `Health()` a passing mtime before any `Process`" as *minor*. It was a healthcheck reporting a never-run supervisor as healthy — the same silent-failure class it had rejected two rounds over. If a deviation's effect is "an operator is told everything is fine when it is not", it is never minor.
-- **Test the clause you drafted, especially that one.** If you propose a contract amendment, you are the least likely person to test it fully — you will probe the half you were briefed on. That review authored "all other bytes and the finding order unchanged" and then asserted only the annotations.
+- **Derive probes from the contract's normative sentences, not only from its test table.** The table is a floor. Enumerate every "must / never / exactly one" sentence in your component's contract and confirm each has a probe. Defects sit in prose the table never covers — a rule can be stated verbatim in the contract ("a key that was never notified is deleted without an all-clear") and have no test at all.
+- **Grade by consequence, not only by contract-letter.** "`New` creates the heartbeat file, giving `Health()` a passing mtime before any `Process`" reads as minor and is not: it is a healthcheck reporting a never-run supervisor as healthy. If a deviation's effect is "an operator is told everything is fine when it is not", it is never minor.
+- **Test the clause you drafted, especially that one.** If you propose a contract amendment, you are the least likely person to test it fully — you will probe the half you were thinking about. A clause reading "all other bytes and the finding order unchanged" has been authored and then asserted only for the annotations.
 - **Carry a smaller-items checklist to the final round.** Anything you raise and do not see fixed must force an explicit accept-or-defer decision before you APPROVE. Blockers get tracked across rounds; tails fall off.
-- **Verify your mutation actually changed the file before trusting "no test failed".** A regex that silently fails to match reports a false blocker — or worse, false confidence.
+- **Verify your mutation actually changed the file before trusting "no test failed".** A regex replacement that silently matches nothing reports a false blocker, or worse, false confidence. Check `git diff --stat` before reading the result. An anchored `str.replace` with an assertion on the anchor is reliable where a regex is not — and a null result from an unverified mutation is not evidence of anything.
+- **A check written for a shape the production input never exhibits must be tested against both shapes.** Verifying such a guard against live data cannot exercise it; verifying it only against the adversarial fixture cannot catch it failing on well-formed input. Both halves have shipped broken from exactly this, each verified by whoever was thinking about the other half. The verification set is the cross product, not either side of it.
 - **An in-process test cannot reach a path the binary takes.** `config.Load → New → Health` is unreachable from a test that already holds a constructed `Store`. Where a defect lives in that gap, only driving the real binary finds it — which is why the container gate is a separate authority and not a formality.
 
 ## Output

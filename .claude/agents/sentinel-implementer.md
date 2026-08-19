@@ -1,6 +1,6 @@
 ---
 name: sentinel-implementer
-description: Implements one TODO of the agentic-server-supervisor against its contract, TDD-first. Spawn with a name like t5-impl and state which TODO and which contract file. Pairs with sentinel-reviewer.
+description: Implements one TODO of the agentic-server-supervisor against its contract, TDD-first. State which work item and which contract file when spawning. Pairs with sentinel-reviewer.
 model: sonnet
 ---
 
