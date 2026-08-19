@@ -24,9 +24,24 @@ Build context = repo root.
 
 | ARG | Required | Default | Meaning |
 |---|---|---|---|
-| `AGY_URL` | **yes** | — | download URL of the Antigravity CLI release tarball (linux/amd64). Empty ⇒ build fails with `ERROR: AGY_URL build-arg is required`. Ops input — never a guessed URL. |
-| `AGY_SHA256` | **yes** | — | expected sha256 of that tarball; mismatch fails the build |
+| `AGY_URL` | **yes** | — | download URL of the Antigravity CLI release tarball (linux/amd64). Empty ⇒ build fails with `ERROR: AGY_URL build-arg is required`. Ops input — resolved from the vendor manifest, never guessed. |
+| `AGY_SHA512` | **yes** | — | the **vendor-published** sha512 of that tarball, copied from the manifest; mismatch fails the build. Replaces `AGY_SHA256`. |
 | `AGY_VERSION` | no | `unknown` | OCI label only |
+
+**Where the ops values come from, and why sha512 rather than sha256.** The vendor's own installer (`https://antigravity.google/cli/install.sh`) resolves a platform to an artifact through a manifest:
+
+```
+https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json
+  -> { "version": ..., "url": ..., "sha512": ... }
+```
+
+That manifest publishes **sha512 only**. Requiring a sha256 forced the operator to download the tarball and compute a digest themselves — which proves the file has not changed since *they* fetched it, and proves nothing about what the vendor published. If the fetch was tampered with, the computed sha256 matches the tampered file perfectly. Pinning the vendor's own sha512 is the check that actually constrains the supply chain, so the contract now asks for the digest the vendor signs off on rather than one we generate.
+
+**The tarball does NOT contain a file named `agy`.** Verified against the real artifact 2026-08-19 (version 1.1.15): the archive contains a single ELF x86-64 executable named **`antigravity`**, ~205 MB. The vendor installer extracts it and *installs* it as `agy` (`BINARY_PATH="$TARGET_DIR/agy"`), which is why the installed binary carries that name — and why an implementation written against a synthetic fixture named `agy` builds cleanly and then fails on the real artifact. **The Dockerfile must locate the executable in the tarball and install it as `/usr/local/bin/agy`, not search for a file already called `agy`.**
+
+**The vendor installer is deliberately NOT run at build time.** It resolves to *latest* through the manifest, so piping it into the build would make every rebuild a different analyzer version with no record of which one an image contains — destroying the reproducibility the pinned URL and digest exist to provide, and removing our integrity check in favour of executing whatever the vendor serves at that moment. It also targets a user bin directory and stages through `$HOME/.cache`, neither of which suits a multi-stage build. Pinning is the point; the manifest is how the pin is *found*, not a substitute for it.
+
+**Ops helper:** `deploy/agy-build-args.sh` fetches the manifest and prints the `--build-arg` pair for the current release, so the operator never hand-assembles a URL. They see the version they are about to pin before pinning it. The helper resolves; it does not build.
 | `GO_IMAGE` | no | `golang:1.25-trixie` | builder base |
 | `VERSION` | no | `dev` | stamped into `main.version` via `-ldflags` |
 
