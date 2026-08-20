@@ -54,6 +54,60 @@ and produce an invalid Telegram target. You would discover that the first time
 an alert failed to arrive, which is why the values are written in rather than
 interpolated.
 
+## Deploying under OpenMediaVault
+
+OpenMediaVault's compose plugin owns `/docker-compose/`, one directory per
+stack, and does not lay the stack out the way the plain `cd deploy` Setup
+above assumes:
+
+```
+/docker-compose/<stack>/
+├── <stack>.yml                 real compose file, named after the stack
+├── compose.yml  -> <stack>.yml     symlink
+├── <stack>.env                 real env file
+├── .env         -> <stack>.env     symlink
+└── compose.override.yml        optional
+```
+
+There is also a shared `/docker-compose/global.env` the plugin injects into
+every stack. It is currently empty; anything added there later applies to
+this stack too.
+
+The Setup steps above still apply — `cp`, `chmod`, edit, `docker compose
+up -d` — with three OMV-specific constraints:
+
+**`--env-file` must target the real env file, never the `.env` symlink.**
+`install-host.sh` writes `JOURNAL_GID=` via `mktemp` then `install`, and
+`install` replaces its destination rather than following it. Pointed at
+`.env`, it would silently turn the symlink into a regular file, leaving a
+stale `<stack>.env` beside a now-divorced `.env` — the OMV plugin and Docker
+then disagree about what the environment is, and nothing announces it. Use
+`--env-file /docker-compose/<stack>/<stack>.env`, the real file, always.
+
+**`mailrise/mailrise.conf` is a relative bind mount** (`docker-compose.yml`:
+`./mailrise/mailrise.conf:/etc/mailrise.conf:ro`), so a `mailrise/`
+subdirectory has to exist inside the stack directory itself — everything
+else in the compose file is either a named volume or an absolute path, and
+this mount is the only one that moves with the stack. The 0644-not-0600
+rule above applies to that copy: get the permission wrong here, standing in
+the actual stack directory, and mailrise crash-loops exactly as described.
+
+**`AGY_CREDENTIALS_DIR` pointing at a path that does not exist fails
+silently.** Compose only guards that the variable is *set*
+(`${AGY_CREDENTIALS_DIR:?...}`), not that the path exists, and Docker
+creates a missing bind source as an empty root-owned directory. `agy` then
+starts with no credentials and never authenticates — while `docker compose
+ps` reports everything running. Confirm the directory exists and holds real
+credentials before `up -d`.
+
+The degraded behavior in that state is bounded, not total: every triage
+call fails and `internal/analyze` returns its deterministic fallback report
+— one `alert`-severity finding (`component: meta`) per tick, carrying all
+of that tick's raw `emerg`/`crit` kernel lines (capped at
+`RAW_ALERT_MAX_LINES`, default 20) verbatim in its evidence, not one
+finding per line. No hardware event is lost; only the LLM's own triage,
+correlation and recommendation text is.
+
 ## Seed the apprise config key
 
 `apprise/sentinel.cfg` is a template. The real configuration lives in the
