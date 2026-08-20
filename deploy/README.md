@@ -43,6 +43,8 @@ Pin a specific version instead of `main` with `--ref`:
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash -s -- --ref v1.2.3
 ```
 
+**If you fetch the script itself from a tag, pass that same tag as `--ref`.** A `curl | bash` stream has no memory of where it came from — the script cannot infer its own ref — so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install-host.sh` from `v1.2.3` without also passing `--ref v1.2.3` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary — worth checking it reads what you expect.
+
 `--check` and `--dry-run` never prompt and never write — safe to run
 repeatedly to preview what would happen, including where the stack would
 be created and which layout it would choose. Full flag reference:

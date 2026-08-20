@@ -1566,7 +1566,79 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	if !strings.Contains(outElsewhere, "layout: plain") {
 		t.Errorf("FAIL C12 (stack layout): --stack-dir /opt/sentinel must stay plain even with /docker-compose present elsewhere: %s", outElsewhere)
 	}
-	logPass(t, "PASS C12 (stack layout: omv only inside /docker-compose, plain everywhere else)")
+
+	// A stack directory reached THROUGH A SYMLINK into /docker-compose
+	// must still be recognized as omv: dirname is purely lexical, so
+	// without resolving the path first, /srv/compose/sentinel (where
+	// /srv/compose -> /docker-compose) would be misclassified plain —
+	// the files would land in the right place on disk while OMV's
+	// compose plugin, which enumerates by real path, never sees the
+	// stack at all.
+	exec_("ln -sfn /docker-compose /srv/compose")
+	outSymlinked, _, codeSymlinked := exec_("/work/install-host.sh --dry-run --stack-dir /srv/compose/sentinel 2>&1")
+	if codeSymlinked != 0 {
+		t.Fatalf("FAIL C12 (stack layout): symlinked --dry-run exit=%d: %s", codeSymlinked, outSymlinked)
+	}
+	if !strings.Contains(outSymlinked, "layout: omv") {
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose/sentinel (symlink to /docker-compose) must resolve to omv layout, got: %s", outSymlinked)
+	}
+	if !strings.Contains(outSymlinked, "sentinel.yml") {
+		t.Errorf("FAIL C12 (stack layout): symlinked omv path must still get sentinel.yml, not docker-compose.yml: %s", outSymlinked)
+	}
+
+	// --stack-dir pointing at the OMV compose ROOT itself (not a stack
+	// directory inside it) must be refused, not silently treated as
+	// plain — that would drop a stray docker-compose.yml into the
+	// directory where OMV enumerates every stack. Checked against both
+	// the literal path and a symlink resolving to it.
+	outRoot, _, codeRoot := exec_("/work/install-host.sh --dry-run --stack-dir /docker-compose 2>&1")
+	if codeRoot != 64 {
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /docker-compose (the root) exit=%d, want 64: %s", codeRoot, outRoot)
+	}
+	outRootSymlinked, _, codeRootSymlinked := exec_("/work/install-host.sh --dry-run --stack-dir /srv/compose 2>&1")
+	if codeRootSymlinked != 64 {
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose (symlink to the root) exit=%d, want 64: %s", codeRootSymlinked, outRootSymlinked)
+	}
+	logPass(t, "PASS C12 (stack layout: omv only inside /docker-compose, symlinks resolved, root itself refused)")
+}
+
+// TestContainer_C12_StackDryRunSummaryHonest: the run summary printed at
+// the end is the last thing an operator reads before deciding to write
+// to a real host. The per-action lines already say "[dry-run] would
+// ..."; the summary lines that roll those up must say the same, not
+// reuse the same wording a real run uses for something it actually did.
+func TestContainer_C12_StackDryRunSummaryHonest(t *testing.T) {
+	name := "sentinel-c12-dryrun-summary-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	out, _, code := exec_("/work/install-host.sh --dry-run --stack-dir /opt/sentinel 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (stack dry-run summary): exit=%d: %s", code, out)
+	}
+	for _, wantWould := range []string{
+		"would be written/updated",
+		"would write",
+	} {
+		if !strings.Contains(out, wantWould) {
+			t.Errorf("FAIL C12 (stack dry-run summary): missing conditional phrasing %q — a --dry-run summary must not claim work happened: %s", wantWould, out)
+		}
+	}
+	for _, mustNotClaim := range []string{
+		"stack compose file: /opt/sentinel/docker-compose.yml written/updated",
+		"stack env: wrote ",
+		"step6 JOURNAL_GID: setting to",
+	} {
+		if strings.Contains(out, mustNotClaim) {
+			t.Errorf("FAIL C12 (stack dry-run summary): claims completed work that --dry-run never did (%q): %s", mustNotClaim, out)
+		}
+	}
+	if out, _, _ := exec_("test -e /opt/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack dry-run summary): --dry-run created /opt/sentinel despite the summary being about phrasing, not writes")
+	}
+	logPass(t, "PASS C12 (stack dry-run summary: says would, not did)")
 }
 
 // TestContainer_C12_StackEnvFileBackCompat: --env-file must behave
@@ -1671,6 +1743,49 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 		t.Errorf("FAIL C12 (stack interactive): sentinel.env mode = %s, want 600", strings.TrimSpace(mode))
 	}
 	logPass(t, "PASS C12 (stack interactive: prompted values land in sentinel.env and both mailrise.conf targets)")
+}
+
+// TestContainer_C12_StackInteractiveEmptyTokenFailsClosed: a real
+// terminal answering Enter at the Telegram prompts is not the same as
+// having no terminal at all, but it is the identical "I still don't
+// have this" outcome by a different route — and MAILRISE_SMTP_USER/
+// PASS only escape this exact gap by luck (compute_mail_status re-reads
+// the env file independently and catches a blank password on its own);
+// TELEGRAM_BOT_TOKEN/CHAT_ID have no such second check, and compose
+// does not :?-guard them. An install-host.sh that let this through
+// would report success while producing a stack that never delivers a
+// notification and, once mailrise.conf's bind-mount target is missing,
+// crash-loops mailrise outright.
+func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
+	name := "sentinel-c12-emptytoken-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	if out, _, code := exec_("command -v script"); code != 0 {
+		skipUnlessCI(t, "C12 (stack empty token): the `script` utility is not available in this environment: %s", out)
+	}
+	exec_("mkdir -p /docker-compose")
+
+	// Enter, Enter (empty token, empty chat id), then a real mailrise
+	// password — the shape the reviewer measured against a real pty.
+	const smtpPass = "test-smtp-secret-value"
+	answers := "\n\n" + smtpPass + "\n"
+	driveCmd := fmt.Sprintf(
+		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install-host.sh" /tmp/script2.log`,
+		shellQuote(answers),
+	)
+	out, errOut, code := exec_(driveCmd)
+	if code != 78 {
+		t.Fatalf("FAIL C12 (stack empty token): exit=%d, want 78 (an empty answer at a real prompt must be treated as missing input, not accepted) — stdout=%q stderr=%q", code, out, errOut)
+	}
+	if envContent, _, _ := exec_("cat /docker-compose/sentinel/sentinel.env 2>&1"); strings.Contains(envContent, "TELEGRAM_BOT_TOKEN=") {
+		t.Errorf("FAIL C12 (stack empty token): TELEGRAM_BOT_TOKEN written despite an empty answer: %s", envContent)
+	}
+	if out, _, _ := exec_("test -e /docker-compose/sentinel/mailrise/mailrise.conf && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack empty token): mailrise.conf was written despite the token/chat id being empty")
+	}
+	logPass(t, "PASS C12 (stack empty token: Enter at a real prompt fails closed, not silently accepted)")
 }
 
 // shellQuote wraps s in single quotes for embedding in a shell command

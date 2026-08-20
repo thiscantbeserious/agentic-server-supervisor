@@ -390,6 +390,32 @@ require_secret() {
     IFS= read -r val < /dev/tty
     REQUIRE_SECRET_RESULT="$val"
   fi
+  # A terminal was available and the operator answered — but Enter with
+  # nothing typed is not an answer. Treated identically to the no-TTY
+  # case above: this is the same "I still don't have it" outcome by a
+  # different route, and MAILRISE_SMTP_USER/PASS only escaped this
+  # exact gap by luck (compute_mail_status re-reads the env file
+  # independently and catches a blank password on its own) — TOKEN and
+  # CHAT_ID have no such second check, and compose does not :?-guard
+  # them, so an empty answer here used to install a stack that reports
+  # success with no Telegram credentials at all.
+  if [ -z "$REQUIRE_SECRET_RESULT" ]; then
+    echo "$PROG: $name was left empty at the prompt — it is still required; re-run and this script will prompt only for what is still missing" >&2
+    MISSING_ENV_INPUT=1
+  fi
+}
+
+# verb_phrase ACTUAL WOULD — the top-level run summary is the last thing
+# an operator reads before deciding to write to a real host, so it must
+# never claim more than the mode actually did. The per-action lines
+# already say "[dry-run] would ..."; this keeps the summary lines that
+# roll those up honest under --check/--dry-run too, which never write.
+verb_phrase() {
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 # env_var_value FILE KEY — current value of KEY in FILE, quote-stripped,
@@ -564,6 +590,11 @@ ensure_curl() {
 fetch_repo_file() {
   local repo_path="$1" signature="$2"
   local url="https://raw.githubusercontent.com/${REPO_SLUG}/${REF}/${repo_path}"
+  # code and rc are declared separately from the assignment on purpose:
+  # `local code="$(curl ...)"` would make `local` itself the last command
+  # in that statement, so `rc=$?` right after would capture local's exit
+  # status (always 0) instead of curl's — the whole status check below
+  # would silently become dead code that still looks correct.
   local code rc
   FETCHED_TMP="$(mktemp)"
   code="$(curl -fsSL -w '%{http_code}' -o "$FETCHED_TMP" "$url" 2>/dev/null)"
@@ -654,6 +685,21 @@ resolve_stack_dir() {
 # on apt-get.
 step0a_layout() {
   resolve_stack_dir
+  # dirname (in detect_layout, below) is purely lexical, so a stack
+  # directory reached through a symlink into OMV's compose root (e.g.
+  # /srv/compose -> /docker-compose) would otherwise be classified
+  # "plain" even though it really sits inside /docker-compose — the
+  # files land in the right place on disk while OMV never enumerates
+  # the stack, which produces exactly the "the stack looks fine but the
+  # plugin doesn't know it exists" shape this whole design exists to
+  # avoid. readlink -f resolves every symlink component and still works
+  # when the deepest component does not exist yet, the common case for
+  # a stack being created for the first time.
+  STACK_DIR="$(readlink -f "$STACK_DIR")"
+  if [ "$STACK_DIR" = "/docker-compose" ]; then
+    echo "$PROG: --stack-dir /docker-compose is the OMV compose root itself, not a stack directory inside it — writing a compose file there would sit alongside every other stack's own directory instead of inside one; use a subdirectory, e.g. /docker-compose/sentinel" >&2
+    exit 64
+  fi
   detect_layout
   ENV_FILE="${STACK_DIR}/${ENV_NAME}"
   echo "$PROG: stack directory: $STACK_DIR (layout: $LAYOUT, ref: $REF)" >&2
@@ -670,7 +716,7 @@ step0a_layout() {
   if fetch_repo_file "deploy/docker-compose.yml" "container_name: sentinel"; then
     local compose_path="${STACK_DIR}/${COMPOSE_NAME}"
     if write_file_if_differs "$compose_path" 0644 "$FETCHED_TMP"; then
-      note "stack compose file: $compose_path written/updated (fetched from ref $REF)"
+      note "stack compose file: $compose_path $(verb_phrase "written/updated" "would be written/updated") (fetched from ref $REF)"
       changed=$((changed+1))
     else
       note "stack compose file: $compose_path already matches ref $REF"
@@ -725,7 +771,7 @@ step0b_secrets() {
   set_env_default SENTINEL_MAIL_TO "sentinel@mailrise.xyz"
   set_env_default LOG_LEVEL "INFO"
   if [ "$changed" -gt "$before_changed" ]; then
-    note "stack env: wrote $((changed-before_changed)) field(s) to $ENV_FILE"
+    note "stack env: $(verb_phrase "wrote" "would write") $((changed-before_changed)) field(s) to $ENV_FILE"
   elif [ "$MISSING_ENV_INPUT" -eq 1 ]; then
     note "stack env: $ENV_FILE unchanged — still missing the input reported above"
   else
@@ -737,11 +783,14 @@ step0b_secrets() {
     return
   fi
   if [ -z "$token" ] || [ -z "$chat" ] || [ -z "$smtp_user" ] || [ -z "$smtp_pass" ]; then
-    # Only reachable under --check/--dry-run, where require_secret
-    # returns empty without setting MISSING_ENV_INPUT (drift is
-    # reported, not failed). mailrise.conf's content depends on all
-    # four, so there is nothing meaningful to render yet beyond the
-    # note require_secret already recorded for each missing one.
+    # require_secret now sets MISSING_ENV_INPUT for every real-run path
+    # that can return empty (no terminal, or an empty answer at one),
+    # and the guard above already returned for that case — so on a real
+    # run, reaching here with an empty value means only --check/--dry-run
+    # skipped the prompt entirely, per require_secret's own contract.
+    # mailrise.conf's content depends on all four, so there is nothing
+    # meaningful to render yet beyond the note require_secret already
+    # recorded for each missing one.
     note "stack mailrise.conf: not previewed — depends on values not yet set"
     return
   fi
@@ -757,7 +806,7 @@ step0b_secrets() {
     rm -f "$FETCHED_TMP"
     local mailrise_path="${STACK_DIR}/mailrise/mailrise.conf"
     if write_file_if_differs "$mailrise_path" 0644 "$rendered"; then
-      note "stack mailrise.conf: written (mode 0644 — see deploy/README.md, NOT 0600)"
+      note "stack mailrise.conf: $(verb_phrase "written" "would be written") (mode 0644 — see deploy/README.md, NOT 0600)"
       changed=$((changed+1))
     else
       note "stack mailrise.conf: already up to date"
@@ -1112,7 +1161,7 @@ step6() {
     return
   fi
 
-  note "step6 JOURNAL_GID: setting to ${gid} in $ENV_FILE"
+  note "step6 JOURNAL_GID: $(verb_phrase "setting" "would set") to ${gid} in $ENV_FILE"
   if [ "$CHECK" -eq 1 ]; then changed=$((changed+1)); return; fi
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would upsert ${desired} in $ENV_FILE"
