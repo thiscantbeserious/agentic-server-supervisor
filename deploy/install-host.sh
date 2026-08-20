@@ -52,13 +52,14 @@ require_value() {
     exit 64
   fi
   # None of the three value-taking flags accepts a value starting with
-  # "--" (a hostname, a port, a path) — so a missing value followed by
-  # the next flag (e.g. "--mailrise-host --check") must not silently
-  # consume that flag as the value. On a script that runs as root and is
-  # meant to run unattended, that would turn a requested --check into a
-  # real run against a nonsense smarthost.
+  # "-" (a hostname, a port, a path) — so a missing value followed by
+  # the next flag, long ("--mailrise-host --check") or short
+  # ("--env-file -h"), must not silently consume that flag as the
+  # value. On a script that runs as root and is meant to run
+  # unattended, that would turn a requested --check/-h into a real run
+  # against a nonsense smarthost or path.
   case "$2" in
-    --*) echo "$PROG: $1 requires a value (got the flag '$2')" >&2; usage >&2; exit 64 ;;
+    -*) echo "$PROG: $1 requires a value (got the flag '$2')" >&2; usage >&2; exit 64 ;;
   esac
 }
 

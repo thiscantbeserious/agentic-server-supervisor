@@ -2,7 +2,7 @@
 
 > Conventions C1–C9 in [CONTRACTS.md](../CONTRACTS.md) are binding and win on conflict. Read them first.
 
-Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install-host.sh`, `.github/workflows/build.yml`. TODO **T7**, except the tick orchestration which lands in **T6** (`internal/runtime` table tests) and is re-verified inside the image in T7.
+Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install-host.sh`, `.github/workflows/ci.yml`. TODO **T7**, except the tick orchestration which lands in **T6** (`internal/runtime` table tests) and is re-verified inside the image in T7.
 
 Everything this contract says obeys the Conventions; it adds only what the Conventions leave to the runtime.
 
@@ -451,9 +451,9 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 
 ---
 
-### R6. `.github/workflows/build.yml`
+### R6. `.github/workflows/ci.yml`
 
-**Trigger:** `push` on `main` limited to `cmd/**`, `internal/**`, `deploy/**`, `test/**`, `go.mod`, `go.sum`, `.github/workflows/build.yml`; `pull_request` on the same paths (build only, no push); `workflow_dispatch`.
+**Trigger:** `push` on `main` limited to `cmd/**`, `internal/**`, `deploy/**`, `test/**`, `go.mod`, `go.sum`, `.github/workflows/ci.yml`; `pull_request` on the same paths (build only, no push); `workflow_dispatch`.
 
 `deploy/**` is load-bearing and was missing: without it a Dockerfile-only change does not rebuild, and T8's `docker compose pull` on `bam` then returns a stale image that silently does not contain the change just made. `supervisor/**` was listed and does not exist in this repository — a leftover from the shell-script layout C1 abolished.
 
@@ -609,7 +609,7 @@ func Health(cfg *config.Config) (int, error)
 | C3 | For **every** ro mount target of R4, creating a file fails; `/usr/local/bin/.w` and `/.w` fail; `/state/.w` and `/tmp/.w` succeed | A1 |
 | C4 | `sensors -j` exits `0`, unmarshals into `map[string]any` with ≥ 1 key, and at least one key matches a device name the **test** reads from `/host/sys/class/hwmon/*/name` | ARCHITECTURE §2.6 unverified point |
 | C5 | `/host/rasdaemon` is listable; rasdaemon absent on the test host ⇒ explicit `SKIP` | §2.6 unverified point |
-| C6 | Under `read_only: true`: `/tmp` is writable and `TZ` is `UTC` | container. **Service-name DNS is deliberately not asserted here** — reaching `apprise` by name requires the compose network, which a container-only case cannot create without becoming a compose test, and standing up the whole stack to check one hostname is a worse trade than checking it where the stack already runs. Verified during rollout instead, against the real network, alongside the notification path it exists to serve. |
+| C6 | Under `read_only: true`: `/tmp` is writable and `TZ` is `UTC` | container. **Service-name DNS is deliberately not asserted here** — reaching `apprise` by name requires the compose network, which a container-only case cannot create without becoming a compose test, and standing up the whole stack to check one hostname is a worse trade than checking it where the stack already runs. |
 | C7 | `journalctl -D /host/journal -t zed -n5` exits `0` (0 hits is a pass) | ZED events under `-t zed` |
 | C8 | `journalctl -D /host/journal -t smartd` decodes without error (no NVMe ⇒ `SKIP`); a synthetic `Killed process` fixture entry is picked up by the `kernel` section | §2.6 unverified list |
 | C9 | `sentinel tick` with `TICK_INTERVAL=abc` ⇒ `78`; with `STATE_DIR` unwritable ⇒ `69`; with neither journal dir readable ⇒ `78`; `--loop --once` ⇒ `64`; a positional argument ⇒ `64` | C2 exit codes |

@@ -1,4 +1,4 @@
-name: build
+name: ci
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
       - "test/**"
       - "go.mod"
       - "go.sum"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "cmd/**"
@@ -19,7 +19,7 @@ on:
       - "test/**"
       - "go.mod"
       - "go.sum"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/ci.yml"
   workflow_dispatch: {}
 
 # packages:write is scoped to the build/merge jobs only (they push to
@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
+  lint:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -368,12 +368,12 @@ jobs:
     # install-host.sh or a broken notify path could fail red while the
     # digests still publish and this job still tags them — the tag is
     # the thing an operator pulls, so it is the one place that must not
-    # move on unverified digests. actionlint is included for the same
-    # reason C13 requires it: a workflow-shape defect must gate the
-    # publish, not just report on it afterward.
+    # move on unverified digests. lint (actionlint) is included for the
+    # same reason C13 requires it: a workflow-shape defect must gate
+    # the publish, not just report on it afterward.
     # Every job here must stay unconditional: a skipped dependency skips this
     # job too, which would leave a green run with no manifest list published.
-    needs: [build, container, e2e, actionlint]
+    needs: [build, container, e2e, lint]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:

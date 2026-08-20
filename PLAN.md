@@ -37,7 +37,7 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 │   ├── mailrise/mailrise.conf      # SMTP ingest → tgram://
 │   └── install-host.sh             # host part: rasdaemon, smartd→mailrise, zed→mailrise, JOURNAL_GID → .env
 │
-└── .github/workflows/build.yml     # go vet + go test + build + push → ghcr.io (latest + SHA)
+└── .github/workflows/ci.yml        # lint + test + e2e + build + push → ghcr.io (latest + SHA)
 ```
 
 Rollout on `bam` is exactly: copy `deploy/`, fill `.env`, run `install-host.sh`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.

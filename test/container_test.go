@@ -1763,7 +1763,7 @@ func (s *smtpAuthStub) handle(conn net.Conn) {
 
 func TestContainer_C13_WorkflowShape(t *testing.T) {
 	root := repoRoot(t)
-	wf := filepath.Join(root, ".github", "workflows", "build.yml")
+	wf := filepath.Join(root, ".github", "workflows", "ci.yml")
 	data, err := os.ReadFile(wf)
 	if err != nil {
 		t.Fatalf("FAIL C13: reading %s: %v", wf, err)
@@ -1783,7 +1783,7 @@ func TestContainer_C13_WorkflowShape(t *testing.T) {
 		"type=sha,format=long",
 	} {
 		if !strings.Contains(text, want) {
-			t.Errorf("FAIL C13: build.yml missing %q", want)
+			t.Errorf("FAIL C13: ci.yml missing %q", want)
 		}
 	}
 
