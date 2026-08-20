@@ -457,15 +457,32 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 
 **Permissions:** `contents: read`, `packages: write`. Built-in `GITHUB_TOKEN` only — no repository secrets (PLAN §2.9).
 
-**Job `test`**, `runs-on: ubuntu-latest`: `actions/checkout@v4` → `actions/setup-go@v5` (version from `go.mod`) → `gofmt -l .` (must be empty) → `go vet ./...` → `go test -race ./...`.
+**Architecture is a matrix axis, never something a job compensates for.** Each architecture builds and tests on a runner native to it — `ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64 — so **no emulation is involved anywhere and `docker/setup-qemu-action` is deliberately absent**. Adding a third architecture is one matrix row and no code change.
 
-**Job `build`**, `needs: test`, `runs-on: ubuntu-latest`, `concurrency: group=build-${{ github.ref }}, cancel-in-progress: true`:
-1. `actions/checkout@v4`
+This is not a performance preference. An earlier single-runner design built and tested `linux/arm64` under QEMU on an amd64 runner, and the emulation boundary produced a run of failures whose causes were repeatedly misdiagnosed — a wrong-architecture binary reads as an emulation limitation, because both present as `exec … not found`. Removing emulation removes the ambiguity rather than documenting it. If a future change makes a job need binfmt again, that is a signal it is cross-building, and it must fail rather than be papered over with QEMU.
+
+**Job `test`**, `runs-on: ubuntu-24.04`: `actions/checkout@v5` → `actions/setup-go@v5` (version from `go.mod`) → `gofmt -l .` (must be empty) → `go vet ./...` → `go test -race ./...`. Unit suite only; the container suite is its own job below.
+
+**Job `container`**, `needs: test`, matrix over `{platform, arch, runner}` with `fail-fast: false`: `go test -tags container ./test/...` with `SENTINEL_REAL_AGY=1` and the four `AGY_*` variables, so every image the suite builds uses the real vendor artifact.
+
+`fail-fast: false` is deliberate: one architecture failing must not cancel the other, because which architectures fail is the information being sought.
+
+**This job exists because the C-series suite previously ran nowhere in CI.** It executed only on developer machines, under rootless podman, which differs from the runner's rootful BuildKit in ways that have twice produced defects invisible locally — a build arg silently defaulting, and container-created directories the host user cannot remove. The suite must run where the artifacts are actually produced.
+
+**Job `build`**, `needs: test`, matrix over `{platform, arch, runner}` with `fail-fast: false`, `concurrency: group=build-${{ github.ref }}, cancel-in-progress: true`:
+1. `actions/checkout@v5`
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}` — skipped on `pull_request`
 4. `docker/metadata-action@v5` → `images: ghcr.io/${{ github.repository }}/sentinel`, tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
-5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: linux/amd64,linux/arm64`, `push: ${{ github.event_name != 'pull_request' }}`, tags/labels from step 4, `build-args: AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}`, `AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}`, `AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}`, `AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
-6. On non-PR runs: `docker pull ghcr.io/${{ github.repository }}/sentinel:${{ github.sha }}` and `docker run --rm <that image> --version` — proves the published image is pullable and runnable.
+5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: ${{ matrix.platform }}` (**one platform per job**), `outputs: type=image,push-by-digest=true,name-canonical=true`, pushing only on non-PR runs, tags/labels from step 4, `build-args: AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}`, `AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}`, `AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}`, `AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
+6. Each job smoke-tests **its own** pushed digest, natively — no `--platform`, no native-versus-emulated branching, because there is no emulated case. The ELF `e_machine` of both `/usr/local/bin/sentinel` and `/usr/local/bin/agy` is read **before** anything is executed, then both binaries are run.
+7. The digest is exported as an artifact for the merge job.
+
+**Job `merge`**, `needs: build` — which waits on every matrix leg, so a manifest list is never assembled from a partial set. It downloads the digests, runs `docker buildx imagetools create` to assemble the list and apply the tags from step 4, then `imagetools inspect` to verify **both** `linux/amd64` and `linux/arm64` are advertised, failing by name if either is absent. Filter on `os == "linux"` when reading the platform list: buildx's attestation manifests carry an `unknown` architecture and would otherwise pollute it.
+
+**One property was deliberately traded away here, and it should not be rediscovered as a bug:** no single job sees both architectures any more. Coverage is compositional — each build job verifies its own image natively, and `merge` verifies both are advertised in the list. That is the correct trade for deleting emulation, but "one place compared the two" is genuinely gone.
+
+**The verification's expectation must never derive from the build.** The container suite takes its expected architecture from `runtime.GOARCH` — fixed by the Go toolchain when the test binary was compiled on the physical runner, and therefore untouchable by any build arg, Dockerfile line, or buildx flag. An earlier design derived both the artifact selection *and* its expected value from `TARGETARCH`; when that variable silently defaulted, every image was built amd64 and the check passed anyway, because it could only prove the artifact agreed with itself. A coherence check whose expectation shares a source with the thing it checks is not a check.
 
 `AGY_URL_AMD64`/`AGY_SHA512_AMD64`/`AGY_URL_ARM64`/`AGY_SHA512_ARM64`/`AGY_VERSION` are repository **variables**, not secrets (public URLs and hashes). **All four architecture values are required**, because both platforms are built on every push — a missing one fails only the platform it belongs to, which is the confusing half-failure worth naming here rather than debugging later. Unset ⇒ the Dockerfile's required-arg check fails the run with a clear message — intended. No `continue-on-error` anywhere.
 
