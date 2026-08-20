@@ -361,7 +361,17 @@ jobs:
   # before. Named here so nobody reads a green PR as having verified
   # manifest assembly.
   merge:
-    needs: build
+    # build alone is not enough: build only proves each architecture's
+    # image builds and starts, not that C1-C13 pass or that the live
+    # notify path works. container and e2e are build's siblings (both
+    # `needs: test` only), so without listing them here a broken
+    # install-host.sh or a broken notify path could fail red while the
+    # digests still publish and this job still tags them — the tag is
+    # the thing an operator pulls, so it is the one place that must not
+    # move on unverified digests. actionlint is included for the same
+    # reason C13 requires it: a workflow-shape defect must gate the
+    # publish, not just report on it afterward.
+    needs: [build, container, e2e, actionlint]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
@@ -402,7 +412,12 @@ jobs:
         run: |
           # shellcheck disable=SC2046  # each tag/digest must land as its own
           # -t flag / positional argument; quoting would collapse the list
-          # into one malformed argument.
+          # into one malformed argument. This disable is file-scoped (a
+          # directive at the top of a `run:` block applies to the whole
+          # block, not just the next line) and is correct only because
+          # this block is a single command — keep it that way, or a
+          # later command added below would silently inherit the same
+          # suppression.
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)

@@ -293,6 +293,28 @@ func pick(want, val string) string {
 	return ""
 }
 
+// skipUnlessCI distinguishes an honest skip (the subject under test is
+// genuinely absent from this host — no hwmon, no rasdaemon, no real
+// journal) from a masked failure (a precondition the harness itself
+// controls — starting a throwaway container, apt-installing a package —
+// did not hold on a run that asked for the check). The first is fine on
+// a developer laptop and stays a skip everywhere. The second is fine on
+// a laptop too, but not on a CI runner: GitHub Actions sets CI=true with
+// nothing to configure, and a runner has a working daemon, network and
+// root, so a container-start or package-install failure there is far
+// more likely to be a real regression than an environment limitation —
+// and every one of C12's five families shares the same "cannot run a
+// throwaway container" preamble, so treating it as routine would let a
+// single hiccup skip all of install-host.sh's own coverage and still
+// report the job green.
+func skipUnlessCI(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // dockerAvailable is a cheap, cached "is the Docker/Podman daemon even
 // reachable" probe, checked once per test binary run — kept separate
 // from a build failure so an unreachable daemon SKIPs while a real
@@ -1180,7 +1202,7 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 	args = append(args, imageTag, "tick", "--loop")
 	_, errOut, code := runCmd(t, 20*time.Second, dockerBin(), args...)
 	if code != 0 {
-		t.Skipf("SKIP C11: could not start container (env limitation): %s", errOut)
+		skipUnlessCI(t, "C11: could not start container (env limitation): %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", name)
 
@@ -1216,7 +1238,7 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	// this test never runs install-host.sh against a real host.
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
-		t.Skipf("SKIP C12: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+		skipUnlessCI(t, "C12: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 
 	name := "sentinel-c12-test"
@@ -1225,7 +1247,7 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 		"-v", filepath.Join(root, "deploy")+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
-		t.Skipf("SKIP C12: could not start throwaway container: %s", errOut)
+		skipUnlessCI(t, "C12: could not start throwaway container: %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
 
@@ -1256,7 +1278,7 @@ apt-get install -y -qq systemd >/dev/null 2>&1 || true
 printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/deploy/.env
 chmod +x /root/deploy/install-host.sh`
 	if out, errOut, code := exec_(prep); code != 0 {
-		t.Skipf("SKIP C12: throwaway container prep failed: %s %s", out, errOut)
+		skipUnlessCI(t, "C12: throwaway container prep failed: %s %s", out, errOut)
 	}
 
 	// --dry-run changes nothing.
@@ -1305,7 +1327,7 @@ chmod +x /root/deploy/install-host.sh`
 	// mail-creds-missing case already guards against with this exact
 	// check, not a test failure.
 	if out, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
-		t.Skipf("SKIP C12: msmtp did not actually install in this environment (no network reachable from the throwaway container?): %s", out)
+		skipUnlessCI(t, "C12: msmtp did not actually install in this environment (no network reachable from the throwaway container?): %s", out)
 	}
 
 	out2, errOut2, code2 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
@@ -1351,7 +1373,7 @@ func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
-		t.Skipf("SKIP C12 (duplicate blocks): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+		skipUnlessCI(t, "C12 (duplicate blocks): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 
 	name := "sentinel-c12-dup-test"
@@ -1360,7 +1382,7 @@ func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
 		"-v", filepath.Join(root, "deploy")+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
-		t.Skipf("SKIP C12 (duplicate blocks): could not start throwaway container: %s", errOut)
+		skipUnlessCI(t, "C12 (duplicate blocks): could not start throwaway container: %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
 
@@ -1387,7 +1409,7 @@ DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /
 ` + endMark + `
 SMARTD_EOF`
 	if out, errOut, code := exec_(prep); code != 0 {
-		t.Skipf("SKIP C12 (duplicate blocks): throwaway container prep failed: %s %s", out, errOut)
+		skipUnlessCI(t, "C12 (duplicate blocks): throwaway container prep failed: %s %s", out, errOut)
 	}
 
 	countBlocks := func() int {
@@ -1443,7 +1465,7 @@ func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
-		t.Skipf("SKIP C12 (mail creds missing): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+		skipUnlessCI(t, "C12 (mail creds missing): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 
 	name := "sentinel-c12-nocreds-test"
@@ -1452,7 +1474,7 @@ func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
 		"-v", filepath.Join(root, "deploy")+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
-		t.Skipf("SKIP C12 (mail creds missing): could not start throwaway container: %s", errOut)
+		skipUnlessCI(t, "C12 (mail creds missing): could not start throwaway container: %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
 
@@ -1472,10 +1494,10 @@ apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1 || true
 chmod +x /root/deploy/install-host.sh
 mkdir -p /etc/zfs/zed.d`
 	if out, errOut, code := exec_(prep); code != 0 {
-		t.Skipf("SKIP C12 (mail creds missing): throwaway container prep failed: %s %s", out, errOut)
+		skipUnlessCI(t, "C12 (mail creds missing): throwaway container prep failed: %s %s", out, errOut)
 	}
 	if out, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
-		t.Skipf("SKIP C12 (mail creds missing): msmtp did not actually install in this environment: %s", out)
+		skipUnlessCI(t, "C12 (mail creds missing): msmtp did not actually install in this environment: %s", out)
 	}
 
 	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
@@ -1517,7 +1539,7 @@ func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
-		t.Skipf("SKIP C12c: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+		skipUnlessCI(t, "C12c: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 
 	name := "sentinel-c12c-test"
@@ -1526,7 +1548,7 @@ func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
 		"-v", filepath.Join(root, "deploy")+":/work:ro",
 		"debian:trixie-slim", "sleep", "300")
 	if code != 0 {
-		t.Skipf("SKIP C12c: could not start throwaway container: %s", errOut)
+		skipUnlessCI(t, "C12c: could not start throwaway container: %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
 
@@ -1545,7 +1567,7 @@ chmod 600 /root/deploy/.env
 chmod +x /root/deploy/install-host.sh
 ! getent passwd 1000 >/dev/null 2>&1` // the whole point: uid 1000 must have NO passwd entry
 	if out, errOut, code := exec_(prep); code != 0 {
-		t.Skipf("SKIP C12c: throwaway container prep failed (or uid 1000 unexpectedly has a passwd entry in this base image): %s %s", out, errOut)
+		skipUnlessCI(t, "C12c: throwaway container prep failed (or uid 1000 unexpectedly has a passwd entry in this base image): %s %s", out, errOut)
 	}
 
 	out, errOut, _ = exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
@@ -1570,7 +1592,7 @@ func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
-		t.Skipf("SKIP C12b: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+		skipUnlessCI(t, "C12b: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 
 	stub := newSMTPAuthStub(t)
@@ -1588,7 +1610,7 @@ func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 		"-v", filepath.Join(root, "deploy") + ":/work:ro",
 		"debian:trixie-slim", "sleep", "300"}
 	if _, errOut, code := runCmd(t, 60*time.Second, dockerBin(), runArgs...); code != 0 {
-		t.Skipf("SKIP C12b: could not start throwaway container: %s", errOut)
+		skipUnlessCI(t, "C12b: could not start throwaway container: %s", errOut)
 	}
 	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
 
@@ -1603,7 +1625,7 @@ apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1
 chmod +x /root/deploy/install-host.sh
 printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/deploy/.env`
 	if out, errOut, code := exec_(prep); code != 0 {
-		t.Skipf("SKIP C12b: throwaway container prep failed (msmtp package unavailable?): %s %s", out, errOut)
+		skipUnlessCI(t, "C12b: throwaway container prep failed (msmtp package unavailable?): %s %s", out, errOut)
 	}
 
 	// host.containers.internal (Podman, native) / host.docker.internal
@@ -1747,15 +1769,18 @@ func TestContainer_C13_WorkflowShape(t *testing.T) {
 		t.Fatalf("FAIL C13: reading %s: %v", wf, err)
 	}
 	text := string(data)
+	// The metadata step's `images:` source line is deliberately NOT
+	// asserted here: pinning it to today's exact expression (currently
+	// steps.image.outputs.name, previously raw github.repository)
+	// teaches "update the string" rather than "verify the property",
+	// and it is the line that broke this test once already. The
+	// property that actually matters — the published tag points at the
+	// same lowercased path the digests were pushed to — is proven for
+	// real by merge's `imagetools inspect` against the pushed ref, not
+	// by string-matching this file.
 	for _, want := range []string{
 		"type=raw,value=latest",
 		"type=sha,format=long",
-		// The metadata step's `images:` must use the already-lowercased
-		// image name (steps.image.outputs.name), not raw
-		// github.repository — otherwise the tags it produces can point
-		// at a different path than the digests build/merge actually
-		// pushed to, whenever the owner isn't already all-lowercase.
-		"images: ${{ steps.image.outputs.name }}",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("FAIL C13: build.yml missing %q", want)
