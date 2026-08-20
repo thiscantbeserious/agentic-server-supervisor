@@ -284,7 +284,9 @@ var (
 
 ### N.8 Tracked config files
 
-`deploy/apprise/sentinel.cfg` (Apprise TEXT format, `tgram://` targets) and `deploy/mailrise/mailrise.conf` (recipients `omv`, `smartd`, `zed`, `sentinel`, `listen 0.0.0.0:8025`, `tls: mode: off`, mandatory `smtp.auth.basic`) contain no code and are not ported. Both are rendered on the host by `install.sh` into `.runtime/` (0600, gitignored); the sentinel container never sees a Telegram token.
+`deploy/apprise/sentinel.cfg` (Apprise TEXT format, `tgram://` targets) is a tracked template only — it is never rendered, never copied onto a host, and contains no real token. The live configuration lives entirely inside apprise's own `apprise-config` docker volume, seeded through the API (`SeedConfig`, above, or an equivalent `curl POST /add/{key}`); writing a file to apprise's `/config` directly does not register a key (deploy/README.md, "Seed the apprise config key").
+
+`mailrise.conf` (recipients `omv`, `smartd`, `zed`, `sentinel`, `listen 0.0.0.0:8025`, `tls: mode: off`, mandatory `smtp.auth.basic`) is a real host file, not a template — but the tracked `deploy/mailrise/mailrise.conf.example` it comes from is. It is written one of two ways, and lands in a different place depending on which: by hand (`cp` the example, fill in real values) at `deploy/mailrise/mailrise.conf` for the manual `--env-file` setup path, or rendered from that same example by `install.sh`'s Step 0 at `$STACK_DIR/mailrise/mailrise.conf` for the `curl | sudo bash` path — which is not necessarily under `deploy/` at all. Either way the file ends up at mode **`0644`**, gitignored, never `0600` — mailrise reads it as a non-root container user, and `0600` is exactly the mode that crash-loops the container (deploy/README.md). The sentinel container never sees a Telegram token either way: it never mounts this file.
 
 ### N.9 Test contract — `internal/notify/notify_test.go` (+ `render_test.go`)
 
