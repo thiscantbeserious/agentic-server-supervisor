@@ -151,6 +151,13 @@ func TestE2E(t *testing.T) {
 	if os.Getenv("SENTINEL_E2E") != "1" {
 		t.Skip("SENTINEL_E2E=1 not set — skipping live apprise/mailrise E2E test")
 	}
+	// An intermittent "transport: EOF" surfaced here at roughly 1-in-13
+	// (3/40 baseline runs against a real apprise-api). Disabling keep-alive
+	// on the shared client pool made it 0/45 across two independent runs;
+	// leaving it enabled reproduced the same failure both times. That is
+	// the pooled-connection-reuse theory confirmed by removing the
+	// variable, not a sleep timed to outlast an unproven guess.
+	http.DefaultTransport.(*http.Transport).DisableKeepAlives = true
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -191,8 +198,11 @@ func TestE2E(t *testing.T) {
 	// as containment same as before. Type is NOT asserted on this path
 	// at all — verified live that mailrise's downstream message always
 	// carries "info" here, never payload.Type ("warning" for this WATCH
-	// fixture): the SMTP bridge does not carry severity downstream, a
-	// real property of this path, not an assertion left out by choice.
+	// fixture): the apprise "type" field (client-side styling/priority)
+	// is not propagated over SMTP, a real property of this path. Human-
+	// readable severity is unaffected: the subject is built as
+	// "[STATUS] ..." before SMTP, so mailrise's own title framing still
+	// carries the "[WATCH]"/"[ALERT]" prefix an operator reads.
 	if err := Send(ctx, cfg, r, true); err != nil {
 		t.Fatalf("FAIL E2E: live mailrise SMTP send failed: %v", err)
 	}
@@ -211,15 +221,6 @@ func TestE2E(t *testing.T) {
 	t.Cleanup(func() { sink.setStatus(0) })
 	errSend := Send(ctx, cfg, r, false)
 	sink.setStatus(0)
-	// ponytail: apprise-api runs a single uWSGI worker (verified in its
-	// own logs), and firing the next request immediately after this one
-	// occasionally reused a pooled connection it had already started
-	// tearing down, surfacing as "transport: EOF" here rather than the
-	// case actually being tested — a real backend under real tick
-	// spacing (minutes apart) never sees this. A short pause is pacing
-	// against a known single-worker dependency, not a correctness wait;
-	// nothing below asserts on elapsed time.
-	time.Sleep(100 * time.Millisecond)
 	if errSend == nil {
 		t.Fatal("FAIL E2E: apprise send with the sink returning 503 succeeded, want an error")
 	}
@@ -261,7 +262,6 @@ func TestE2E(t *testing.T) {
 	if got := sink.count(); got != 4 {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 204 case, want 4 (received, and apprise still called it a success)", got)
 	}
-	time.Sleep(100 * time.Millisecond) // ponytail: same single-worker pacing as above
 
 	// --- dedup: three identical ticks must produce exactly one delivery ---
 	//
