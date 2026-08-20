@@ -157,7 +157,13 @@ func TestE2E(t *testing.T) {
 	// leaving it enabled reproduced the same failure both times. That is
 	// the pooled-connection-reuse theory confirmed by removing the
 	// variable, not a sleep timed to outlast an unproven guess.
-	http.DefaultTransport.(*http.Transport).DisableKeepAlives = true
+	//
+	// DefaultTransport is process-global and shared by other tests in this
+	// package, so restore it rather than leaving keep-alives off for
+	// whatever runs after this test.
+	tr := http.DefaultTransport.(*http.Transport)
+	tr.DisableKeepAlives = true
+	t.Cleanup(func() { tr.DisableKeepAlives = false })
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)

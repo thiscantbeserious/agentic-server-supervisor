@@ -146,6 +146,7 @@ Prompt injection is an explicit review checkpoint: log contents are attacker-con
 |---|---|
 | agy down / timeout / quota | fallback report: `status=ALERT`, headline "Analyzer unavailable", body = raw emerg/crit lines (max 20) — hardware alerts must never depend on the LLM |
 | Apprise down | outbox + retry; after 3 ticks additionally direct mail via mailrise SMTP as a second path |
+| Apprise's `type` field over the SMTP fallback | not propagated — mailrise's embedded apprise client always reports `type=info` downstream, regardless of the report's real status. Human-readable severity is not lost: the subject line carries `[STATUS]` and survives in mailrise's own title framing, so an operator reading the message still sees it — only client-side styling/priority is affected |
 | facts.json > 256 KB | per-section truncation with `"truncated": true` |
 | Collector section failed | `collector_errors[]` in meta, LLM reports it as WATCH |
 | Tick overlap | sequential entrypoint loop — parallelism impossible |
