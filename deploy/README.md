@@ -17,7 +17,49 @@ deliver SMTP to mailrise, which forwards through the same apprise instance. That
 is the **LLM-free path** — it works when the supervisor is down, when agy is
 unreachable, and when the analyzer is falling back.
 
-## Setup
+## Quick install
+
+The normal way in — nothing copied onto the host first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash
+```
+
+This installs the host packages (rasdaemon, msmtp, smartd/ZED wiring — see
+`contracts/runtime.md` R5) **and** creates the compose stack itself: it
+detects whether the host is running OpenMediaVault's compose plugin and
+lays the stack out accordingly (`/docker-compose/sentinel/`, OMV's
+symlink shape, or a plain `/opt/sentinel/` otherwise), offering the
+detected directory in a prompt — press Enter to accept it, or type a
+different path. It then prompts for the Telegram bot token, chat id, and
+a mailrise SMTP password, writes them into the stack's env file and into
+`mailrise.conf` (never echoed, never logged), and fetches
+`docker-compose.yml` from this same repository. Re-running is safe and
+idempotent: it only fills in what is still missing.
+
+Pin a specific version instead of `main` with `--ref`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash -s -- --ref v1.2.3
+```
+
+`--check` and `--dry-run` never prompt and never write — safe to run
+repeatedly to preview what would happen, including where the stack would
+be created and which layout it would choose. Full flag reference:
+`install-host.sh --help`, or `contracts/runtime.md` R5.
+
+**Read the script first if you want to** — a `curl | sudo bash` that
+installs packages and writes to `/etc` is a reasonable thing to want to
+read before running as root. It is a plain, gitignore-respecting bash
+script; nothing about it requires the pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh -o install-host.sh
+less install-host.sh
+sudo bash install-host.sh --ref main   # same behavior, run from disk
+```
+
+## Setup (manual — filling in `.env` by hand instead of being prompted)
 
 ```bash
 cd deploy
@@ -55,6 +97,12 @@ an alert failed to arrive, which is why the values are written in rather than
 interpolated.
 
 ## Deploying under OpenMediaVault
+
+**The Quick install above already does everything in this section for
+you** — it detects an OMV compose root and lays the stack out correctly,
+including every constraint below. This section is for anyone using the
+manual `--env-file` path against a stack directory they built by hand
+instead, where none of these constraints are enforced automatically.
 
 OpenMediaVault's compose plugin owns `/docker-compose/`, one directory per
 stack, and does not lay the stack out the way the plain `cd deploy` Setup

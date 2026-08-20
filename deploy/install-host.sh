@@ -23,16 +23,35 @@ DRY_RUN=0
 MAILRISE_HOST="127.0.0.1"
 MAILRISE_PORT="8025"
 ENV_FILE="./.env"
+ENV_FILE_EXPLICIT=0
+
+# Stack creation (curl | sudo bash, nothing copied onto the host first).
+# REPO_SLUG is this script's own repository — it is not a generic
+# installer for someone else's fork, so this is a constant, not a flag.
+REPO_SLUG="thiscantbeserious/agentic-server-supervisor"
+REF="${SENTINEL_REF:-main}"
+STACK_DIR=""
+LAYOUT=""
+COMPOSE_NAME=""
+ENV_NAME=""
 
 usage() {
   cat <<EOF
-usage: $PROG [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT] [--env-file PATH] [-h|--help]
+usage: $PROG [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT] [--env-file PATH] [--stack-dir PATH] [--ref REF] [-h|--help]
 
   --check                report drift, change nothing; exit 0 if converged, 1 if not
   --dry-run               print every action it would take, change nothing, exit 0
   --mailrise-host HOST    SMTP host smartd/ZED mail is delivered to (default 127.0.0.1)
   --mailrise-port PORT    SMTP port (default 8025)
-  --env-file PATH         file that receives JOURNAL_GID= (default ./.env)
+  --env-file PATH         use this exact env file, unmodified layout (default ./.env);
+                          mutually exclusive with --stack-dir
+  --stack-dir PATH        create/use the compose stack here — fetches docker-compose.yml
+                          and mailrise.conf from this script's own repo, prompts for the
+                          bot token/chat id/mailrise password if missing (default:
+                          detected — /docker-compose/sentinel under OpenMediaVault,
+                          /opt/sentinel otherwise — offered interactively, Enter accepts it)
+  --ref REF                git ref to fetch deploy/docker-compose.yml and
+                          mailrise.conf.example from (default: main, or \$SENTINEL_REF)
   -h, --help              show this help
 EOF
 }
@@ -69,11 +88,19 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     --mailrise-host) require_value "$@"; MAILRISE_HOST="$2"; shift 2 ;;
     --mailrise-port) require_value "$@"; MAILRISE_PORT="$2"; shift 2 ;;
-    --env-file) require_value "$@"; ENV_FILE="$2"; shift 2 ;;
+    --env-file) require_value "$@"; ENV_FILE="$2"; ENV_FILE_EXPLICIT=1; shift 2 ;;
+    --stack-dir) require_value "$@"; STACK_DIR="$2"; shift 2 ;;
+    --ref) require_value "$@"; REF="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "$PROG: unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac
 done
+
+if [ "$ENV_FILE_EXPLICIT" -eq 1 ] && [ -n "$STACK_DIR" ]; then
+  echo "$PROG: --env-file and --stack-dir are mutually exclusive — --env-file targets one file you already filled in yourself; --stack-dir creates a whole new stack" >&2
+  usage >&2
+  exit 64
+fi
 
 if [ "$EUID" -ne 0 ]; then
   echo "$PROG: must run as root (EUID=0)" >&2
@@ -269,6 +296,476 @@ strip_quotes() {
     fi
   fi
   printf '%s' "$v"
+}
+
+# --- stack creation (curl | sudo bash, nothing copied onto the host first) ---
+#
+# When --env-file was given explicitly, none of this runs: ENV_FILE is
+# exactly what the operator passed, matching every prior version of this
+# script (ENV_FILE_EXPLICIT gates the two calls in the run section below).
+# This section exists only for the opposite case, where nothing exists on
+# the host yet and the script itself has to decide where the stack lives,
+# create it, and fill in the handful of values only a human or the host
+# itself can supply.
+
+# have_tty succeeds only if this process has a controlling terminal
+# reachable at /dev/tty. Under `curl -fsSL URL | sudo bash`, fd 0 IS the
+# piped script, not a place to read an operator's answer from — reading a
+# prompt from stdin in that shape would silently consume a line of shell
+# source as a bot token. /dev/tty is the one path that still refers to the
+# real terminal (or, under `ssh -t`, the allocated pty) regardless of what
+# stdin is bound to.
+have_tty() {
+  { : <>/dev/tty; } 2>/dev/null
+}
+
+# prompt_with_default PROMPT DEFAULT — shows PROMPT and DEFAULT, reads one
+# line from /dev/tty, echoes DEFAULT verbatim if the operator just pressed
+# Enter. Never used for secrets.
+prompt_with_default() {
+  local val=""
+  printf '%s [%s]: ' "$1" "$2" > /dev/tty
+  IFS= read -r val < /dev/tty
+  if [ -z "$val" ]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$val"
+  fi
+}
+
+# prompt_secret PROMPT — reads one line from /dev/tty with terminal echo
+# off (read -rs), so the value never appears on screen, in scrollback, or
+# in any session log a terminal multiplexer might keep. Same class of rule
+# as C7's prohibition on logging the apprise key: a secret that touches
+# this script's own output at all is a secret that can leak through a log
+# nobody thought to protect.
+prompt_secret() {
+  local val=""
+  printf '%s' "$1" > /dev/tty
+  read -rs val < /dev/tty
+  printf '\n' > /dev/tty
+  printf '%s' "$val"
+}
+
+# require_secret NAME PROMPT CURRENT SILENT — sets REQUIRE_SECRET_RESULT.
+# Deliberately NOT called as val="$(require_secret ...)": command
+# substitution forks a subshell, and MISSING_ENV_INPUT=1 set inside a
+# subshell never reaches the parent shell — an earlier version of this
+# function did exactly that and silently lost the flag, which is the
+# kind of bug this whole design exists to prevent (a missing secret
+# reported as fine). A global result variable has no subshell to lose
+# it in.
+#
+# Returns CURRENT unchanged if already non-empty: idempotent re-run,
+# never re-prompt for a value already in the env file. Otherwise prompts
+# (silently, read -rs, if SILENT=1; visibly, read -r, if SILENT=0 — a
+# chat id is not a credential) when a terminal is available. Under
+# --check/--dry-run, which must never prompt, records the gap as drift
+# instead. With no terminal at all on a real run, sets MISSING_ENV_INPUT
+# and returns empty — never a silent empty write, which is the one
+# failure mode worse than any prompt: a supervisor stack that starts,
+# reports healthy, and never delivers a single notification.
+require_secret() {
+  local name="$1" prompt="$2" current="$3" silent="$4"
+  REQUIRE_SECRET_RESULT=""
+  if [ -n "$current" ]; then
+    REQUIRE_SECRET_RESULT="$current"
+    return
+  fi
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    note "stack secrets: $name not yet set (would prompt)"
+    changed=$((changed+1))
+    return
+  fi
+  if ! have_tty; then
+    echo "$PROG: $name is required and not already set in $ENV_FILE, but no controlling terminal is available to prompt for it (this is what \`curl | bash\` looks like without a real terminal) — re-run with a terminal attached, or pre-fill $ENV_FILE and pass --env-file" >&2
+    MISSING_ENV_INPUT=1
+    return
+  fi
+  if [ "$silent" -eq 1 ]; then
+    REQUIRE_SECRET_RESULT="$(prompt_secret "$prompt")"
+  else
+    local val=""
+    printf '%s' "$prompt" > /dev/tty
+    IFS= read -r val < /dev/tty
+    REQUIRE_SECRET_RESULT="$val"
+  fi
+}
+
+# env_var_value FILE KEY — current value of KEY in FILE, quote-stripped,
+# empty if absent. Reuses strip_quotes for the same reason
+# compute_mail_status already does: a quoted value in an operator-edited
+# file must not carry its quote characters into a credential.
+env_var_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || { printf ''; return; }
+  strip_quotes "$(grep "^${key}=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+}
+
+# upsert_env_var FILE KEY VALUE — sets KEY=VALUE in FILE only if KEY is
+# currently absent or empty there; a key already carrying a non-empty
+# value is left untouched, so re-running never clobbers an operator's own
+# edit or a value a prior run already prompted for. VALUE="" is a no-op —
+# the caller is responsible for not calling this when a required secret
+# is still unknown, and skipping the write here too is a second guard
+# against ever staging an empty assignment. Mode 0600 root:root always:
+# unlike step6's ENV_FILE (which may pre-exist under the old --env-file
+# path and must preserve its owner), this file is one this script is
+# creating fresh.
+upsert_env_var() {
+  local file="$1" key="$2" value="$3"
+  local current=""
+  [ -f "$file" ] && current="$(grep "^${key}=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  if [ -n "$current" ] || [ -z "$value" ]; then
+    return 1
+  fi
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  if [ -f "$file" ]; then
+    cp "$file" "$tmp"
+    if [ -s "$tmp" ] && [ -n "$(tail -c1 "$tmp")" ]; then
+      printf '\n' >> "$tmp"
+    fi
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  if ! install -m 0600 -o root -g root "$tmp" "$file"; then
+    echo "$PROG: failed to write $key to $file" >&2
+    TRANSIENT_FAIL=1
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
+set_env_default() {  # KEY VALUE
+  local key="$1" value="$2"
+  if upsert_env_var "$ENV_FILE" "$key" "$value"; then
+    changed=$((changed+1))
+  fi
+}
+
+# write_file_if_differs FILE MODE SRC_PATH — installs SRC_PATH to FILE at
+# MODE only if the content differs (or FILE is missing). Same
+# mktemp+install atomic-replace pattern as render_managed_block, but for
+# a file this script owns in full rather than one shared with an
+# operator's own content, so there is no marker block: the whole file is
+# compared and replaced.
+write_file_if_differs() {
+  local file="$1" mode="$2" src="$3"
+  if [ -f "$file" ] && cmp -s "$file" "$src"; then
+    return 1
+  fi
+  if [ "$CHECK" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would write $file (mode $mode)"
+    return 0
+  fi
+  if ! install -m "$mode" -o root -g root "$src" "$file"; then
+    echo "$PROG: failed to install $file" >&2
+    TRANSIENT_FAIL=1
+    return 1
+  fi
+  return 0
+}
+
+# ensure_dir DIR MODE DESC — idempotent mkdir with the same
+# note/changed/--check/--dry-run bookkeeping every other step uses.
+ensure_dir() {
+  local dir="$1" mode="$2" desc="$3"
+  if [ -d "$dir" ]; then
+    note "$desc: $dir already exists"
+    return
+  fi
+  note "$desc: creating $dir"
+  if [ "$CHECK" -eq 1 ]; then
+    changed=$((changed+1))
+    return
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would create $dir (mode $mode)"
+    changed=$((changed+1))
+    return
+  fi
+  # mkdir -m only applies its mode to the deepest directory when -p
+  # creates more than one level, so the mode is set explicitly afterward
+  # rather than trusted to -m -p together.
+  if ! mkdir -p "$dir" || ! chmod "$mode" "$dir"; then
+    echo "$PROG: failed to create $dir" >&2
+    TRANSIENT_FAIL=1
+    return
+  fi
+  changed=$((changed+1))
+}
+
+# ensure_symlink LINK TARGET_BASENAME — creates LINK -> TARGET_BASENAME
+# (relative, so the stack directory stays movable) only if it does not
+# already point there. Never touches a LINK that exists as a regular
+# file — that would mean real content already lives there, and silently
+# replacing it is exactly the kind of surprise this whole script exists
+# to avoid.
+ensure_symlink() {
+  local link="$1" target="$2"
+  if [ -L "$link" ]; then
+    if [ "$(readlink "$link")" = "$target" ]; then
+      note "stack symlink: $link -> $target already correct"
+      return
+    fi
+  elif [ -e "$link" ]; then
+    echo "$PROG: $link exists and is not a symlink to $target — refusing to overwrite it" >&2
+    TRANSIENT_FAIL=1
+    return
+  fi
+  note "stack symlink: $link -> $target"
+  if [ "$CHECK" -eq 1 ]; then
+    changed=$((changed+1))
+    return
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would symlink $link -> $target"
+    changed=$((changed+1))
+    return
+  fi
+  if ! ln -sfn "$target" "$link"; then
+    echo "$PROG: failed to create symlink $link" >&2
+    TRANSIENT_FAIL=1
+    return
+  fi
+  changed=$((changed+1))
+}
+
+# ensure_curl installs curl if it is missing — needed to fetch the stack
+# files from this script's own repository. Best-effort under
+# --check/--dry-run (never installs anything there; reports the gap).
+ensure_curl() {
+  if command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    echo "$PROG: curl is not installed — cannot fetch the stack files (would run: apt-get install -y curl)" >&2
+    return 1
+  fi
+  apt-get update -qq || true
+  apt-get install -y --no-install-recommends curl || true
+  command -v curl >/dev/null 2>&1
+}
+
+# fetch_repo_file REPO_PATH SIGNATURE — downloads REPO_PATH from this
+# script's own repository at $REF into FETCHED_TMP. Checks the HTTP
+# status explicitly and that the payload contains SIGNATURE — a cheap
+# defence against a captive portal, a proxy, or a bad ref answering 200
+# with something that is not the file asked for, which `curl -f` alone
+# does not catch when the intermediary itself answers success.
+fetch_repo_file() {
+  local repo_path="$1" signature="$2"
+  local url="https://raw.githubusercontent.com/${REPO_SLUG}/${REF}/${repo_path}"
+  local code rc
+  FETCHED_TMP="$(mktemp)"
+  code="$(curl -fsSL -w '%{http_code}' -o "$FETCHED_TMP" "$url" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ "$code" != "200" ]; then
+    echo "$PROG: failed to fetch ${repo_path} from ref '${REF}' (curl exit=${rc}, http=${code:-none}) — check network access and that --ref/\$SENTINEL_REF names a real ref" >&2
+    rm -f "$FETCHED_TMP"; FETCHED_TMP=""
+    return 1
+  fi
+  if [ ! -s "$FETCHED_TMP" ] || ! grep -q "$signature" "$FETCHED_TMP"; then
+    echo "$PROG: fetched ${repo_path} from ref '${REF}' does not look right (empty, or missing expected content) — refusing to write it" >&2
+    rm -f "$FETCHED_TMP"; FETCHED_TMP=""
+    return 1
+  fi
+  return 0
+}
+
+# invoking_home — the home directory of the user who ran sudo, not
+# root's. `sudo bash` sets SUDO_USER; resolved via getent rather than
+# trusting $HOME, which under sudo may already be root's unless the
+# invocation happens to preserve it.
+invoking_home() {
+  local u="${SUDO_USER:-}"
+  if [ -n "$u" ]; then
+    local h
+    h="$(getent passwd "$u" 2>/dev/null | cut -d: -f6)"
+    if [ -n "$h" ]; then
+      printf '%s' "$h"
+      return
+    fi
+  fi
+  printf '%s' "$HOME"
+}
+
+# detect_layout inspects STACK_DIR itself, never how it was chosen — an
+# explicit --stack-dir /docker-compose/sentinel gets the OMV layout
+# exactly the same as the auto-detected default would, and a typo'd
+# --stack-dir /docker-compose2/x does not. A plain directory gets
+# docker-compose.yml + .env directly: sentinel.yml plus a compose.yml
+# symlink would be pointless indirection anywhere that is not actually
+# an OMV compose root.
+detect_layout() {
+  if [ -d /docker-compose ] && [ "$(dirname "$STACK_DIR")" = "/docker-compose" ]; then
+    LAYOUT="omv"
+    COMPOSE_NAME="sentinel.yml"
+    ENV_NAME="sentinel.env"
+  else
+    LAYOUT="plain"
+    COMPOSE_NAME="docker-compose.yml"
+    ENV_NAME=".env"
+  fi
+}
+
+# resolve_stack_dir sets STACK_DIR. Precedence: --stack-dir flag (always,
+# every mode) > interactive prompt with a detected default (real run,
+# terminal only) > the detected default itself, used silently
+# (--check/--dry-run, which must never prompt) > exit 78 (real run, no
+# terminal, no flag). That last case is a hard, immediate exit rather
+# than the deferred MISSING_ENV_INPUT path require_secret uses below:
+# without a stack directory there is no coherent env file for anything
+# else in this script to point at, so nothing downstream — not even the
+# host package steps — can proceed meaningfully, and writing a stack into
+# a guessed directory is worse than refusing outright.
+resolve_stack_dir() {
+  if [ -n "$STACK_DIR" ]; then
+    return
+  fi
+  local proposed="/opt/sentinel"
+  if [ -d /docker-compose ]; then
+    proposed="/docker-compose/sentinel"
+  fi
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    STACK_DIR="$proposed"
+    return
+  fi
+  if have_tty; then
+    STACK_DIR="$(prompt_with_default "Install the stack in" "$proposed")"
+    return
+  fi
+  echo "$PROG: no --stack-dir given and no controlling terminal available to prompt for one (this is what \`curl | sudo bash\` looks like without a real terminal) — refusing to guess where to write the stack; re-run with a terminal attached, or pass --stack-dir explicitly" >&2
+  exit 78
+}
+
+# step0a_layout resolves where the stack lives, fetches
+# deploy/docker-compose.yml from this script's own repo at $REF, and
+# creates the directory/compose-file/symlink layout. Runs before step1:
+# a missing terminal or a bad --ref is worth knowing before spending time
+# on apt-get.
+step0a_layout() {
+  resolve_stack_dir
+  detect_layout
+  ENV_FILE="${STACK_DIR}/${ENV_NAME}"
+  echo "$PROG: stack directory: $STACK_DIR (layout: $LAYOUT, ref: $REF)" >&2
+
+  if ! ensure_curl; then
+    echo "$PROG: curl is required to fetch the stack files and could not be installed" >&2
+    TRANSIENT_FAIL=1
+    return
+  fi
+
+  ensure_dir "$STACK_DIR" 0700 "stack directory"
+  ensure_dir "${STACK_DIR}/mailrise" 0700 "mailrise directory"
+
+  if fetch_repo_file "deploy/docker-compose.yml" "container_name: sentinel"; then
+    local compose_path="${STACK_DIR}/${COMPOSE_NAME}"
+    if write_file_if_differs "$compose_path" 0644 "$FETCHED_TMP"; then
+      note "stack compose file: $compose_path written/updated (fetched from ref $REF)"
+      changed=$((changed+1))
+    else
+      note "stack compose file: $compose_path already matches ref $REF"
+    fi
+    rm -f "$FETCHED_TMP"
+  else
+    TRANSIENT_FAIL=1
+  fi
+
+  if [ "$LAYOUT" = "omv" ]; then
+    ensure_symlink "${STACK_DIR}/compose.yml" "$COMPOSE_NAME"
+    ensure_symlink "${STACK_DIR}/.env" "$ENV_NAME"
+  fi
+}
+
+# step0b_secrets fills in ENV_FILE: the three prompted values (bot token,
+# chat id, mailrise password) plus everything derivable without asking
+# (JOURNAL_GID is left to the existing step6; the rest default here).
+# Every field goes through set_env_default, which never overwrites a
+# value already present — a re-run after a transient failure only fills
+# in what is still missing, never re-prompts for what is already there.
+step0b_secrets() {
+  local existing_token existing_chat existing_smtp_user existing_smtp_pass
+  existing_token="$(env_var_value "$ENV_FILE" TELEGRAM_BOT_TOKEN)"
+  existing_chat="$(env_var_value "$ENV_FILE" TELEGRAM_CHAT_ID)"
+  existing_smtp_user="$(env_var_value "$ENV_FILE" MAILRISE_SMTP_USER)"
+  existing_smtp_pass="$(env_var_value "$ENV_FILE" MAILRISE_SMTP_PASS)"
+
+  local token chat smtp_pass smtp_user
+  require_secret TELEGRAM_BOT_TOKEN "Telegram bot token (from @BotFather): " "$existing_token" 1
+  token="$REQUIRE_SECRET_RESULT"
+  require_secret TELEGRAM_CHAT_ID "Telegram chat id: " "$existing_chat" 0
+  chat="$REQUIRE_SECRET_RESULT"
+  require_secret MAILRISE_SMTP_PASS "mailrise SMTP password (written into both $ENV_NAME and mailrise.conf): " "$existing_smtp_pass" 1
+  smtp_pass="$REQUIRE_SECRET_RESULT"
+  smtp_user="$existing_smtp_user"
+  [ -z "$smtp_user" ] && smtp_user="sentinel"
+
+  local before_changed=$changed
+  set_env_default TELEGRAM_BOT_TOKEN "$token"
+  set_env_default TELEGRAM_CHAT_ID "$chat"
+  set_env_default MAILRISE_SMTP_USER "$smtp_user"
+  set_env_default MAILRISE_SMTP_PASS "$smtp_pass"
+  set_env_default APPRISE_BIND "127.0.0.1"
+  set_env_default MAILRISE_BIND "127.0.0.1"
+  set_env_default APPRISE_PUID "1000"
+  set_env_default APPRISE_PGID "1000"
+  set_env_default TZ "UTC"
+  set_env_default SENTINEL_TAG "latest"
+  set_env_default AGY_CREDENTIALS_DIR "$(invoking_home)/.gemini"
+  set_env_default SENTINEL_MAIL_FROM "sentinel@mailrise.xyz"
+  set_env_default SENTINEL_MAIL_TO "sentinel@mailrise.xyz"
+  set_env_default LOG_LEVEL "INFO"
+  if [ "$changed" -gt "$before_changed" ]; then
+    note "stack env: wrote $((changed-before_changed)) field(s) to $ENV_FILE"
+  elif [ "$MISSING_ENV_INPUT" -eq 1 ]; then
+    note "stack env: $ENV_FILE unchanged — still missing the input reported above"
+  else
+    note "stack env: $ENV_FILE already had every field"
+  fi
+
+  if [ "$MISSING_ENV_INPUT" -eq 1 ]; then
+    note "stack mailrise.conf: not written — still missing required input above"
+    return
+  fi
+  if [ -z "$token" ] || [ -z "$chat" ] || [ -z "$smtp_user" ] || [ -z "$smtp_pass" ]; then
+    # Only reachable under --check/--dry-run, where require_secret
+    # returns empty without setting MISSING_ENV_INPUT (drift is
+    # reported, not failed). mailrise.conf's content depends on all
+    # four, so there is nothing meaningful to render yet beyond the
+    # note require_secret already recorded for each missing one.
+    note "stack mailrise.conf: not previewed — depends on values not yet set"
+    return
+  fi
+
+  if fetch_repo_file "deploy/mailrise/mailrise.conf.example" "REPLACE_BOT_TOKEN"; then
+    local rendered
+    rendered="$(mktemp)"
+    sed -e "s/REPLACE_BOT_TOKEN/${token}/g" \
+        -e "s/REPLACE_CHAT_ID/${chat}/g" \
+        -e "s/REPLACE_SMTP_USER/${smtp_user}/g" \
+        -e "s/REPLACE_SMTP_PASS/${smtp_pass}/g" \
+        "$FETCHED_TMP" > "$rendered"
+    rm -f "$FETCHED_TMP"
+    local mailrise_path="${STACK_DIR}/mailrise/mailrise.conf"
+    if write_file_if_differs "$mailrise_path" 0644 "$rendered"; then
+      note "stack mailrise.conf: written (mode 0644 — see deploy/README.md, NOT 0600)"
+      changed=$((changed+1))
+    else
+      note "stack mailrise.conf: already up to date"
+    fi
+    rm -f "$rendered"
+  else
+    TRANSIENT_FAIL=1
+  fi
 }
 
 # --- step 1: packages ----------------------------------------------------
@@ -678,6 +1175,11 @@ step6() {
 }
 
 # --- run -------------------------------------------------------------
+
+if [ "$ENV_FILE_EXPLICIT" -ne 1 ]; then
+  step0a_layout
+  step0b_secrets
+fi
 
 step1
 # Must run after step1 (needs the real RASDAEMON_OK/MSMTP_OK it sets)

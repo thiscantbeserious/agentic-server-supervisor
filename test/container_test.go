@@ -40,6 +40,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1354,6 +1355,330 @@ chmod +x /root/deploy/install-host.sh`
 		t.Errorf("FAIL C12: /root/deploy/.env does not contain JOURNAL_GID=%s (got: %s) — gid must be DISCOVERED via getent, never hardcoded", testJournalGID, envContent)
 	}
 	logPass(t, "PASS C12")
+}
+
+// runCmdStdin is runCmd with a caller-supplied stdin — needed to pipe
+// install-host.sh's own content into `docker exec -i ... bash -s --`,
+// the exact shape of `curl -fsSL URL | sudo bash`: stdin carries the
+// script itself, not a place a human answer could come from.
+func runCmdStdin(t *testing.T, timeout time.Duration, stdin io.Reader, name string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = stdin
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	code = 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			code = -1
+		}
+	}
+	return outBuf.String(), errBuf.String(), code
+}
+
+// runInstallHostPiped pipes deploy/install-host.sh's own content into a
+// `docker exec -i` (no -t: no pty, no controlling terminal — this is
+// what curl | bash looks like) `bash -s -- ARGS` inside CONTAINER,
+// exactly reproducing the target invocation rather than testing the
+// script sitting on disk inside the container.
+func runInstallHostPiped(t *testing.T, container string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	root := repoRoot(t)
+	f, err := os.Open(filepath.Join(root, "deploy", "install-host.sh"))
+	if err != nil {
+		t.Fatalf("FAIL: opening deploy/install-host.sh: %v", err)
+	}
+	defer f.Close()
+	dockerArgs := append([]string{"exec", "-i", container, "bash", "-s", "--"}, args...)
+	return runCmdStdin(t, 90*time.Second, f, dockerBin(), dockerArgs...)
+}
+
+// startC12Container is the "throwaway Debian container with apt-get +
+// systemd" prep every C12 stack test needs, factored out of
+// TestContainer_C12_InstallHostIdempotent's original inline version
+// once a fifth test needed the identical setup. Registers its own
+// cleanup; the caller does not need a defer.
+func startC12Container(t *testing.T, name string) {
+	t.Helper()
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		skipUnlessCI(t, "C12 (stack): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"debian:trixie-slim", "sleep", "600")
+	if code != 0 {
+		skipUnlessCI(t, "C12 (stack): could not start throwaway container: %s", errOut)
+	}
+	t.Cleanup(func() { runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name) })
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("apt-get update -qq && apt-get install -y -qq systemd curl >/dev/null 2>&1 || true")
+	if out, _, code := exec_("command -v systemctl && command -v curl"); code != 0 {
+		skipUnlessCI(t, "C12 (stack): systemd/curl did not actually install in this environment: %s", out)
+	}
+}
+
+// TestContainer_C12_StackNoTTYRefusesToGuess: `curl -fsSL URL | sudo bash`
+// gives the remote process no controlling terminal, and no --stack-dir
+// means the script cannot know where to write. This is the single most
+// dangerous shape the new stack-creation path can be in — a bug here
+// would either hang forever or, worse, guess a directory and start
+// writing to it — so the assertion is as blunt as the requirement: exit
+// 78, and nothing anywhere on the host changes.
+func TestContainer_C12_StackNoTTYRefusesToGuess(t *testing.T) {
+	name := "sentinel-c12-notty-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 60*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	stdout, stderr, code := runInstallHostPiped(t, name)
+	if code != 78 {
+		t.Fatalf("FAIL C12 (stack no-tty): exit=%d, want 78 (stdout=%q stderr=%q)", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "no controlling terminal") {
+		t.Errorf("FAIL C12 (stack no-tty): stderr does not explain the real cause: %s", stderr)
+	}
+	if out, _, _ := exec_("test -e /opt/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack no-tty): /opt/sentinel was created despite exit 78")
+	}
+	if out, _, _ := exec_("test -e /docker-compose && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack no-tty): /docker-compose was created despite exit 78")
+	}
+	logPass(t, "PASS C12 (stack no-tty: refuses to guess, writes nothing)")
+}
+
+// TestContainer_C12_StackNoTTYPartialProgress: with --stack-dir given but
+// no terminal, the directory and compose file (neither secret) get
+// created, but the three secrets are never written — not even as an
+// empty assignment, which would be worse than not writing the key at
+// all, since an idempotency check reading "KEY=" back would wrongly
+// treat it as already set. A second run must not re-do the work it
+// already completed, and must still refuse for the same reason.
+func TestContainer_C12_StackNoTTYPartialProgress(t *testing.T) {
+	name := "sentinel-c12-partial-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	stdout1, stderr1, code1 := runInstallHostPiped(t, name, "--stack-dir", "/opt/sentinel")
+	if code1 != 78 {
+		t.Fatalf("FAIL C12 (stack partial): first run exit=%d, want 78 (stdout=%q stderr=%q)", code1, stdout1, stderr1)
+	}
+	env1, _, _ := exec_("cat /opt/sentinel/.env 2>&1")
+	for _, secretKey := range []string{"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "MAILRISE_SMTP_PASS"} {
+		if strings.Contains(env1, secretKey+"=") {
+			t.Errorf("FAIL C12 (stack partial): %s written to sentinel.env with no value available — must be omitted entirely, not written empty: %s", secretKey, env1)
+		}
+	}
+	for _, want := range []string{"JOURNAL_GID=", "SENTINEL_TAG=latest", "MAILRISE_SMTP_USER=sentinel"} {
+		if !strings.Contains(env1, want) {
+			t.Errorf("FAIL C12 (stack partial): sentinel.env missing derived field %q: %s", want, env1)
+		}
+	}
+	if out, _, _ := exec_("test -e /opt/sentinel/mailrise/mailrise.conf && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack partial): mailrise.conf was written despite missing secrets")
+	}
+	if out, _, _ := exec_("stat -c '%a' /opt/sentinel/.env"); strings.TrimSpace(out) != "600" {
+		t.Errorf("FAIL C12 (stack partial): sentinel.env mode = %s, want 600", strings.TrimSpace(out))
+	}
+
+	// Second run: idempotent. Nothing already-set gets rewritten, and the
+	// same required-input gap is reported again — not silently dropped
+	// (which a broken idempotency check could do by treating "field
+	// already visited" as "field already satisfied").
+	stdout2, stderr2, code2 := runInstallHostPiped(t, name, "--stack-dir", "/opt/sentinel")
+	if code2 != 78 {
+		t.Fatalf("FAIL C12 (stack partial): second run exit=%d, want 78 (stdout=%q stderr=%q)", code2, stdout2, stderr2)
+	}
+	env2, _, _ := exec_("cat /opt/sentinel/.env 2>&1")
+	if env1 != env2 {
+		t.Errorf("FAIL C12 (stack partial): sentinel.env changed between two no-progress-possible runs:\n1: %s\n2: %s", env1, env2)
+	}
+	if !strings.Contains(stdout2, "changed=0") {
+		t.Errorf("FAIL C12 (stack partial): second run reported new changes when nothing new could converge: %s", stdout2)
+	}
+	logPass(t, "PASS C12 (stack partial: layout progresses, secrets never written empty, idempotent)")
+}
+
+// TestContainer_C12_StackLayoutDetection: the OMV symlink layout
+// (sentinel.yml/compose.yml/sentinel.env/.env) is only correct when the
+// stack directory's parent really is /docker-compose; anywhere else the
+// indirection is pointless and the plain layout
+// (docker-compose.yml/.env directly) is what belongs there. --dry-run is
+// used throughout: this asserts the DECISION, not the write, and needs
+// no secrets.
+func TestContainer_C12_StackLayoutDetection(t *testing.T) {
+	name := "sentinel-c12-layout-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// Plain layout: no /docker-compose on this host at all.
+	outPlain, _, codePlain := exec_("/work/install-host.sh --dry-run 2>&1")
+	if codePlain != 0 {
+		t.Fatalf("FAIL C12 (stack layout): plain --dry-run exit=%d: %s", codePlain, outPlain)
+	}
+	if !strings.Contains(outPlain, "layout: plain") {
+		t.Errorf("FAIL C12 (stack layout): expected plain layout with no /docker-compose present, got: %s", outPlain)
+	}
+	if !strings.Contains(outPlain, "docker-compose.yml") || strings.Contains(outPlain, "sentinel.yml") {
+		t.Errorf("FAIL C12 (stack layout): plain layout must write docker-compose.yml directly, not sentinel.yml: %s", outPlain)
+	}
+
+	// OMV layout: /docker-compose exists, and the proposed default sits
+	// directly inside it.
+	exec_("mkdir -p /docker-compose")
+	outOMV, _, codeOMV := exec_("/work/install-host.sh --dry-run 2>&1")
+	if codeOMV != 0 {
+		t.Fatalf("FAIL C12 (stack layout): omv --dry-run exit=%d: %s", codeOMV, outOMV)
+	}
+	if !strings.Contains(outOMV, "layout: omv") {
+		t.Errorf("FAIL C12 (stack layout): expected omv layout with /docker-compose present, got: %s", outOMV)
+	}
+	for _, want := range []string{"sentinel.yml", "compose.yml -> sentinel.yml", ".env -> sentinel.env"} {
+		if !strings.Contains(outOMV, want) {
+			t.Errorf("FAIL C12 (stack layout): omv layout missing %q in dry-run plan: %s", want, outOMV)
+		}
+	}
+
+	// A stack directory OUTSIDE /docker-compose gets the plain layout
+	// even with /docker-compose present elsewhere on the host — the
+	// directory itself decides, not the host's mere possession of an
+	// OMV installation.
+	outElsewhere, _, codeElsewhere := exec_("/work/install-host.sh --dry-run --stack-dir /opt/sentinel 2>&1")
+	if codeElsewhere != 0 {
+		t.Fatalf("FAIL C12 (stack layout): elsewhere --dry-run exit=%d: %s", codeElsewhere, outElsewhere)
+	}
+	if !strings.Contains(outElsewhere, "layout: plain") {
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /opt/sentinel must stay plain even with /docker-compose present elsewhere: %s", outElsewhere)
+	}
+	logPass(t, "PASS C12 (stack layout: omv only inside /docker-compose, plain everywhere else)")
+}
+
+// TestContainer_C12_StackEnvFileBackCompat: --env-file must behave
+// exactly as it did before this whole stack-creation path existed — no
+// stack directory resolved, no compose file fetched, no prompting.
+// Every prior caller of this script keeps working unmodified.
+func TestContainer_C12_StackEnvFileBackCompat(t *testing.T) {
+	name := "sentinel-c12-backcompat-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("mkdir -p /tmp/oldstyle && printf 'MAILRISE_SMTP_USER=u\\nMAILRISE_SMTP_PASS=p\\n' > /tmp/oldstyle/.env")
+
+	out1, errOut1, code1 := exec_("/work/install-host.sh --env-file /tmp/oldstyle/.env 2>&1")
+	if code1 != 0 && code1 != 75 {
+		t.Fatalf("FAIL C12 (stack env-file back-compat): exit=%d (want 0 or 75, transient in this rootless test env): %s %s", code1, out1, errOut1)
+	}
+	if strings.Contains(out1, "stack directory:") {
+		t.Errorf("FAIL C12 (stack env-file back-compat): --env-file must not trigger stack resolution: %s", out1)
+	}
+	if out, _, _ := exec_("test -e /opt/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack env-file back-compat): /opt/sentinel was created despite --env-file being given explicitly")
+	}
+	logPass(t, "PASS C12 (stack env-file back-compat: unchanged behavior)")
+}
+
+// TestContainer_C12_StackMutualExclusion: --env-file and --stack-dir
+// name two different, incompatible things this script could do, and
+// silently picking one over the other would surprise whichever caller
+// lost.
+func TestContainer_C12_StackMutualExclusion(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		skipUnlessCI(t, "C12 (stack mutual exclusion): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+	out, errOut, code = runCmd(t, 30*time.Second, dockerBin(), "run", "--rm",
+		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"debian:trixie-slim", "/work/install-host.sh", "--env-file", "/tmp/x", "--stack-dir", "/tmp/y")
+	if code != 64 {
+		t.Fatalf("FAIL C12 (stack mutual exclusion): exit=%d, want 64: %s %s", code, out, errOut)
+	}
+	logPass(t, "PASS C12 (stack mutual exclusion: --env-file + --stack-dir rejected)")
+}
+
+// TestContainer_C12_StackInteractiveSecrets: with a real controlling
+// terminal, the three prompts are answered and the values land exactly
+// where they belong — sentinel.env, and mailrise.conf's two targets
+// (sentinel and omv both address the same Telegram chat). `script`
+// allocates the pty; install-host.sh's own content still goes to the
+// child's stdin exactly as `curl | bash` would, decoupled from the
+// terminal `read -rs`/`read -r` reads from at /dev/tty.
+func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
+	name := "sentinel-c12-interactive-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	if out, _, code := exec_("command -v script"); code != 0 {
+		skipUnlessCI(t, "C12 (stack interactive): the `script` utility is not available in this environment: %s", out)
+	}
+	exec_("mkdir -p /docker-compose")
+
+	const token = "TESTTOKEN_ABCDEF"
+	const chat = "-100999888"
+	const smtpPass = "test-smtp-secret-value"
+	answers := token + "\n" + chat + "\n" + smtpPass + "\n"
+	driveCmd := fmt.Sprintf(
+		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install-host.sh" /tmp/script.log`,
+		shellQuote(answers),
+	)
+	outI, errOutI, codeI := exec_(driveCmd)
+	if codeI != 0 && codeI != 75 {
+		t.Fatalf("FAIL C12 (stack interactive): exit=%d (want 0 or 75, transient in this rootless test env): %s %s", codeI, outI, errOutI)
+	}
+
+	envContent, _, _ := exec_("cat /docker-compose/sentinel/sentinel.env")
+	for _, want := range []string{
+		"TELEGRAM_BOT_TOKEN=" + token,
+		"TELEGRAM_CHAT_ID=" + chat,
+		"MAILRISE_SMTP_PASS=" + smtpPass,
+		"MAILRISE_SMTP_USER=sentinel",
+	} {
+		if !strings.Contains(envContent, want) {
+			t.Errorf("FAIL C12 (stack interactive): sentinel.env missing %q: %s", want, envContent)
+		}
+	}
+
+	mailriseContent, _, _ := exec_("cat /docker-compose/sentinel/mailrise/mailrise.conf")
+	wantURL := "tgram://" + token + "/" + chat
+	if strings.Count(mailriseContent, wantURL) != 2 {
+		t.Errorf("FAIL C12 (stack interactive): mailrise.conf must carry %q exactly twice (sentinel: and omv: targets), got: %s", wantURL, mailriseContent)
+	}
+	if !strings.Contains(mailriseContent, "sentinel: "+smtpPass) {
+		t.Errorf("FAIL C12 (stack interactive): mailrise.conf smtp auth missing the password: %s", mailriseContent)
+	}
+	if mode, _, _ := exec_("stat -c '%a' /docker-compose/sentinel/mailrise/mailrise.conf"); strings.TrimSpace(mode) != "644" {
+		t.Errorf("FAIL C12 (stack interactive): mailrise.conf mode = %s, want 644 (0600 crash-loops the container)", strings.TrimSpace(mode))
+	}
+	if mode, _, _ := exec_("stat -c '%a' /docker-compose/sentinel/sentinel.env"); strings.TrimSpace(mode) != "600" {
+		t.Errorf("FAIL C12 (stack interactive): sentinel.env mode = %s, want 600", strings.TrimSpace(mode))
+	}
+	logPass(t, "PASS C12 (stack interactive: prompted values land in sentinel.env and both mailrise.conf targets)")
+}
+
+// shellQuote wraps s in single quotes for embedding in a shell command
+// string, escaping any single quote in s itself. Only used to build the
+// `printf %s | script ...` driver above with fixed, test-controlled
+// values — not a general-purpose escaper.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // TestContainer_C12_CollapsesDuplicateManagedBlocks: everything between
