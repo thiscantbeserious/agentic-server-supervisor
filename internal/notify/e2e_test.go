@@ -227,6 +227,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// --- fail-on-demand: 503 (a real transport failure) ---
+	t.Logf("expect 1 delivery failure below: the sink is returning 503 to prove the failure path")
 	sink.setStatus(503)
 	t.Cleanup(func() { sink.setStatus(0) })
 	errSend := Send(ctx, cfg, r, false)
@@ -350,6 +351,7 @@ func TestE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FAIL E2E: marshal decision report: %v", err)
 	}
+	t.Logf("expect %d delivery failures below: the sink stays at 503 through the outbox setup send and every escalation attempt but the last, to prove OUTBOX_SMTP_AFTER=%d actually escalates to SMTP", dedupCfg.OutboxSMTPAfter, dedupCfg.OutboxSMTPAfter)
 	sink.setStatus(503)
 	sendErr := Send(ctx, &dedupCfg, decision2.Report, false)
 	if sendErr == nil {
