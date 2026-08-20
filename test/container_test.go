@@ -368,21 +368,22 @@ func assertELFMachine(t *testing.T, tag, binPath, arch string) {
 	}
 }
 
-// TestContainer_RealAgyBuild is the check the coordinator named as the one
-// that would have caught the extraction bug no synthetic fixture could:
-// "Build the image with these real values at least once." Gated on
-// SENTINEL_REAL_AGY=1 (same gate C9/CLAUDE.md already use for real-agy
-// interaction) since it downloads the real tarball (~53-56 MB, ~200 MB
-// extracted) from the vendor over the network — not something a default
-// `go test ./...` or even the default container suite should do.
+// TestContainer_RealAgyBuild builds the image with real, vendor-published
+// agy values — the one check that catches an extraction bug no synthetic
+// fixture can, since a synthetic tarball's layout is exactly the layout
+// the code was written against. Gated on SENTINEL_REAL_AGY=1 (same gate
+// C9/CLAUDE.md already use for real-agy interaction) since it downloads
+// the real tarball (~53-56 MB, ~200 MB extracted) from the vendor over
+// the network — not something a default `go test ./...` or even the
+// default container suite should do.
 //
-// The values below are the ones the coordinator independently verified
-// (fetched, sha512-checked) on 2026-08-19 for agy 1.1.15, one pair per
-// architecture. They are NOT Dockerfile/compose defaults — R1 requires
-// AGY_URL_<ARCH>/AGY_SHA512_<ARCH> as ops input with no default, on
-// purpose — these are fixture literals for this one gated verification,
-// the same way a table-driven test's fixture data is not a production
-// default just because it lives in the repo.
+// The values below were independently fetched and sha512-checked on
+// 2026-08-19 for agy 1.1.15, one pair per architecture. They are NOT
+// Dockerfile/compose defaults — R1 requires AGY_URL_<ARCH>/
+// AGY_SHA512_<ARCH> as ops input with no default, on purpose — these are
+// fixture literals for this one gated verification, the same way a
+// table-driven test's fixture data is not a production default just
+// because it lives in the repo.
 var realAgyValues = map[string]struct{ url, sha512, version string }{
 	"amd64": {
 		url:     "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.15-5350383476932608/linux-x64/cli_linux_x64.tar.gz",
@@ -410,7 +411,8 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 	// loudly, same as requireImage's daemon-unreachable case) from "the
 	// build itself is broken" (FAIL) with a cheap reachability check
 	// before spending minutes on a doomed build.
-	if resp, err := http.Head(real.url); err != nil {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if resp, err := httpClient.Head(real.url); err != nil {
 		t.Skipf("SKIP: %s unreachable (%v) — pinned to agy %s (%s), needs a refresh if the vendor has rotated past it", arch, err, real.version, arch)
 	} else {
 		resp.Body.Close()
@@ -483,8 +485,8 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 
 	sizeOut, _, sizeCode := runCmd(t, 10*time.Second, dockerBin(), "image", "inspect", tag, "--format", "{{.Size}}")
 	if sizeCode == 0 {
-		if bytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
-			t.Logf("real-agy %s image size: %d bytes (%.1f MB) — this is what a real host pulls", arch, bytes, float64(bytes)/1e6)
+		if sizeBytes, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64); err == nil {
+			t.Logf("real-agy %s image size: %d bytes (%.1f MB) — this is what a real host pulls", arch, sizeBytes, float64(sizeBytes)/1e6)
 		}
 	}
 	logPass(t, "PASS real-agy build (%s, version=%s)", arch, real.version)
@@ -730,10 +732,6 @@ func TestContainer_C2_JournalViaGroupAdd(t *testing.T) {
 	}
 }
 
-// hostSystemdJournalGID discovers the REAL systemd-journal gid on the
-// Docker/Podman host, the same way install-host.sh step 6 does
-// ("getent group systemd-journal | cut -d: -f3") — never hardcoded, per
-// the reviewer's flagged risk of a literal 999.
 // hostSystemdJournalGID discovers the numeric group that owns the
 // Docker/Podman host's real /var/log/journal, if one exists — via a
 // throwaway container's `stat`, NOT by running getent/stat on the local Go
@@ -1296,6 +1294,19 @@ chmod +x /root/deploy/install-host.sh`
 	// step5, skipped because /etc/zfs/zed.d does not exist in this
 	// container).
 	hash1 := hashFiles()
+
+	// step1 installs msmtp itself (the prep above only installs systemd),
+	// so an environment without network reachable from this throwaway
+	// container leaves MSMTP_OK=0 on both runs: steps 3/4 then never
+	// write anything (compute_mail_status gates them on it), and the
+	// "already converged" lines below never appear — not because
+	// idempotency broke, but because there is nothing to be idempotent
+	// about. That is an environment limitation, the same one the
+	// mail-creds-missing case already guards against with this exact
+	// check, not a test failure.
+	if out, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
+		t.Skipf("SKIP C12: msmtp did not actually install in this environment (no network reachable from the throwaway container?): %s", out)
+	}
 
 	out2, errOut2, code2 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
 	hash2 := hashFiles()

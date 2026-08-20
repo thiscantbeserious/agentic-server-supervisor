@@ -94,7 +94,11 @@ func newNotifySink(t *testing.T) *notifySink {
 	addr := sinkAddr()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		t.Skipf("SKIP TestE2E: cannot bind the mock sink on %s: %v (set SENTINEL_E2E_SINK_ADDR to a free address)", addr, err)
+		// SENTINEL_E2E=1 is the opt-in: once it's set, a bind failure is a
+		// hard failure, not a skip. Go reports a skip as a pass, and a
+		// skip here would mean the whole live-stack suite ran zero
+		// assertions while the CI job still went green.
+		t.Fatalf("FAIL TestE2E: cannot bind the mock sink on %s: %v (set SENTINEL_E2E_SINK_ADDR to a free address)", addr, err)
 	}
 	s := &notifySink{ln: ln}
 	mux := http.NewServeMux()

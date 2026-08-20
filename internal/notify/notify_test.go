@@ -777,9 +777,9 @@ var (
 	// the repo (fixtures, test env, docs), it MUST either contain the
 	// two characters dollar-brace or start with the word "changeme" —
 	// nothing else passes. (Deliberately not written as a literal
-	// assignment in this comment: it would match its own pattern.) This
-	// has been tripped by this same mistake more than once across the
-	// codebase's test files; use the "changeme" placeholder to avoid it.
+	// assignment in this comment: it would match its own pattern.) Use
+	// the "changeme" placeholder in any fixture or test env needing a
+	// value here.
 	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
 )
 

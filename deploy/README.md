@@ -79,8 +79,10 @@ one-shot the runtime never invokes.
 
 ## Verify
 
-Both must land in Telegram. Until they do the stack is not working — the
-supervisor can compute a perfect report and still never reach you.
+Two paths reach Telegram: the apprise path sentinel uses directly, and the
+SMTP path smartd/ZED/OMV use through mailrise. Both must land. Until they do
+the stack is not working — the supervisor can compute a perfect report and
+still never reach you.
 
 A 2xx is not proof on its own: **204 means the key was never registered and
 nothing was sent.** Success is 200 plus the message actually arriving.

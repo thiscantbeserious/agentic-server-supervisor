@@ -1,8 +1,8 @@
 # deploy/Dockerfile — R1. Two stages, CGO_ENABLED=0. Sentinel installs
 # nothing beyond the packages listed in stage 2 and executes only
 # journalctl, sensors -j and agy — but the debian:trixie-slim base still
-# ships /bin/bash and coreutils (measured; contracts/runtime.md R1 was
-# corrected to say so, f95693c). Build context is the repo root:
+# ships /bin/bash and coreutils (measured — contracts/runtime.md R1
+# states this precisely). Build context is the repo root:
 #
 #   docker buildx build -f deploy/Dockerfile -t sentinel:dev \
 #     --platform linux/amd64,linux/arm64 \

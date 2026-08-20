@@ -42,13 +42,24 @@ report_lines=()
 
 note() { report_lines+=("$1"); }
 
+require_value() {
+  # A flag with no following argument must fail, not silently consume
+  # nothing: without this, `shift 2` on a 1-element remainder shifts 0
+  # (bash) and re-enters the same case branch on the same $1 forever.
+  if [ $# -lt 2 ]; then
+    echo "$PROG: $1 requires a value" >&2
+    usage >&2
+    exit 64
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    --mailrise-host) MAILRISE_HOST="${2:-}"; shift 2 ;;
-    --mailrise-port) MAILRISE_PORT="${2:-}"; shift 2 ;;
-    --env-file) ENV_FILE="${2:-}"; shift 2 ;;
+    --mailrise-host) require_value "$@"; MAILRISE_HOST="$2"; shift 2 ;;
+    --mailrise-port) require_value "$@"; MAILRISE_PORT="$2"; shift 2 ;;
+    --env-file) require_value "$@"; ENV_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "$PROG: unknown argument: $1" >&2; usage >&2; exit 64 ;;
   esac

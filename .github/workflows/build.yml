@@ -30,8 +30,15 @@ permissions:
   contents: read
 
 jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
@@ -110,7 +117,7 @@ jobs:
             -v /tmp/e2e/mailrise.conf:/etc/mailrise.conf:ro \
             yoryan/mailrise:latest
 
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -sf http://127.0.0.1:8000/status >/dev/null && break
             sleep 1
           done
@@ -385,7 +392,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/sentinel
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long,prefix=
@@ -393,6 +400,9 @@ jobs:
       - name: Create the manifest list and push it, tagged
         working-directory: /tmp/digests
         run: |
+          # shellcheck disable=SC2046  # each tag/digest must land as its own
+          # -t flag / positional argument; quoting would collapse the list
+          # into one malformed argument.
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)

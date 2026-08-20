@@ -16,8 +16,10 @@ Two stages, `CGO_ENABLED=0`. **No Go toolchain, no build tools and none of the p
 
 ```
 docker build -f deploy/Dockerfile -t sentinel:dev \
-  --build-arg AGY_URL=<https url to the agy linux-amd64 tarball> \
-  --build-arg AGY_SHA512=<hex> \
+  --build-arg AGY_URL_AMD64=<https url to the agy linux-amd64 tarball> \
+  --build-arg AGY_SHA512_AMD64=<hex> \
+  --build-arg AGY_URL_ARM64=<https url to the agy linux-arm64 tarball> \
+  --build-arg AGY_SHA512_ARM64=<hex> \
   .
 ```
 Build context = repo root.
@@ -607,7 +609,7 @@ func Health(cfg *config.Config) (int, error)
 | C3 | For **every** ro mount target of R4, creating a file fails; `/usr/local/bin/.w` and `/.w` fail; `/state/.w` and `/tmp/.w` succeed | A1 |
 | C4 | `sensors -j` exits `0`, unmarshals into `map[string]any` with ≥ 1 key, and at least one key matches a device name the **test** reads from `/host/sys/class/hwmon/*/name` | ARCHITECTURE §2.6 unverified point |
 | C5 | `/host/rasdaemon` is listable; rasdaemon absent on the test host ⇒ explicit `SKIP` | §2.6 unverified point |
-| C6 | Under `read_only: true`: `/tmp` is writable and `TZ` is `UTC` | container | **Service-name DNS is deliberately not asserted here.** Reaching `apprise` by name requires the compose network, which a container-only case cannot create without becoming a compose test — and a test that stands up the whole stack to check one hostname is a worse trade than checking it where the stack already runs. It is verified during rollout instead, against the real network, alongside the notification path it exists to serve. |
+| C6 | Under `read_only: true`: `/tmp` is writable and `TZ` is `UTC` | container. **Service-name DNS is deliberately not asserted here** — reaching `apprise` by name requires the compose network, which a container-only case cannot create without becoming a compose test, and standing up the whole stack to check one hostname is a worse trade than checking it where the stack already runs. Verified during rollout instead, against the real network, alongside the notification path it exists to serve. |
 | C7 | `journalctl -D /host/journal -t zed -n5` exits `0` (0 hits is a pass) | ZED events under `-t zed` |
 | C8 | `journalctl -D /host/journal -t smartd` decodes without error (no NVMe ⇒ `SKIP`); a synthetic `Killed process` fixture entry is picked up by the `kernel` section | §2.6 unverified list |
 | C9 | `sentinel tick` with `TICK_INTERVAL=abc` ⇒ `78`; with `STATE_DIR` unwritable ⇒ `69`; with neither journal dir readable ⇒ `78`; `--loop --once` ⇒ `64`; a positional argument ⇒ `64` | C2 exit codes |

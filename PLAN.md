@@ -85,7 +85,7 @@ So a stale or wrong value — `.env` copied to another host, the gid changed by 
 
 **T7 adds to R2's startup sequence**, before the first tick:
 
-```
+```sh
 journalctl -D $HOST_JOURNAL_DIR -n1 --no-pager -o json     # and/or the volatile dir
 ```
 
