@@ -54,13 +54,10 @@ import (
 // "attachments":[],"type":...}. Notably absent: "format". apprise's own
 // JSON output plugin does not forward the input format at all — verified
 // by sending format=markdown and format=text with identical body content
-// and observing byte-identical downstream messages either way. So this
-// mock (and this test) assert title, message and type, which are the
-// fields the real wire payload actually carries; asserting "format" here
-// would be asserting a field that never crosses the wire, not a
-// simplification of this test but a correction of the original ask,
-// found by running the real container rather than assuming apprise's
-// json:// output mirrors apprise-api's own input schema.
+// and observing byte-identical downstream messages either way. This mock
+// (and this test) assert title, message and type, which are the fields
+// the real wire payload actually carries; asserting "format" would
+// assert a field that never crosses the wire.
 type sinkDelivery struct {
 	Version     string `json:"version"`
 	Title       string `json:"title"`
@@ -176,12 +173,26 @@ func TestE2E(t *testing.T) {
 	}
 
 	// --- SMTP fallback path: sentinel -> SMTP -> mailrise -> sink ---
-	// mailrise derives its own title from the email Subject/From rather
-	// than forwarding apprise's title field verbatim (verified against a
-	// real mailrise container: "<Subject> (<From address>)") — assert
-	// containment, not equality, on title; the body still has to match
-	// exactly, since that IS the payload content, not mailrise's own
-	// envelope framing.
+	// The SMTP path sends BuildHTMLBody's rendering, not payload.Body —
+	// a DIFFERENT string (HTML tags, entity-escaped quotes) — and
+	// mailrise then converts THAT to its own plaintext before handing it
+	// to its embedded apprise client, verified against a real mailrise
+	// container: tags stripped, entities unescaped, multi-line structure
+	// collapsed onto U+2800-separated segments. Neither payload.Body nor
+	// BuildHTMLBody's own output survives byte-for-byte, so this cannot
+	// assert exact equality the way the direct path does without
+	// asserting something the real chain does not produce. What DOES
+	// survive verbatim, checked against the same real container: the
+	// report's own free-text r.Body, unmangled — that is the signal
+	// that actually matters (a UTF-8/NUL regression or markdown
+	// rendered literally, both real incidents this project has already
+	// had, would corrupt or truncate exactly this text). Title is
+	// mailrise's own framing ("<Subject> (<From address>)"), asserted
+	// as containment same as before. Type is NOT asserted on this path
+	// at all — verified live that mailrise's downstream message always
+	// carries "info" here, never payload.Type ("warning" for this WATCH
+	// fixture): the SMTP bridge does not carry severity downstream, a
+	// real property of this path, not an assertion left out by choice.
 	if err := Send(ctx, cfg, r, true); err != nil {
 		t.Fatalf("FAIL E2E: live mailrise SMTP send failed: %v", err)
 	}
@@ -191,12 +202,24 @@ func TestE2E(t *testing.T) {
 	if d := sink.last(); !strings.Contains(d.Title, want.Title) {
 		t.Errorf("FAIL E2E: SMTP-path delivery title = %q, want it to contain %q", d.Title, want.Title)
 	}
+	if d := sink.last(); !strings.Contains(d.Message, r.Body) {
+		t.Errorf("FAIL E2E: SMTP-path delivery message = %q, want it to contain the report's own body %q", d.Message, r.Body)
+	}
 
 	// --- fail-on-demand: 503 (a real transport failure) ---
 	sink.setStatus(503)
 	t.Cleanup(func() { sink.setStatus(0) })
 	errSend := Send(ctx, cfg, r, false)
 	sink.setStatus(0)
+	// ponytail: apprise-api runs a single uWSGI worker (verified in its
+	// own logs), and firing the next request immediately after this one
+	// occasionally reused a pooled connection it had already started
+	// tearing down, surfacing as "transport: EOF" here rather than the
+	// case actually being tested — a real backend under real tick
+	// spacing (minutes apart) never sees this. A short pause is pacing
+	// against a known single-worker dependency, not a correctness wait;
+	// nothing below asserts on elapsed time.
+	time.Sleep(100 * time.Millisecond)
 	if errSend == nil {
 		t.Fatal("FAIL E2E: apprise send with the sink returning 503 succeeded, want an error")
 	}
@@ -238,6 +261,7 @@ func TestE2E(t *testing.T) {
 	if got := sink.count(); got != 4 {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 204 case, want 4 (received, and apprise still called it a success)", got)
 	}
+	time.Sleep(100 * time.Millisecond) // ponytail: same single-worker pacing as above
 
 	// --- dedup: three identical ticks must produce exactly one delivery ---
 	//
@@ -246,7 +270,12 @@ func TestE2E(t *testing.T) {
 	// this test only calls Send when it says so — the same gate
 	// internal/runtime.Tick uses. cfg.Now is pinned so three calls at the
 	// same instant fall inside the renotify window and the second/third
-	// are suppressed by state itself, not by anything special-cased here.
+	// are suppressed by the STORE, before Send is ever called for them —
+	// the transport itself never sees a repeat and does nothing special
+	// with one. What this proves is that the store's suppression is
+	// real (Send is called exactly once) and that the one notification
+	// that IS sent actually lands on the live transport, not that the
+	// transport deduplicates anything.
 	dedupCfg := *cfg
 	dedupCfg.StateDir = t.TempDir()
 	dedupCfg.Now = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -276,18 +305,25 @@ func TestE2E(t *testing.T) {
 		t.Errorf("FAIL E2E: state.Process said Notify=true %d times across 3 identical ticks, want exactly 1", notifiedCount)
 	}
 	if got := sink.count() - before; got != 1 {
-		t.Errorf("FAIL E2E: sink recorded %d deliveries across 3 identical ticks, want exactly 1 — dedup is not actually collapsing repeats through the real transport", got)
+		t.Errorf("FAIL E2E: sink recorded %d deliveries across 3 identical ticks, want exactly 1 — the store did not suppress the repeats the way it should have", got)
 	}
 
-	// --- outbox: a failed send queues, and a later drain delivers it ---
+	// --- outbox: a failed send queues, attempts accumulate across
+	// separate drains exactly as separate ticks would produce them, and
+	// once OUTBOX_SMTP_AFTER is reached the item actually escalates to
+	// SMTP and delivers ---
 	//
 	// Same real state.Store as the dedup case (fresh key via a second
 	// fixture so this does not collide with the alert dedup already
-	// created above). Fails once (sink at 503), queues via OutboxAdd
-	// exactly as internal/runtime.Tick's own queueOrLog does, then drains
-	// exactly as Tick's own drainOutbox does — proving the SMTP/outbox
-	// escalation path end to end through the real transport, not a mock
-	// standing in for state or notify.
+	// created above). OutboxTake increments Attempts and persists it on
+	// every call (internal/state/outbox.go), so calling it
+	// OutboxSMTPAfter times with the sink still failing in between is
+	// what actually drives item.FallbackSMTP from false to true — the
+	// same accumulation internal/runtime.Tick's own drainOutbox produces
+	// one real tick at a time. The final attempt flips the sink back to
+	// 200 first, so the escalated send both asks for SMTP AND actually
+	// lands, proving the branch end to end rather than only computing
+	// the right boolean.
 	r2 := loadFixture(t, "report-alert-fallback.json")
 	raw2, err := json.Marshal(r2)
 	if err != nil {
@@ -306,7 +342,6 @@ func TestE2E(t *testing.T) {
 	}
 	sink.setStatus(503)
 	sendErr := Send(ctx, &dedupCfg, decision2.Report, false)
-	sink.setStatus(0)
 	if sendErr == nil {
 		t.Fatal("FAIL E2E: outbox setup send unexpectedly succeeded with the sink at 503")
 	}
@@ -315,32 +350,66 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("FAIL E2E: OutboxAdd: %v", err)
 	}
 	beforeDrain := sink.count()
-	items, err := store.OutboxTake()
-	if err != nil {
-		t.Fatalf("FAIL E2E: OutboxTake: %v", err)
-	}
-	found := false
-	for _, item := range items {
-		if item.ID != id {
-			continue
+	threshold := dedupCfg.OutboxSMTPAfter
+	var escalated bool
+	for attempt := 1; attempt <= threshold; attempt++ {
+		items, err := store.OutboxTake()
+		if err != nil {
+			t.Fatalf("FAIL E2E: OutboxTake (attempt %d): %v", attempt, err)
 		}
-		found = true
+		var item *state.OutboxItem
+		for i := range items {
+			if items[i].ID == id {
+				item = &items[i]
+				break
+			}
+		}
+		if item == nil {
+			t.Fatalf("FAIL E2E: OutboxTake (attempt %d) did not return the item OutboxAdd queued (id=%s)", attempt, id)
+		}
+		wantFallback := attempt >= threshold
+		if item.FallbackSMTP != wantFallback {
+			t.Fatalf("FAIL E2E: attempt %d FallbackSMTP=%v, want %v (OUTBOX_SMTP_AFTER=%d)", attempt, item.FallbackSMTP, wantFallback, threshold)
+		}
+		if attempt == threshold {
+			// Escalating to SMTP without also letting this attempt
+			// succeed would only prove the boolean, not the branch —
+			// recover the sink now so the escalated send actually lands.
+			sink.setStatus(0)
+			escalated = true
+		}
 		var rep report.Report
 		if err := json.Unmarshal(item.Payload, &rep); err != nil {
-			t.Fatalf("FAIL E2E: unmarshal outbox item: %v", err)
+			t.Fatalf("FAIL E2E: unmarshal outbox item (attempt %d): %v", attempt, err)
 		}
-		if err := Send(ctx, &dedupCfg, rep, item.FallbackSMTP); err != nil {
-			t.Fatalf("FAIL E2E: outbox drain send failed once the sink recovered: %v", err)
+		sendErr := Send(ctx, &dedupCfg, rep, item.FallbackSMTP)
+		if attempt < threshold {
+			if sendErr == nil {
+				t.Fatalf("FAIL E2E: attempt %d unexpectedly succeeded while the sink is still failing", attempt)
+			}
+			continue
+		}
+		if sendErr != nil {
+			t.Fatalf("FAIL E2E: escalated SMTP send (attempt %d) failed: %v", attempt, sendErr)
 		}
 		if err := store.OutboxAck(item.ID); err != nil {
 			t.Fatalf("FAIL E2E: OutboxAck: %v", err)
 		}
 	}
-	if !found {
-		t.Fatalf("FAIL E2E: OutboxTake did not return the item OutboxAdd just queued (id=%s)", id)
+	if !escalated {
+		t.Fatal("FAIL E2E: loop completed without ever reaching the SMTP-escalation attempt")
 	}
-	if got := sink.count() - beforeDrain; got != 1 {
-		t.Errorf("FAIL E2E: sink recorded %d deliveries during the outbox drain, want exactly 1", got)
+	// The sink logs a delivery on every POST it RECEIVES, before it
+	// decides what status to reply with — apprise/mailrise cannot know
+	// in advance that a request will be told to fail, so every one of
+	// the `threshold` attempts genuinely reaches the sink, not only the
+	// final one. That the first `threshold-1` still ERRORED for the
+	// caller (asserted per-attempt in the loop above) is what proves
+	// exactly one attempt actually succeeded; this count instead proves
+	// none of the retries were silently skipped or short-circuited —
+	// every one of them really went out over the wire.
+	if got := sink.count() - beforeDrain; got != threshold {
+		t.Errorf("FAIL E2E: sink recorded %d deliveries across the outbox drain, want exactly %d (one per attempt, all the way to the escalated one that finally succeeded)", got, threshold)
 	}
 	remaining, err := store.OutboxTake()
 	if err != nil {

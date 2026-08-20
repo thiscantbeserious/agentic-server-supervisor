@@ -50,11 +50,10 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
-  # internal/notify's TestE2E, gated on SENTINEL_E2E=1 and now SET here
-  # so the real notify path runs on every push. Previously never ran in
-  # CI: it needed a Telegram bot token as a repository secret. It does
-  # not any more — apprise supports json://, which POSTs to an arbitrary
-  # HTTP endpoint, so this job registers the apprise config key (and
+  # internal/notify's TestE2E, gated on SENTINEL_E2E=1 and set here so
+  # the real notify path runs on every push. No Telegram credential is
+  # involved: apprise supports json://, which POSTs to an arbitrary HTTP
+  # endpoint, so this job registers the apprise config key (and
   # mailrise.conf) against a mock this job's own `go test` process runs
   # instead of tgram://. That exercises sentinel -> apprise -> mock and
   # sentinel -> SMTP -> mailrise -> mock for real; the only unexercised
@@ -63,8 +62,8 @@ jobs:
   # assertions on the real wire payload — title/message/type, delivery
   # counts, two fail-on-demand cases — are what actually verify OUR
   # side; see internal/notify/e2e_test.go's own comment for the full
-  # list, including the empirically-corrected finding that apprise's
-  # json:// output never forwards a "format" field at all).
+  # list, including the finding that apprise's json:// output never
+  # forwards a "format" field at all).
   #
   # Neither `services:` nor `docker compose` fit cleanly, so neither is
   # used. The mock lives IN the `go test` process, not in a container —
@@ -156,10 +155,9 @@ jobs:
   #
   # C1's coherence assertion is independent of any build arg (it derives
   # its expectation from the process's own arch, not from anything the
-  # build produced) and would have caught the TARGETARCH ARG-scoping
-  # defect that once shipped an amd64 image labelled arm64 — it simply
-  # never ran on real BuildKit before this job existed, only on podman,
-  # which never had that defect.
+  # build produced) and catches the class of defect where TARGETARCH
+  # scoping ships an amd64 image labelled arm64 — a defect this job's
+  # own real BuildKit exposes and podman does not.
   #
   # needs: test rather than running in parallel — this suite takes
   # several minutes and downloads real artifacts over the network; no
