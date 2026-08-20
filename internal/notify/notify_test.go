@@ -847,21 +847,4 @@ func isProbablyText(data []byte) bool {
 	return true
 }
 
-// --- 18: TestE2E (gated) ---
-
-func TestE2E(t *testing.T) {
-	if os.Getenv("SENTINEL_E2E") != "1" {
-		t.Skip("SENTINEL_E2E=1 not set — skipping live apprise/mailrise E2E test")
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
-	r := loadFixture(t, "report-watch-zfs-cksum.json")
-	if err := Send(context.Background(), cfg, r, false); err != nil {
-		t.Fatalf("live apprise send failed: %v", err)
-	}
-	if err := Send(context.Background(), cfg, r, true); err != nil {
-		t.Fatalf("live mailrise SMTP send failed: %v", err)
-	}
-}
+// --- 18: TestE2E (gated) — see e2e_test.go for the full test body.
