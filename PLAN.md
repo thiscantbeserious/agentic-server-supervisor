@@ -37,7 +37,7 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 │   ├── mailrise/mailrise.conf      # SMTP ingest → tgram://
 │   └── install-host.sh             # host part: rasdaemon, smartd→mailrise, zed→mailrise, JOURNAL_GID → .env
 │
-└── .github/workflows/build.yml     # go vet + go test + build + push → ghcr.io (latest + SHA)
+└── .github/workflows/ci.yml        # lint + test + e2e + build + push → ghcr.io (latest + SHA)
 ```
 
 Rollout on `bam` is exactly: copy `deploy/`, fill `.env`, run `install-host.sh`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.
@@ -83,7 +83,22 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
 
 So a stale or wrong value — `.env` copied to another host, the gid changed by a distro upgrade, `group_add` silently ineffective — produces a container that starts cleanly, reads an empty journal, and reports all-clear indefinitely. An empty journal is indistinguishable from a quiet system, which makes this the quietest possible failure of a component whose entire job is noticing things.
 
-**T7 adds to R2's startup sequence:** run `journalctl -n1`, unfiltered and without a priority filter, before the first tick. Any running Linux host has journal entries, so zero entries or a non-zero exit means misconfiguration rather than silence — log `ERROR` naming the likely cause (`JOURNAL_GID` / `group_add` / the `/host/journal` mount) and exit `78`, consistent with every other config failure. Loud at startup beats silent forever.
+**T7 adds to R2's startup sequence**, before the first tick:
+
+```sh
+journalctl -D $HOST_JOURNAL_DIR -n1 --no-pager -o json     # and/or the volatile dir
+```
+
+Zero bytes of stdout ⇒ log `ERROR` naming the likely cause (`JOURNAL_GID`, `group_add`, or the `/host/journal` mount) and exit `78`, consistent with every other config failure. A readable journal on any running host yields at least one JSON record.
+
+**Two details, both measured in `debian:trixie-slim` + `systemd` on 2026-08-19 — the exact R1 runtime base — and both of which make the obvious implementations vacuous:**
+
+1. **The exit code proves nothing, and neither does non-empty stdout.** With no journal present at all — bare, and with `-D <empty dir>` — `journalctl -n1 --no-pager` **exits 0** and prints `-- No entries --` to stdout. A check on the exit code passes on a blind container; so does a check that stdout is non-empty. **`-o json` is what discriminates**: 0 bytes when there is nothing to read, a JSON record when there is. Assert on the byte count of the JSON form, never on the exit code and never on the human-readable output.
+2. **`-D` is required.** An earlier wording said "run `journalctl -n1`, unfiltered". Taken literally that reads `/var/log/journal` and `/run/log/journal`, which R4 does not mount at those paths — preflight would fail on every host and the container would never start. "Unfiltered" means no `-p`, `--since` or `-u`; it does not mean no `-D`.
+
+**One readable directory of the two is sufficient**, consistent with R2 step 2's existing mount check, which already accepts at least one of persistent/volatile.
+
+R8 case C2 already asserts the build-time half; this extends it to the running host, where the value actually drifts. Where no host journal exists — a developer Mac — the check's test must **skip loudly**, never pass.
 
 R8 case C2 already asserts `journalctl -D /host/journal -n1` exits `0` with the gid and non-zero without it, so the check is verified at build time; this extends the same assertion to the running host, which is where the value can drift.
 
@@ -124,6 +139,8 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
   1. **Rotate the bot token.** The token used for T1's local verification was pasted into a chat transcript, so treat it as compromised: `/revoke` in @BotFather, then update `mailrise.conf` (both the `sentinel:` and `omv:` blocks) and re-run the apprise `POST /add/sentinel`.
   2. **Set a real `MAILRISE_SMTP_PASS`.** Local verification ran on a throwaway. It must match in **both** `.env` and `mailrise.conf` — they are read by different processes and neither warns when they disagree.
   3. **Delete any `/config/<key>.cfg` in the apprise volume.** apprise ignores it while it looks authoritative; the local volume still holds one from T1 diagnosis.
+  **Carried from T7 — watch during the trial, do not pre-fix:** `postApprise` shares Go's default HTTP transport pool across calls. Measured against a real apprise-api, a request landing on a connection the server has started tearing down fails with `transport: EOF` at roughly 3/40 (7.5%). Steady-state ticks are minutes apart against `IdleConnTimeout`'s 90s, so this should not surface in normal operation — the one path that posts back-to-back is `drainOutbox` draining a multi-item backlog, which only accumulates after apprise has already been down. If it recovers and the drain trips an EOF on a queued item, that item stays queued and retries next tick, having burned one attempt and moved SMTP escalation one step closer — degraded, not lost. Check the trial logs for `transport: EOF` during any post-recovery drain; if it recurs, `DisableKeepAlives` on the notify client is the proven one-line fix, held out of T7 as a deliberate scope call.
+  **`install-host.sh`'s value-taking flags reject a following flag as their value.** `--mailrise-host --check` (value omitted, next token happens to be another flag) exits 64 rather than silently treating `--check` as the hostname and running for real — the hazard a supervised run could otherwise miss (`changed=N` would show it, but only if someone's watching) is closed at the parser, not documented as a thing to notice.
 - **T10 (optional, later) — mute**: suppress notifications for a chosen window without stopping the supervisor.
   **Build after T8's 24h trial, not before.** The trial is the data that says whether mute is needed, which durations matter, and what should bypass one. If the trial yields four messages a day the answer is "not needed"; if it yields forty, the interesting question is why, and a mute button would be treating the symptom.
 

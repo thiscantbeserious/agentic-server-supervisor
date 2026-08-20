@@ -42,8 +42,8 @@ func TestStateProcessCLIBadInputExits65(t *testing.T) {
 	}
 }
 
-// The agy gate: S.1 says "history [n] and outbox-ack <id> are the only
-// subcommands taking a positional argument" — process, outbox-add and
+// S.1 says "history [n] and outbox-ack <id> are the only subcommands
+// taking a positional argument" — process, outbox-add and
 // outbox-take were silently ignoring a stray one instead of treating it as
 // the usage error C2 requires (64). Covers all five state subcommands: the
 // three that take none, and the two that take exactly one (an extra

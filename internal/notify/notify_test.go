@@ -298,9 +298,9 @@ func TestSendFailures(t *testing.T) {
 	})
 }
 
-// TestPostFailureLogKeys is round-3 item 10: N.3.5 specifies two distinct
-// log keys for a failed POST, "http=<code>" or "transport=<err>" — not one
-// generic "error" key a log-scraping alert can't distinguish by cause.
+// TestPostFailureLogKeys asserts N.3.5's two distinct log keys for a
+// failed POST, "http=<code>" or "transport=<err>" — not one generic
+// "error" key a log-scraping alert can't distinguish by cause.
 func TestPostFailureLogKeys(t *testing.T) {
 	r := loadFixture(t, "report-ok.json")
 
@@ -337,12 +337,12 @@ func TestPostFailureLogKeys(t *testing.T) {
 	})
 }
 
-// TestAppriseKeyNeverLeaks is round-1 review blocker 1: APPRISE_KEY sits
-// in the URL path of every apprise request, so both a deliberate message
+// TestAppriseKeyNeverLeaks asserts APPRISE_KEY cannot leak. It sits in
+// the URL path of every apprise request, so both a deliberate message
 // (the 204 case) and an incidental one (a *url.Error's Error() embeds the
-// full request URL) can leak it into a returned error or a log line (C7 /
-// N.3.5, amended at a0ff50f to require redaction at every site that logs,
-// wraps, or returns an error that can reach a caller). A distinctive
+// full request URL) can leak it into a returned error or a log line —
+// C7 / N.3.5 require redaction at every site that logs, wraps, or
+// returns an error that can reach a caller. A distinctive
 // non-default key is required: the default ("sentinel") is indistinguishable
 // from ordinary log text and would make this test pass vacuously.
 func TestAppriseKeyNeverLeaks(t *testing.T) {
@@ -728,10 +728,10 @@ func TestSeedConfig(t *testing.T) {
 	}
 }
 
-// TestSeedConfig_204IsFailure is round-3 item 6: N.3.1's 204 rule ("the
-// key was not registered") applies to /add/{key} exactly as it does to
-// /notify/{key} — a 204 there means apprise did NOT accept the config,
-// the one outcome SeedConfig exists to prevent silently.
+// TestSeedConfig_204IsFailure asserts N.3.1's 204 rule ("the key was not
+// registered") applies to /add/{key} exactly as it does to /notify/{key}
+// — a 204 there means apprise did NOT accept the config, the one outcome
+// SeedConfig exists to prevent silently.
 func TestSeedConfig_204IsFailure(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "sentinel.cfg")
@@ -767,23 +767,37 @@ var (
 	// shell/env assignment is the shape this hunts for, a shape that
 	// excludes both a Go regex literal and contracts/notify.md's own
 	// prose describing this row from matching themselves.
+	//
+	// ANY tracked file assigning this variable a value — including a
+	// docker/compose "-e" arg inside a Go test file — is scanned by this,
+	// REGARDLESS of build tags: TestNoSecretsInRepo reads the repo as
+	// text via `git ls-files`, not via what the Go compiler includes, so
+	// a `//go:build container`-tagged file is just as visible here as a
+	// compiled one. Wherever this variable's value appears anywhere in
+	// the repo (fixtures, test env, docs), it MUST either contain the
+	// two characters dollar-brace or start with the word "changeme" —
+	// nothing else passes. (Deliberately not written as a literal
+	// assignment in this comment: it would match its own pattern.) Use
+	// the "changeme" placeholder in any fixture or test env needing a
+	// value here.
 	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
 )
 
 // TestNoSecretsInRepo scans TRACKED content only (N.9: "no secrets in
 // git"), via `git ls-files` — not the working tree. A file the operator
 // created locally (deploy/mailrise/mailrise.conf, gitignored, holding a
-// live-stack token from real T1 verification) is not "in git" no matter
-// what it contains; walking the filesystem instead of git's own index
-// would flag the operator's own untracked config and make this check the
-// kind that gets deleted within a week.
+// live-stack token from real verification against the notification
+// stack) is not "in git" no matter what it contains; walking the
+// filesystem instead of git's own index would flag the operator's own
+// untracked config and make this check the kind that gets deleted
+// within a week.
 func TestNoSecretsInRepo(t *testing.T) {
 	root := "../.."
 	out, err := exec.Command("git", "-C", root, "ls-files").Output()
 	if err != nil {
-		// A build context with no .git (T7's Dockerfile: `COPY . .`, no
-		// .dockerignore excluding it today, but that is a normal thing to
-		// add) is not this test's business — "no secrets in git" is
+		// A build context with no .git (the Dockerfile does `COPY . .`,
+		// no .dockerignore excluding it today, but that is a normal
+		// thing to add) is not this test's business — "no secrets in git" is
 		// vacuously true with no git repo to ask. C9's sanctioned pattern
 		// is a loud skip here, never a hard fail that would break an
 		// otherwise-clean image build, and never a silent pass either.
@@ -833,21 +847,4 @@ func isProbablyText(data []byte) bool {
 	return true
 }
 
-// --- 18: TestE2E (gated) ---
-
-func TestE2E(t *testing.T) {
-	if os.Getenv("SENTINEL_E2E") != "1" {
-		t.Skip("SENTINEL_E2E=1 not set — skipping live apprise/mailrise E2E test")
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
-	r := loadFixture(t, "report-watch-zfs-cksum.json")
-	if err := Send(context.Background(), cfg, r, false); err != nil {
-		t.Fatalf("live apprise send failed: %v", err)
-	}
-	if err := Send(context.Background(), cfg, r, true); err != nil {
-		t.Fatalf("live mailrise SMTP send failed: %v", err)
-	}
-}
+// --- 18: TestE2E (gated) — see e2e_test.go for the full test body.

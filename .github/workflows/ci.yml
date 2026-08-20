@@ -1,0 +1,436 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/**"
+      - "test/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "deploy/**"
+      - "test/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch: {}
+
+# packages:write is scoped to the build/merge jobs only (they push to
+# GHCR); test and container only check out and run the Go toolchain
+# (plus, for container, a local docker build/run) and need nothing
+# beyond contents:read.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  # internal/notify's TestE2E, gated on SENTINEL_E2E=1 and set here so
+  # the real notify path runs on every push. No Telegram credential is
+  # involved: apprise supports json://, which POSTs to an arbitrary HTTP
+  # endpoint, so this job registers the apprise config key (and
+  # mailrise.conf) against a mock this job's own `go test` process runs
+  # instead of tgram://. That exercises sentinel -> apprise -> mock and
+  # sentinel -> SMTP -> mailrise -> mock for real; the only unexercised
+  # link is Telegram's own API, which is not ours to test and which a
+  # real token would not meaningfully verify anyway (the mock's own
+  # assertions on the real wire payload — title/message/type, delivery
+  # counts, two fail-on-demand cases — are what actually verify OUR
+  # side; see internal/notify/e2e_test.go's own comment for the full
+  # list, including the finding that apprise's json:// output never
+  # forwards a "format" field at all).
+  #
+  # Neither `services:` nor `docker compose` fit cleanly, so neither is
+  # used. The mock lives IN the `go test` process, not in a container —
+  # its assertions need direct access to the test's own state — so
+  # apprise/mailrise need to reach a plain runner process, not another
+  # container. `services:` containers on a job that does not itself run
+  # in a container sit on a bridge network with no automatic route back
+  # to a runner-level process. Reusing deploy/docker-compose.yml would
+  # also need dummy values for JOURNAL_GID/AGY_CREDENTIALS_DIR just to
+  # satisfy interpolation for a sentinel service this job never starts.
+  # Two `docker run --network host` containers is the actual smallest
+  # mechanism: host networking makes the mock's fixed port reachable
+  # from both containers as plain localhost, with nothing to route.
+  #
+  # No Telegram credential anywhere in this job, and nothing here
+  # reaches api.telegram.org.
+  e2e:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Start apprise + mailrise (host networking, json:// mock target)
+        run: |
+          mkdir -p /tmp/e2e
+          cat > /tmp/e2e/mailrise.conf <<'CONF'
+          configs:
+            sentinel:
+              urls:
+                - json://127.0.0.1:8079/notify
+          smtp:
+            auth:
+              basic:
+                e2euser: e2epass
+          CONF
+
+          docker run --rm -d --name e2e-apprise --network host \
+            lscr.io/linuxserver/apprise-api:latest
+          docker run --rm -d --name e2e-mailrise --network host \
+            -v /tmp/e2e/mailrise.conf:/etc/mailrise.conf:ro \
+            yoryan/mailrise:latest
+
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/status >/dev/null && break
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:8000/status >/dev/null; then
+            echo "apprise-api did not become healthy" >&2
+            docker logs e2e-apprise >&2 || true
+            exit 1
+          fi
+
+          curl -sS -X POST http://127.0.0.1:8000/add/sentinel \
+            --data-urlencode "urls=json://127.0.0.1:8079/notify" -w "\n"
+
+      - name: go test -run TestE2E
+        env:
+          SENTINEL_E2E: "1"
+          SENTINEL_E2E_SINK_ADDR: "127.0.0.1:8079"
+          SENTINEL_HOSTNAME: "ci-e2e"
+          APPRISE_URL: "http://127.0.0.1:8000"
+          APPRISE_KEY: "sentinel"
+          MAILRISE_HOST: "127.0.0.1"
+          MAILRISE_PORT: "8025"
+          MAILRISE_USER: "e2euser"
+          MAILRISE_PASS: "e2epass"
+          SENTINEL_MAIL_FROM: "sentinel@mailrise.xyz"
+          SENTINEL_MAIL_TO: "sentinel@mailrise.xyz"
+          STATE_DIR: /tmp/e2e-state
+        run: |
+          mkdir -p "$STATE_DIR"
+          go test -v -run TestE2E ./internal/notify/...
+
+      - name: Container logs (always, for post-mortem)
+        if: always()
+        run: |
+          docker logs e2e-apprise 2>&1 | tail -100 || true
+          docker logs e2e-mailrise 2>&1 | tail -100 || true
+
+  # The C1-C13 container suite, run once per architecture on a runner
+  # NATIVE to it — never both inside one job, never under emulation.
+  # Architecture is the matrix's job, not this suite's or the runner's:
+  # test/container_test.go takes its own arch from runtime.GOARCH, which
+  # is exactly the platform this job's runner actually is.
+  #
+  # C1's coherence assertion is independent of any build arg (it derives
+  # its expectation from the process's own arch, not from anything the
+  # build produced) and catches the class of defect where TARGETARCH
+  # scoping ships an amd64 image labelled arm64 — a defect this job's
+  # own real BuildKit exposes and podman does not.
+  #
+  # needs: test rather than running in parallel — this suite takes
+  # several minutes and downloads real artifacts over the network; no
+  # reason to spend that on a push where `go vet` or a unit test is
+  # already broken.
+  container:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@v3
+
+      - name: go test -tags container
+        # AGY_URL_*/AGY_SHA512_* from repository variables, never
+        # hardcoded here — same values the build job's build-args use.
+        # Set, they make buildSentinelImage() build this job's test
+        # image from the REAL vendor artifact instead of the synthetic
+        # fixture, for every case in this run, not only the ones gated
+        # on SENTINEL_REAL_AGY.
+        #
+        # SENTINEL_REAL_AGY=1 additionally runs TestContainer_RealAgyBuild,
+        # which downloads and builds against the real tarball directly
+        # (its own fixture literal for THIS matrix leg's arch, not these
+        # vars — see that test's own comment for why) rather than
+        # through buildSentinelImage.
+        #
+        # SENTINEL_E2E is deliberately NOT set here: TestE2E needs
+        # apprise, mailrise, and the Telegram bot token as a secret —
+        # a different decision from these public build args, left to
+        # whoever owns that secret. It stays gated and uncovered by
+        # this job.
+        env:
+          AGY_URL_AMD64: ${{ vars.AGY_URL_AMD64 }}
+          AGY_SHA512_AMD64: ${{ vars.AGY_SHA512_AMD64 }}
+          AGY_URL_ARM64: ${{ vars.AGY_URL_ARM64 }}
+          AGY_SHA512_ARM64: ${{ vars.AGY_SHA512_ARM64 }}
+          SENTINEL_REAL_AGY: "1"
+        run: go test -tags container -v -timeout 25m ./test/...
+
+  # Built per architecture, on a runner native to it, and pushed by
+  # digest rather than by tag — no tag exists yet for a single-arch
+  # push, only after `merge` below assembles all of them into one
+  # manifest list and tags THAT. This is what makes the design
+  # genuinely architecture-independent: a third architecture later is
+  # one more matrix row here (and in `container` above) and nothing
+  # else — no workflow logic branches on which architectures exist.
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: build-${{ matrix.arch }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR requires a lowercase image path. This repository is already
+      # all-lowercase so raw ${{ github.repository }} works today, but
+      # it is latent breakage for any repo/org with capitals — lowercase
+      # it explicitly rather than relying on that. Computed once here so
+      # every later step (the build's own tag, the smoke pull, the
+      # digest artifact) references the same value.
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          # Single platform — this job's own, matching the runner it is
+          # already executing on. buildx supplies TARGETARCH/TARGETPLATFORM
+          # for it; the Dockerfile selects the matching
+          # AGY_URL_*/AGY_SHA512_* pair.
+          platforms: ${{ matrix.platform }}
+          # No tag: pushed by digest only. `merge` assembles the
+          # manifest list from every architecture's digest and applies
+          # the real tags to THAT, so a tag never points at a
+          # single-architecture image even transiently.
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          build-args: |
+            AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}
+            AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}
+            AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}
+            AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}
+            AGY_VERSION=${{ vars.AGY_VERSION }}
+            VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+
+      - name: Smoke-test this architecture's pushed digest, natively
+        if: github.event_name != 'pull_request'
+        # No --platform anywhere below: this runner IS matrix.arch, so
+        # every docker run here executes natively. Nothing to emulate,
+        # nothing to branch on.
+        run: |
+          IMAGE="${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}"
+          docker pull "$IMAGE"
+
+          # ELF e_machine read FIRST, for BOTH binaries: it reads bytes
+          # rather than executing anything, and proves the property
+          # that actually matters — the right architecture binaries are
+          # in the right image. A bare `--version` cannot prove that on
+          # its own; a Dockerfile ARG-scoping defect once produced
+          # amd64 binaries inside an image labelled and manifested as
+          # arm64, with every execution-based check (including
+          # `sentinel --version`, which a static binary happily runs
+          # regardless of its real architecture) passing anyway.
+          WANT="3e 00"; [ "${{ matrix.arch }}" = "arm64" ] && WANT="b7 00"
+          for BIN in sentinel agy; do
+            GOT="$(docker run --rm --entrypoint od "$IMAGE" -An -tx1 -j18 -N2 /usr/local/bin/$BIN | tr -s ' ')"
+            case "$GOT" in
+              *"$WANT"*) ;;
+              *) echo "$BIN ELF e_machine mismatch: got '$GOT', want '$WANT'" >&2; exit 1 ;;
+            esac
+          done
+
+          docker run --rm "$IMAGE" --version
+
+          # Invoked through a shell rather than as a direct --entrypoint
+          # exec: direct exec of agy on a GitHub runner has failed once
+          # (exit 255) where the shell form passed — cause not
+          # established, kept as the form known to work.
+          docker run --rm --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
+
+      - name: Export this architecture's digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload the digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assembles every architecture's digest (needs: build waits for the
+  # WHOLE matrix, and fails if any leg failed — fail-fast: false on
+  # `build` means one architecture failing is still visible on its own,
+  # but a manifest list is never published missing the architecture
+  # that failed) into one manifest list and tags it. A third
+  # architecture later needs no change here: it is picked up by
+  # downloading its digest artifact along with the others.
+  #
+  # Skipped on pull_request BY DESIGN, not by omission — a PR build
+  # never pushes (github.event_name != 'pull_request' on `build`'s own
+  # outputs), so there is no digest anywhere for `imagetools create` to
+  # assemble. `imagetools create` is fundamentally a REGISTRY operation
+  # — it fetches manifests by digest and pushes a combined one — it has
+  # no local-images-only mode. Making it exercisable on a PR without
+  # writing to GHCR would need a registry every matrix leg of `build`
+  # AND this job can all reach, and GitHub Actions jobs are separate
+  # runner VMs with no shared state between them: a registry container
+  # started inside one matrix leg is not visible to the others or to
+  # this job. The only way around that is an external registry service
+  # or a scoped, still-real push to GHCR — both real infrastructure,
+  # not a small addition, and both weigh more than what this catches.
+  # So: this step's own correctness is proven on every push to `main`,
+  # never on a PR — a green PR does not cover it, and a broken
+  # `imagetools create` invocation is only visible after a push, not
+  # before. Named here so nobody reads a green PR as having verified
+  # manifest assembly.
+  merge:
+    # build alone is not enough: build only proves each architecture's
+    # image builds and starts, not that C1-C13 pass or that the live
+    # notify path works. container and e2e are build's siblings (both
+    # `needs: test` only), so without listing them here a broken
+    # install-host.sh or a broken notify path could fail red while the
+    # digests still publish and this job still tags them — the tag is
+    # the thing an operator pulls, so it is the one place that must not
+    # move on unverified digests. lint (actionlint) is included for the
+    # same reason C13 requires it: a workflow-shape defect must gate
+    # the publish, not just report on it afterward.
+    # Every job here must stay unconditional: a skipped dependency skips this
+    # job too, which would leave a green run with no manifest list published.
+    needs: [build, container, e2e, lint]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download every architecture's digest
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=
+
+      - name: Create the manifest list and push it, tagged
+        working-directory: /tmp/digests
+        run: |
+          # shellcheck disable=SC2046  # each tag/digest must land as its own
+          # -t flag / positional argument; quoting would collapse the list
+          # into one malformed argument. This disable is file-scoped (a
+          # directive at the top of a `run:` block applies to the whole
+          # block, not just the next line) and is correct only because
+          # this block is a single command — keep it that way, or a
+          # later command added below would silently inherit the same
+          # suppression.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+      - name: Verify the manifest list advertises every architecture
+        run: |
+          REF="${{ steps.image.outputs.name }}:${{ github.sha }}"
+          docker buildx imagetools inspect "$REF"
+          PLATFORMS="$(docker buildx imagetools inspect "$REF" --raw | jq -r '.manifests[].platform | select(.os=="linux") | .os+"/"+.architecture' | sort -u)"
+          for want in linux/amd64 linux/arm64; do
+            echo "$PLATFORMS" | grep -qx "$want" || { echo "manifest list missing $want" >&2; exit 1; }
+          done

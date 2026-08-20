@@ -252,12 +252,12 @@ func TestTickWithoutStateDirFlagUsesEnv(t *testing.T) {
 	}
 }
 
-// TestTickOnceRunsStartupPreflight is round-3 item 5: R2's startup
-// sequence ("preflight, the read-only lint, agy-home seeding") is
-// required "once before --loop starts ticking, AND once before the
-// single tick in --once" — before this fix, main.go only ran it inside
-// Loop(), so a --once invocation with neither journal directory mounted
-// silently skipped a check --loop would have enforced. baseEnv gives a
+// TestTickOnceRunsStartupPreflight verifies R2's startup sequence
+// ("preflight, the read-only lint, agy-home seeding") runs "once before
+// --loop starts ticking, AND once before the single tick in --once" — if
+// main.go only ran it inside Loop(), a --once invocation with neither
+// journal directory mounted would silently skip a check --loop would have
+// enforced. baseEnv gives a
 // real, writable $STATE_DIR (so state.New succeeds) but never sets
 // HOST_JOURNAL_DIR/HOST_JOURNAL_VOLATILE_DIR, so both fall back to their
 // C3 defaults (/host/journal, /host/journal-volatile) — real container
@@ -321,13 +321,13 @@ func fullTickEnv(t *testing.T, stateDir string) []string {
 	}
 }
 
-// TestTickOnceAllocatesTickSeq is main's ruling on t6-review's escalated
-// defect: R3.1's tick-seq counter is scoped to the sentinel-tick COMMAND
-// ("owned exclusively by tick"), not to --loop — the old code hardcoded
-// seq=1 for every --once invocation, so an operator debugging against the
-// live /state volume on bam would silently write seq-1 records into
-// active-alerts the loop was tracking at seq 400+, corrupting the trend
-// data analyze reads back out of history/. This MUST drive the real
+// TestTickOnceAllocatesTickSeq verifies R3.1's tick-seq counter is scoped
+// to the sentinel-tick COMMAND ("owned exclusively by tick"), not to
+// --loop — hardcoding seq=1 for every --once invocation would let an
+// operator debugging against a live /state volume silently write seq-1
+// records into active-alerts the loop was tracking at seq 400+,
+// corrupting the trend data analyze reads back out of history/. This MUST
+// drive the real
 // binary: internal/runtime's own table (E12) calls Tick() directly with a
 // supplied seq, so the seam where main decides what to pass is invisible
 // to every in-process test.
@@ -412,10 +412,10 @@ func TestConfigErrorExits78AndNamesVariable(t *testing.T) {
 // C2 maps a recovered panic to exit 1. guard is the seam that makes that path
 // reachable without a panic hook in the production dispatch: main wraps run in
 // it, and this test wraps a deliberately panicking func.
-// TestLogLevelForSubcommandError_HonorsLogLevel is the T5 fix for a T2
-// foundation gap (t5-review2, routed through main): main.go:107 hardcoded
-// slog.LevelInfo for every subcommand-error log regardless of
-// cfg.LogLevel. run() never holds a *config.Config (each subcommand loads
+// TestLogLevelForSubcommandError_HonorsLogLevel asserts subcommand-error
+// logs honor cfg.LogLevel rather than hardcoding slog.LevelInfo
+// regardless of configuration. run() never holds a *config.Config (each
+// subcommand loads
 // its own), so logLevelForSubcommandError re-reads it via a second, cheap
 // config.Load() call — this drives that exact function in-process, the
 // same one logSubcommandError calls, rather than a hand-built level.

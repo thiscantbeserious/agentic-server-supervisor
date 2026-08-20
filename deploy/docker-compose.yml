@@ -1,17 +1,112 @@
-# Sentinel notification stack (T1).
-#
-# This file currently defines the two notification services. The `sentinel`
-# service itself is added in T7 exactly as specified in contracts/runtime.md
-# §R3 — it is referenced there, not redefined here, so the two must not drift.
+# Sentinel stack: apprise + mailrise, plus the sentinel supervisor itself,
+# exactly as specified in contracts/runtime.md R4 — one definition, no
+# drift between contract and file.
 #
 # Bring up:   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up -d
-# Verify:     see the two V commands in PLAN.md §3 (T1).
+# Verify:     see the notification-stack V commands in PLAN.md §3; the
+#             sentinel-specific checks live in test/container_test.go.
 #
 # The Telegram bot token lives ONLY in this stack. The sentinel container gets
 # no /config mount and no TELEGRAM_* variables (contracts/runtime.md): the token
 # stays out of the process that parses attacker-controlled log text.
 
 services:
+  sentinel:
+    image: ghcr.io/thiscantbeserious/agentic-server-supervisor/sentinel:${SENTINEL_TAG:-latest}
+    container_name: sentinel
+    restart: unless-stopped
+    command: ["tick", "--loop"]
+    depends_on:
+      apprise:
+        condition: service_healthy
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install-host.sh}"]
+    pids_limit: 256
+    mem_limit: 512m
+    stop_grace_period: 15s
+    environment:
+      TICK_INTERVAL: "${TICK_INTERVAL:-300}"
+      TICK_WINDOW: "${TICK_WINDOW:-10m}"
+      DEEP_WINDOW: "${DEEP_WINDOW:-24h}"
+      SECTION_TIMEOUT: "${SECTION_TIMEOUT:-10}"
+      JOURNAL_MAX_RECORDS: "${JOURNAL_MAX_RECORDS:-20000}"
+      FACTS_MAX_BYTES: "${FACTS_MAX_BYTES:-262144}"
+      SERVICES_MAX_BYTES: "${SERVICES_MAX_BYTES:-65536}"
+      STATE_DIR: "/state"
+      HOST_JOURNAL_DIR: "/host/journal"
+      HOST_JOURNAL_VOLATILE_DIR: "/host/journal-volatile"
+      HOST_PROC: "/host/proc"
+      HOST_ROOT: "/host/root"
+      HOST_RASDAEMON: "/host/rasdaemon"
+      SENTINEL_HOSTNAME: "${SENTINEL_HOSTNAME:-}"
+      AGY_BIN: "agy"
+      AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
+      AGY_SECRET_DIR: "/run/secrets/agy"
+      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-120s}"
+      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-150s}"
+      HISTORY_N: "${HISTORY_N:-5}"
+      HISTORY_KEEP: "${HISTORY_KEEP:-50}"
+      DEEP_ENABLED: "${DEEP_ENABLED:-1}"
+      DEEP_TIMEOUT: "${DEEP_TIMEOUT:-30s}"
+      RAW_ALERT_MAX_PRIORITY: "${RAW_ALERT_MAX_PRIORITY:-2}"
+      RAW_ALERT_MAX_LINES: "${RAW_ALERT_MAX_LINES:-20}"
+      RAW_ALERT_REPEAT_SECONDS: "${RAW_ALERT_REPEAT_SECONDS:-3600}"
+      RAW_ALERT_MARKER_TTL_HOURS: "${RAW_ALERT_MARKER_TTL_HOURS:-168}"
+      RENOTIFY_ALERT_SEC: "${RENOTIFY_ALERT_SEC:-3600}"
+      RENOTIFY_WATCH_SEC: "${RENOTIFY_WATCH_SEC:-21600}"
+      STALE_ALERT_SEC: "${STALE_ALERT_SEC:-86400}"
+      HEARTBEAT_HOUR: "${HEARTBEAT_HOUR:-8}"
+      OUTBOX_MAX: "${OUTBOX_MAX:-50}"
+      OUTBOX_SMTP_AFTER: "${OUTBOX_SMTP_AFTER:-3}"
+      APPRISE_URL: "http://apprise:8000"
+      APPRISE_KEY: "${APPRISE_KEY:-sentinel}"
+      APPRISE_CONFIG_FILE: "${APPRISE_CONFIG_FILE:-/config/sentinel.cfg}"
+      NOTIFY_TIMEOUT: "${NOTIFY_TIMEOUT:-15}"
+      NOTIFY_BODY_MAX: "${NOTIFY_BODY_MAX:-3500}"
+      MAILRISE_HOST: "mailrise"
+      MAILRISE_PORT: "8025"
+      MAILRISE_USER: "${MAILRISE_SMTP_USER:?MAILRISE_SMTP_USER missing}"
+      MAILRISE_PASS: "${MAILRISE_SMTP_PASS:?MAILRISE_SMTP_PASS missing}"
+      SENTINEL_MAIL_FROM: "${SENTINEL_MAIL_FROM:-sentinel@mailrise.xyz}"
+      SENTINEL_MAIL_TO: "${SENTINEL_MAIL_TO:-sentinel@mailrise.xyz}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      TMPDIR: "/tmp"
+      TZ: "UTC"
+    volumes:
+      - /var/log/journal:/host/journal:ro
+      - /run/log/journal:/host/journal-volatile:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - /var/lib/rasdaemon:/host/rasdaemon:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/etc/os-release:ro
+      - type: bind
+        source: /
+        target: /host/root
+        read_only: true
+        bind: { propagation: rslave }
+      - type: bind
+        source: ${AGY_CREDENTIALS_DIR:?AGY_CREDENTIALS_DIR missing}
+        target: /run/secrets/agy
+        read_only: true
+      - sentinel-state:/state
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    networks: [sentinel-net]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sentinel", "health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+
   apprise:
     image: lscr.io/linuxserver/apprise-api:latest
     container_name: sentinel-apprise

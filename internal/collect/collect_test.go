@@ -1060,8 +1060,6 @@ func TestInjectedKernelError(t *testing.T) {
 	t.Errorf("marker %q not found in kernel.entries: %+v", marker, f.Kernel.Data.Entries)
 }
 
-// --- agy fix round 1 ---
-
 // collect.md §5 step 3: hitting the hard-truncation fixed point must set
 // meta.truncated: true — this is the exact state where the analyzer most
 // needs to know the picture is incomplete. Exercised directly against

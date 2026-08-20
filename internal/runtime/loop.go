@@ -3,10 +3,13 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -74,6 +77,71 @@ func preflight(cfg *config.Config) error {
 func dirReadableNonEmpty(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	return err == nil && len(entries) > 0
+}
+
+// checkJournalReadable exists because R2's filesystem preflight
+// (dirReadableNonEmpty above) only proves
+// the configured journal directory exists and has files in it — it does
+// NOT prove journald will hand the unprivileged sentinel user any journal
+// CONTENT. A stale JOURNAL_GID, an ineffective group_add, or a wrong
+// HOST_JOURNAL_DIR mount all leave that filesystem-level check green while
+// journalctl itself reads nothing, and an empty journal is indistinguishable
+// from a quiet system — the quietest possible failure of a component whose
+// job is noticing things.
+//
+// Measured against real journalctl in debian:trixie-slim (the R1 runtime
+// base) before writing this: "journalctl -n1 --no-pager" on an empty or
+// unreadable journal exits 0 and prints "-- No entries --\n" to STDOUT, not
+// stderr — so neither "exit code only" nor "stdout non-empty" discriminates
+// a real record from that sentinel line. "-o json" does: an empty journal
+// under -o json writes zero bytes. This function therefore queries with
+// "-o json" and treats non-zero exit OR zero-byte stdout as failure.
+//
+// Queries HOST_JOURNAL_DIR first, then HOST_JOURNAL_VOLATILE_DIR — the
+// same "at least one readable" tolerance the filesystem check above uses
+// (a fresh boot can legitimately have an empty persistent journal with
+// only the volatile one populated) — and fails only if neither yields a
+// record.
+func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
+	timeout := cfg.SectionTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
+	var lastReason string
+	for _, dir := range []string{cfg.HostJournalDir, cfg.HostJournalVolatileDir} {
+		if dir == "" {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, timeout)
+		cmd := exec.CommandContext(cctx, "journalctl", "-D", dir, "-n1", "-o", "json", "--no-pager")
+		out, err := cmd.Output()
+		cancel()
+		if err != nil {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 failed: %v", dir, err)
+			continue
+		}
+		trimmed := bytes.TrimSpace(out)
+		if len(trimmed) == 0 {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 returned zero entries", dir)
+			continue
+		}
+		// Defense in depth beyond "-o json": if journalctl ever falls back
+		// to its human-readable "-- No entries --" sentinel line (that is
+		// what a real, unreadable/empty journal prints WITHOUT -o json —
+		// -o json is what makes that case zero bytes instead), a
+		// non-empty-but-non-JSON line must still be rejected rather than
+		// accepted as a real record.
+		if !json.Valid(trimmed) {
+			lastReason = fmt.Sprintf("journalctl -D %s -n1 returned non-JSON output", dir)
+			continue
+		}
+		return nil // a real record from at least one directory
+	}
+	return &preflightError{
+		cfg.HostJournalDir,
+		lastReason + " — check JOURNAL_GID, group_add, or the /host/journal mount",
+	}
 }
 
 type warner interface{ Warn(string, ...any) }
@@ -148,7 +216,7 @@ func assertBinDirReadOnly(logger warner) {
 // (config.Load) and step 6 (signal.NotifyContext, --loop only) are the
 // caller's job. Returns the C2 exit code: 69 for a state-dir failure, 78
 // for any other preflight failure, 0 on success.
-func StartupPreflight(cfg *config.Config) (int, error) {
+func StartupPreflight(ctx context.Context, cfg *config.Config) (int, error) {
 	logger := newLogger(cfg)
 
 	if err := preflight(cfg); err != nil {
@@ -160,6 +228,35 @@ func StartupPreflight(cfg *config.Config) (int, error) {
 		var pferr *preflightError
 		if errors.As(err, &pferr) {
 			logger.Error("startup preflight failed", "path", pferr.path, "reason", pferr.reason)
+		}
+		return 78, err
+	}
+
+	// The directory-level check above proves the mount exists and is
+	// listable; it does not prove journalctl can actually read journal
+	// CONTENT through it. Run before the first tick so a stale
+	// JOURNAL_GID fails loud at startup instead of silently reporting
+	// all-clear forever.
+	//
+	// ctx is deliberately NOT the shutdown-signal context both callers
+	// hold (Loop's sigCtx, --once's request context): wiring a
+	// SIGTERM-cancellable context in here would make a real SIGTERM
+	// arriving during preflight report exit 78 ("context canceled") from
+	// checkJournalReadable's own exec.CommandContext, instead of the
+	// exit 0 R2 contracts for a signal-driven shutdown ("--loop
+	// terminates only with 0 (signal), 78 (config/mount preflight) ...").
+	// checkJournalReadable already self-bounds via cfg.SectionTimeout (or
+	// its own 10s default), so the accepted cost of NOT threading shutdown
+	// cancellation through is a startup tail of at most that timeout —
+	// comfortably inside the 15s stop_grace_period compose sets. Both
+	// current callers pass context.Background() for exactly this reason;
+	// ctx stays a parameter (rather than being dropped) so a future
+	// caller with a different tradeoff, or a test that wants to bound the
+	// whole preflight call itself, still can.
+	if err := checkJournalReadable(ctx, cfg); err != nil {
+		var pferr *preflightError
+		if errors.As(err, &pferr) {
+			logger.Error("journal not readable", "path", pferr.path, "reason", pferr.reason)
 		}
 		return 78, err
 	}
@@ -176,7 +273,7 @@ func StartupPreflight(cfg *config.Config) (int, error) {
 func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 	logger := newLogger(cfg)
 
-	if code, err := StartupPreflight(cfg); err != nil {
+	if code, err := StartupPreflight(context.Background(), cfg); err != nil {
 		return code, err
 	}
 

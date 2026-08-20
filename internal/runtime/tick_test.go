@@ -275,14 +275,13 @@ func TestTick_AnalyzeFails(t *testing.T) {
 	}
 }
 
-// TestTick_StateFailureBlanksResolvedKeys is round-1 review blocker 2,
-// amended into R3.8: on the rc-5 (state-failure) path the report is sent
-// UNFILTERED — but "unfiltered" excludes resolved[]. Every other path
-// relies on state.md S.3(e) to translate each 16-hex key into the stored
-// alert's headline before a human ever sees it (the whole point of the
-// 3c078d7 resolved[] migration is that an operator never sees a raw key).
-// state did not run here, so nothing performs that substitution — a
-// bypassed report must have resolved[] blanked, not forwarded as hex.
+// TestTick_StateFailureBlanksResolvedKeys asserts R3.8: on the rc-5
+// (state-failure) path the report is sent UNFILTERED — but "unfiltered"
+// excludes resolved[]. Every other path relies on state.md S.3(e) to
+// translate each 16-hex key into the stored alert's headline before a
+// human ever sees it — an operator must never see a raw key. state did
+// not run here, so nothing performs that substitution — a bypassed
+// report must have resolved[] blanked, not forwarded as hex.
 // There was no test at all for the rc-5 path before this one.
 func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 	cfg := testConfig(t, tick0)
@@ -324,14 +323,14 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 	}
 }
 
-// TestTick_NotifyAndOutboxBothFail is main's round-3 item 3 (agy-found):
-// state.Process (S.3d) has already committed LastNotified/NotifyCount to
-// active-alerts/<key>.json by the time notify runs, so if NotifySend AND
-// OutboxAdd both fail, the finding sits suppressed for the renotify
-// window with nothing queued and no trace anywhere — worse than an
-// ordinary "queued, will retry" failure, and before this fix,
-// indistinguishable from one in the exit code (both were rc 4). This
-// drives OutboxAdd itself to fail (a read-only outbox dir) and asserts
+// TestTick_NotifyAndOutboxBothFail asserts a distinct exit code for the
+// case where state.Process (S.3d) has already committed
+// LastNotified/NotifyCount to active-alerts/<key>.json by the time
+// notify runs, so if NotifySend AND OutboxAdd both fail, the finding
+// sits suppressed for the renotify window with nothing queued and no
+// trace anywhere — worse than an ordinary "queued, will retry" failure,
+// and indistinguishable from one if both cases share the same exit code.
+// This drives OutboxAdd itself to fail (a read-only outbox dir) and asserts
 // the distinct rc 5 plus an ERROR log line, and that Queued correctly
 // reports false rather than the stale "true" the old code always set
 // regardless of whether the enqueue actually succeeded.
@@ -389,19 +388,19 @@ func TestTick_Apprise503(t *testing.T) {
 	}
 }
 
-// TestTick_DrainFailureContributesToExitCode is round-1 review item 3: a
-// drain that fails every item previously left rc 0 — visible only in a
-// WARN log line an operator running --once may never tail. The exit code
-// is the machine-readable signal; a stuck outbox must move it.
-// TestTick_DrainFailureContributesToExitCode is round-2 review item 2: the
-// first version of this test was vacuous — it passed even with the fix
-// deleted from drainOutbox, because at tick0 the daily heartbeat is due,
-// so step 4 ALSO notifies, ALSO hits the 503 recorder, and ALSO queues —
-// setting rc 4 by itself before the drain ever runs. Seeding today's
-// heartbeat makes step (f) not due, so with no findings state suppresses,
-// step 4 sends nothing, and the drain is the ONLY thing that can move the
-// exit code. The setup guard (!Queued && !Notified) fails loudly if this
-// isolation ever breaks again instead of quietly going vacuous.
+// TestTick_DrainFailureContributesToExitCode asserts that a drain
+// failing every item moves the exit code, not just a WARN log line an
+// operator running --once may never tail — the exit code is the
+// machine-readable signal, so a stuck outbox must move it.
+//
+// At tick0 the daily heartbeat is due by default, so step 4 would ALSO
+// notify, ALSO hit the 503 recorder, and ALSO queue — setting rc 4 by
+// itself before the drain ever runs, which would make this test pass
+// even with drainOutbox's contribution to the exit code removed. Seeding
+// today's heartbeat makes step (f) not due, so with no findings state
+// suppresses, step 4 sends nothing, and the drain is the ONLY thing that
+// can move the exit code. The setup guard (!Queued && !Notified) fails
+// loudly if this isolation ever breaks instead of quietly going vacuous.
 func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
 	cfg := testConfig(t, tick0)
 	rec := newAppriseRecorder(t, 503) // every POST fails, including the drain's
@@ -809,11 +808,10 @@ func TestTick_RawKeyMatchesDedup(t *testing.T) {
 	}
 }
 
-// TestCandidates_NewestFirst is round-3's accept-or-defer item, accepted:
-// R3.3 requires "newest first". facts.Entry order is oldest-first (the
-// journal/collect convention Candidates walks backwards over), so this
-// locks in that Candidates actually reverses it rather than assuming the
-// reviewer's manual probe stays true forever.
+// TestCandidates_NewestFirst asserts R3.3's "newest first" requirement.
+// facts.Entry order is oldest-first (the journal/collect convention
+// Candidates walks backwards over), so this locks in that Candidates
+// actually reverses it rather than relying on a manual, one-time probe.
 func TestCandidates_NewestFirst(t *testing.T) {
 	entries := []facts.Entry{
 		critEntry("2026-08-15T09:00:00Z", "oldest"),
@@ -833,9 +831,9 @@ func TestCandidates_NewestFirst(t *testing.T) {
 	}
 }
 
-// TestSweepMarkers_ExpiresOldOnly is round-3's accept-or-defer item,
-// accepted: R3.3's TTL sweep must delete a marker older than
-// RAW_ALERT_MARKER_TTL_HOURS and leave a fresh one untouched.
+// TestSweepMarkers_ExpiresOldOnly asserts R3.3's TTL sweep deletes a
+// marker older than RAW_ALERT_MARKER_TTL_HOURS and leaves a fresh one
+// untouched.
 func TestSweepMarkers_ExpiresOldOnly(t *testing.T) {
 	cfg := testConfig(t, tick0)
 	// sweepMarkers reads mtime, not content — writeMarker stamps the file
@@ -867,10 +865,9 @@ func TestSweepMarkers_ExpiresOldOnly(t *testing.T) {
 	}
 }
 
-// TestMinimalValidationFailureAlert is round-3's accept-or-defer item,
-// accepted: R3.2's "never drops an alert because of its own marshaling
-// bug" safety net had nothing behind it. Asserts the replacement is
-// itself schema-valid — the one property that matters, since this is the
+// TestMinimalValidationFailureAlert asserts R3.2's "never drops an alert
+// because of its own marshaling bug" safety-net replacement is itself
+// schema-valid — the one property that matters, since this is the
 // last-resort document when runtime's OWN output failed validation.
 func TestMinimalValidationFailureAlert(t *testing.T) {
 	cfg := testConfig(t, tick0)

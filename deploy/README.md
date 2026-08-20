@@ -1,8 +1,9 @@
 # deploy/
 
-The notification stack (T1) and, from T7, the supervisor service itself.
-`docker-compose.yml` is the single stack: `apprise` and `mailrise` are defined
-here; `sentinel` is added in T7 exactly as `contracts/runtime.md` §R3 specifies.
+The notification stack and the supervisor service.
+`docker-compose.yml` is the single stack: `apprise` and `mailrise` deliver
+notifications; `sentinel` is the supervisor itself, defined exactly as
+`contracts/runtime.md` specifies so the two cannot drift.
 
 ## Why two services
 
@@ -76,10 +77,12 @@ on delivery, or 424 with the reason when delivery fails. Verified locally
 `sentinel notify --seed-config` performs the same registration; it is an ops
 one-shot the runtime never invokes.
 
-## Verify (PLAN §3, T1)
+## Verify
 
-Both must land in Telegram. Until they do, T1 is not done — the supervisor can
-compute a perfect report and still never reach you.
+Two paths reach Telegram: the apprise path sentinel uses directly, and the
+SMTP path smartd/ZED/OMV use through mailrise. Both must land. Until they do
+the stack is not working — the supervisor can compute a perfect report and
+still never reach you.
 
 A 2xx is not proof on its own: **204 means the key was never registered and
 nothing was sent.** Success is 200 plus the message actually arriving.
