@@ -371,6 +371,8 @@ jobs:
     # move on unverified digests. actionlint is included for the same
     # reason C13 requires it: a workflow-shape defect must gate the
     # publish, not just report on it afterward.
+    # Every job here must stay unconditional: a skipped dependency skips this
+    # job too, which would leave a green run with no manifest list published.
     needs: [build, container, e2e, actionlint]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
