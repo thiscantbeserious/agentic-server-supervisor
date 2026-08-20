@@ -208,26 +208,32 @@ func TestE2E(t *testing.T) {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 503 case, want 3 (the attempt was received even though it failed)", got)
 	}
 
-	// --- fail-on-demand: 204, the value that looks like success and
-	// sends nothing ---
+	// --- fail-on-demand: 204, the value whose REPORT looks like success
+	// even though the send itself may not have meant anything to the
+	// far end ---
 	//
-	// Verified against a real apprise-api: when ITS downstream target
-	// returns 204, apprise-api's OWN /notify/{key} call still returns
-	// HTTP 200 to the caller. This is a DIFFERENT 204 than N.3.1's
-	// "204 is a failure" rule, which is about apprise-api's own
-	// /notify/{key} response meaning "the key is not registered" — this
-	// is apprise-api absorbing a downstream 204 into what it reports as
-	// its own success. Sentinel has no way to detect this: the send
-	// genuinely looks successful from here. Asserted rather than fixed,
-	// because there is nothing on our side to fix — this is what the
-	// real chain does, and the point of running it live is finding that
-	// out rather than assuming apprise's success means the far end
-	// received anything.
+	// Verified against a real apprise-api: the message DOES reach the
+	// downstream target (the sink's own delivery count below proves
+	// that) — what a 204 changes is apprise-api's REPORT of what
+	// happened, not the delivery. When the downstream target returns
+	// 204, apprise-api's OWN /notify/{key} call still returns HTTP 200
+	// to the caller. This is a DIFFERENT 204 than N.3.1's "204 is a
+	// failure" rule, which is about apprise-api's own /notify/{key}
+	// response meaning "the key is not registered" — this is
+	// apprise-api absorbing a downstream 204 into what it reports as
+	// its own success one layer further down. A downstream that
+	// accepted-and-discarded the message would be indistinguishable
+	// from here, from one that genuinely delivered it. Asserted rather
+	// than fixed, because there is nothing on our side to fix — this is
+	// what the real chain does. It is a real, unfixable-at-this-layer
+	// risk, not an uncovered one at the system level: the daily
+	// heartbeat is what catches a channel that has gone quiet, whatever
+	// the cause.
 	sink.setStatus(204)
 	errSend = Send(ctx, cfg, r, false)
 	sink.setStatus(0)
 	if errSend != nil {
-		t.Errorf("FAIL E2E: apprise send with the sink returning 204 returned an error (%v) — expected apprise-api to report success here (verified live: it does), which is exactly the silent-drop risk this case documents", errSend)
+		t.Errorf("FAIL E2E: apprise send with the sink returning 204 returned an error (%v) — expected apprise-api to report success here (verified live: it does), which is exactly the report-vs-delivery gap this case documents", errSend)
 	}
 	if got := sink.count(); got != 4 {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 204 case, want 4 (received, and apprise still called it a success)", got)
