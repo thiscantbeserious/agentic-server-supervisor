@@ -1,9 +1,9 @@
 #!/bin/bash
-# deploy/install-host.sh — R5. The one deliberate bash artifact in this
+# install.sh — R5. The one deliberate bash artifact in this
 # repo: it runs on the host as root before the sentinel image exists,
 # needs apt-get and systemctl, and shipping a second Go binary to bam
 # just to write a handful of config files is more moving parts than an
-# idempotent script. Upgrade path: a "sentinel install-host" subcommand
+# idempotent script. Upgrade path: a "sentinel install" subcommand
 # if the host part ever grows.
 #
 # ponytail: kept as a single bash script rather than promoted to a Go
@@ -14,7 +14,7 @@
 set -u
 set -o pipefail
 
-PROG="install-host.sh"
+PROG="install.sh"
 MARK_BEGIN="# >>> agentic-server-supervisor (managed) >>>"
 MARK_END="# <<< agentic-server-supervisor (managed) <<<"
 
@@ -1193,7 +1193,7 @@ step6() {
   # default to root:root (this script requires EUID=0). If
   # `docker compose` is later run as a non-root ops user, a root:root
   # 0600 .env would be unreadable to them — this file is ops-authored
-  # (JOURNAL_GID is the one field install-host.sh itself writes into it)
+  # (JOURNAL_GID is the one field install.sh itself writes into it)
   # and stays owned by whoever created it. A fresh file (this script
   # creating .env for the first time) has no prior owner to preserve, so
   # it falls back to root:root.

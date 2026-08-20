@@ -21,6 +21,7 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 ├── CONTRACTS.md                    # binding conventions C1–C9 + index
 ├── contracts/                      # per-component contracts, one file per implementation stage
 ├── CLAUDE.md                       # working rules: TDD loop + gates + model matrix
+├── install.sh                      # curl | sudo bash: host part + creates the compose stack itself
 │
 ├── go.mod                          # github.com/thiscantbeserious/agentic-server-supervisor
 ├── cmd/sentinel/main.go            # dispatch + exit-code mapping (the only os.Exit)
@@ -34,13 +35,12 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 │   ├── .env.example                # every env var from CONTRACTS.md §C3
 │   ├── Dockerfile                  # golang builder stage → debian-slim runtime (journalctl, lm-sensors, agy)
 │   ├── apprise/sentinel.cfg        # seeded via `sentinel notify --seed-config` (ops one-shot)
-│   ├── mailrise/mailrise.conf      # SMTP ingest → tgram://
-│   └── install-host.sh             # host part: rasdaemon, smartd→mailrise, zed→mailrise, JOURNAL_GID → .env
+│   └── mailrise/mailrise.conf      # SMTP ingest → tgram://
 │
 └── .github/workflows/ci.yml        # lint + test + e2e + build + push → ghcr.io (latest + SHA)
 ```
 
-Rollout on `bam` is exactly: copy `deploy/`, fill `.env`, run `install-host.sh`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.
+Rollout on `bam` is exactly: `curl -fsSL .../install.sh | sudo bash`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.
 
 ## 2. Component Specification
 
@@ -75,11 +75,11 @@ Every TODO has **deliverable, acceptance criteria (AC), verification (V)**. Done
   **Carried in from T4/T5 — two obligations, both must be closed here:**
   1. **`tick` must nil-check `analyze.Run`'s report before marshaling.** On a cancelled context `Run` returns `(nil, err)` and authors nothing (contracts/analyze.md §1), so the SIGTERM path this exception exists to clean up is exactly where a nil-panic would land. The AC above exercises SIGTERM during a tick, so this obligation and its test already coincide — do not let that test pass by never reaching the nil branch.
   2. **`analyze` should emit `findings[].key` inside `resolved[]`.** Today `resolved[]` carries evidence truncated to 80 runes, so the resolve seam is identified by a *different* value from the one every other seam uses — `state` matches it against both headline and evidence to compensate (contracts/state.md S.3(e)). Two findings whose evidence agrees in its first 80 runes collide, and the truncation itself can produce a value matching nothing. Switching to the 16-hex key retires both the collision class and the dual-match workaround. This is a contract amendment to analyze §6 and state S.3(e) together — neither alone.
-- **T7 — image + CI + install-host.sh**: Dockerfile (builder + debian-slim), compose `sentinel` service (C4 mounts, group_add, read_only), GHCR workflow (`go vet` + `go test ./...` + build + push latest/SHA), `install-host.sh`, `test/container_test.go`.
-  AC: container starts unprivileged; journal reading works via group_add; write attempts on every ro mount fail; empirical checks of the unverified points (ARCHITECTURE §2.6): `sensors -j` returns values, rasdaemon path readable, tmpfs/DNS ok, ZED events under `-t zed`; `sentinel health` drives the compose healthcheck; install-host.sh twice without error; Actions run green, pull from GHCR works. V: `go test -tags container ./test/...` on a Linux host.
+- **T7 — image + CI + install.sh**: Dockerfile (builder + debian-slim), compose `sentinel` service (C4 mounts, group_add, read_only), GHCR workflow (`go vet` + `go test ./...` + build + push latest/SHA), `install.sh`, `test/container_test.go`.
+  AC: container starts unprivileged; journal reading works via group_add; write attempts on every ro mount fail; empirical checks of the unverified points (ARCHITECTURE §2.6): `sensors -j` returns values, rasdaemon path readable, tmpfs/DNS ok, ZED events under `-t zed`; `sentinel health` drives the compose healthcheck; install.sh twice without error; Actions run green, pull from GHCR works. V: `go test -tags container ./test/...` on a Linux host.
 ### T7 obligation: preflight must verify the journal is readable
 
-`JOURNAL_GID` is discovered once, by `install-host.sh` step 6 (`getent group systemd-journal | cut -d: -f3`), and compose refuses to start without it. That is sound at install time. **Nothing re-verifies it at runtime**, and R2's preflight does not read the journal at all — it checks config, the filesystem, `/usr/local/bin` writability, agy seeding and the state directories.
+`JOURNAL_GID` is discovered once, by `install.sh` step 6 (`getent group systemd-journal | cut -d: -f3`), and compose refuses to start without it. That is sound at install time. **Nothing re-verifies it at runtime**, and R2's preflight does not read the journal at all — it checks config, the filesystem, `/usr/local/bin` writability, agy seeding and the state directories.
 
 So a stale or wrong value — `.env` copied to another host, the gid changed by a distro upgrade, `group_add` silently ineffective — produces a container that starts cleanly, reads an empty journal, and reports all-clear indefinitely. An empty journal is indistinguishable from a quiet system, which makes this the quietest possible failure of a component whose entire job is noticing things.
 
@@ -113,9 +113,9 @@ Measured before T7 so the image is written against the host as it is, not as ass
 | Debian 13 | trixie, systemd 257, kernel 7.1.3+deb13-amd64 |
 | **`JOURNAL_GID=999`** | **holds** — `systemd-journal:x:999` |
 | smartmontools | installed (`/usr/sbin/smartd`, `/usr/sbin/smartctl`) |
-| lm-sensors | **not installed** — `install-host.sh` installs it |
-| rasdaemon | **not installed** — `install-host.sh` installs it |
-| msmtp | **not installed** — `install-host.sh` installs it |
+| lm-sensors | **not installed** — `install.sh` installs it |
+| rasdaemon | **not installed** — `install.sh` installs it |
+| msmtp | **not installed** — `install.sh` installs it |
 | ZFS pools | `cache` 928G and `hotstore` 16.4T, both `ONLINE` |
 | `zfs-zed` | **active** — ZFS events already reach the journal |
 | docker compose | v5.5.0 |
@@ -129,7 +129,7 @@ smartd[2658]: Configuration file /etc/smartd.conf parsed but has no entries
 smartd[2658]: Monitoring 0 ATA/SATA, 0 SCSI/SAS and 0 NVMe devices
 ```
 
-So `bam` has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install-host.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
+So `bam` has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
 
 **Care with `command -v` on this host:** the login PATH omits `/usr/sbin`, so `smartd`, `smartctl` and `rasdaemon` all appear absent when they are not. Check with `dpkg-query` or an absolute path. This produced a wrong reading during the survey itself.
 
@@ -140,7 +140,7 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
   2. **Set a real `MAILRISE_SMTP_PASS`.** Local verification ran on a throwaway. It must match in **both** `.env` and `mailrise.conf` — they are read by different processes and neither warns when they disagree.
   3. **Delete any `/config/<key>.cfg` in the apprise volume.** apprise ignores it while it looks authoritative; the local volume still holds one from T1 diagnosis.
   **Carried from T7 — watch during the trial, do not pre-fix:** `postApprise` shares Go's default HTTP transport pool across calls. Measured against a real apprise-api, a request landing on a connection the server has started tearing down fails with `transport: EOF` at roughly 3/40 (7.5%). Steady-state ticks are minutes apart against `IdleConnTimeout`'s 90s, so this should not surface in normal operation — the one path that posts back-to-back is `drainOutbox` draining a multi-item backlog, which only accumulates after apprise has already been down. If it recovers and the drain trips an EOF on a queued item, that item stays queued and retries next tick, having burned one attempt and moved SMTP escalation one step closer — degraded, not lost. Check the trial logs for `transport: EOF` during any post-recovery drain; if it recurs, `DisableKeepAlives` on the notify client is the proven one-line fix, held out of T7 as a deliberate scope call.
-  **`install-host.sh`'s value-taking flags reject a following flag as their value.** `--mailrise-host --check` (value omitted, next token happens to be another flag) exits 64 rather than silently treating `--check` as the hostname and running for real — the hazard a supervised run could otherwise miss (`changed=N` would show it, but only if someone's watching) is closed at the parser, not documented as a thing to notice.
+  **`install.sh`'s value-taking flags reject a following flag as their value.** `--mailrise-host --check` (value omitted, next token happens to be another flag) exits 64 rather than silently treating `--check` as the hostname and running for real — the hazard a supervised run could otherwise miss (`changed=N` would show it, but only if someone's watching) is closed at the parser, not documented as a thing to notice.
 - **T10 (optional, later) — mute**: suppress notifications for a chosen window without stopping the supervisor.
   **Build after T8's 24h trial, not before.** The trial is the data that says whether mute is needed, which durations matter, and what should bypass one. If the trial yields four messages a day the answer is "not needed"; if it yields forty, the interesting question is why, and a mute button would be treating the symptom.
 

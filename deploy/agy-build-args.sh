@@ -19,7 +19,7 @@
 # installer parses this exact manifest with sed, so this reuses that
 # approach rather than adding a dependency (C1: stdlib/no-new-deps in the
 # runtime path; this is the one ops-side bash artifact already sanctioned
-# for install-host.sh, and the same reasoning applies here).
+# for install.sh, and the same reasoning applies here).
 set -eu
 
 MANIFEST_BASE="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"

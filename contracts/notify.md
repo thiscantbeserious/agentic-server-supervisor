@@ -284,7 +284,7 @@ var (
 
 ### N.8 Tracked config files
 
-`deploy/apprise/sentinel.cfg` (Apprise TEXT format, `tgram://` targets) and `deploy/mailrise/mailrise.conf` (recipients `omv`, `smartd`, `zed`, `sentinel`, `listen 0.0.0.0:8025`, `tls: mode: off`, mandatory `smtp.auth.basic`) contain no code and are not ported. Both are rendered on the host by `install-host.sh` into `.runtime/` (0600, gitignored); the sentinel container never sees a Telegram token.
+`deploy/apprise/sentinel.cfg` (Apprise TEXT format, `tgram://` targets) and `deploy/mailrise/mailrise.conf` (recipients `omv`, `smartd`, `zed`, `sentinel`, `listen 0.0.0.0:8025`, `tls: mode: off`, mandatory `smtp.auth.basic`) contain no code and are not ported. Both are rendered on the host by `install.sh` into `.runtime/` (0600, gitignored); the sentinel container never sees a Telegram token.
 
 ### N.9 Test contract — `internal/notify/notify_test.go` (+ `render_test.go`)
 

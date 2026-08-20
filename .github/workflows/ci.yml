@@ -365,7 +365,7 @@ jobs:
     # image builds and starts, not that C1-C13 pass or that the live
     # notify path works. container and e2e are build's siblings (both
     # `needs: test` only), so without listing them here a broken
-    # install-host.sh or a broken notify path could fail red while the
+    # install.sh or a broken notify path could fail red while the
     # digests still publish and this job still tags them — the tag is
     # the thing an operator pulls, so it is the one place that must not
     # move on unverified digests. lint (actionlint) is included for the

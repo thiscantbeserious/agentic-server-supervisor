@@ -306,7 +306,7 @@ func pick(want, val string) string {
 // more likely to be a real regression than an environment limitation —
 // and every one of C12's five families shares the same "cannot run a
 // throwaway container" preamble, so treating it as routine would let a
-// single hiccup skip all of install-host.sh's own coverage and still
+// single hiccup skip all of install.sh's own coverage and still
 // report the job green.
 func skipUnlessCI(t *testing.T, format string, args ...any) {
 	t.Helper()
@@ -1230,13 +1230,13 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 	logPass(t, "PASS C11")
 }
 
-// --- C12: install-host.sh idempotency ---
+// --- C12: install.sh idempotency ---
 
 func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	root := repoRoot(t)
 	// A throwaway Debian container with apt-get + systemd, network access
 	// for real package installs, is what "throwaway rootfs" means here —
-	// this test never runs install-host.sh against a real host.
+	// this test never runs install.sh against a real host.
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
 		skipUnlessCI(t, "C12: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
@@ -1245,7 +1245,7 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	name := "sentinel-c12-test"
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"-v", root+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
 		skipUnlessCI(t, "C12: could not start throwaway container: %s", errOut)
@@ -1264,7 +1264,7 @@ func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
 	// prepping with 999 would pass identically either way.
 	const testJournalGID = "7777"
 	prep := `set -e
-cp -r /work /root/deploy
+cp -r /work /root/repo
 apt-get update -qq
 apt-get install -y -qq systemd >/dev/null 2>&1 || true
 ` +
@@ -1276,29 +1276,29 @@ apt-get install -y -qq systemd >/dev/null 2>&1 || true
 		// Force it to the test gid with groupmod, falling back to
 		// groupadd only if the group somehow does not exist yet.
 		`groupmod -g ` + testJournalGID + ` systemd-journal 2>/dev/null || groupadd -g ` + testJournalGID + ` systemd-journal
-printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/deploy/.env
-chmod +x /root/deploy/install-host.sh`
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/repo/.env
+chmod +x /root/repo/install.sh`
 	if out, errOut, code := exec_(prep); code != 0 {
 		skipUnlessCI(t, "C12: throwaway container prep failed: %s %s", out, errOut)
 	}
 
 	// --dry-run changes nothing.
-	before, _, _ := exec_("find /root/deploy -type f -newer /root/deploy/install-host.sh 2>/dev/null | wc -l")
-	if out, errOut, code := exec_("cd /root/deploy && ./install-host.sh --dry-run --env-file /root/deploy/.env"); code != 0 {
+	before, _, _ := exec_("find /root/repo -type f -newer /root/repo/install.sh 2>/dev/null | wc -l")
+	if out, errOut, code := exec_("cd /root/repo && ./install.sh --dry-run --env-file /root/repo/.env"); code != 0 {
 		t.Errorf("FAIL C12: --dry-run exit code = %d: %s %s", code, out, errOut)
 	}
-	after, _, _ := exec_("find /root/deploy -type f -newer /root/deploy/install-host.sh 2>/dev/null | wc -l")
+	after, _, _ := exec_("find /root/repo -type f -newer /root/repo/install.sh 2>/dev/null | wc -l")
 	if strings.TrimSpace(before) != strings.TrimSpace(after) {
 		t.Errorf("FAIL C12: --dry-run modified files (before=%s after=%s)", before, after)
 	}
 
 	// Two consecutive real runs.
 	hashFiles := func() string {
-		h, _, _ := exec_("sha256sum /etc/msmtprc /etc/smartd.conf /root/deploy/.env 2>/dev/null | sort")
+		h, _, _ := exec_("sha256sum /etc/msmtprc /etc/smartd.conf /root/repo/.env 2>/dev/null | sort")
 		return h
 	}
 
-	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	out1, errOut1, code1 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	if code1 != 0 && code1 != 75 {
 		// 75 = transient (package/service failure) — acceptable in a
 		// throwaway container without a real init system; still assert
@@ -1331,7 +1331,7 @@ chmod +x /root/deploy/install-host.sh`
 		skipUnlessCI(t, "C12: msmtp did not actually install in this environment (no network reachable from the throwaway container?): %s", out)
 	}
 
-	out2, errOut2, code2 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	out2, errOut2, code2 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	hash2 := hashFiles()
 
 	if hash1 != hash2 {
@@ -1350,15 +1350,15 @@ chmod +x /root/deploy/install-host.sh`
 	// Proves gid DISCOVERY, not a hardcoded 999: the prep above set the
 	// systemd-journal group to 7777, and step 6 must have written that
 	// exact value, not a constant.
-	envContent, _, _ := exec_("cat /root/deploy/.env")
+	envContent, _, _ := exec_("cat /root/repo/.env")
 	if !strings.Contains(envContent, "JOURNAL_GID="+testJournalGID) {
-		t.Errorf("FAIL C12: /root/deploy/.env does not contain JOURNAL_GID=%s (got: %s) — gid must be DISCOVERED via getent, never hardcoded", testJournalGID, envContent)
+		t.Errorf("FAIL C12: /root/repo/.env does not contain JOURNAL_GID=%s (got: %s) — gid must be DISCOVERED via getent, never hardcoded", testJournalGID, envContent)
 	}
 	logPass(t, "PASS C12")
 }
 
 // runCmdStdin is runCmd with a caller-supplied stdin — needed to pipe
-// install-host.sh's own content into `docker exec -i ... bash -s --`,
+// install.sh's own content into `docker exec -i ... bash -s --`,
 // the exact shape of `curl -fsSL URL | sudo bash`: stdin carries the
 // script itself, not a place a human answer could come from.
 func runCmdStdin(t *testing.T, timeout time.Duration, stdin io.Reader, name string, args ...string) (stdout, stderr string, code int) {
@@ -1382,7 +1382,7 @@ func runCmdStdin(t *testing.T, timeout time.Duration, stdin io.Reader, name stri
 	return outBuf.String(), errBuf.String(), code
 }
 
-// runInstallHostPiped pipes deploy/install-host.sh's own content into a
+// runInstallHostPiped pipes install.sh's own content into a
 // `docker exec -i` (no -t: no pty, no controlling terminal — this is
 // what curl | bash looks like) `bash -s -- ARGS` inside CONTAINER,
 // exactly reproducing the target invocation rather than testing the
@@ -1390,9 +1390,9 @@ func runCmdStdin(t *testing.T, timeout time.Duration, stdin io.Reader, name stri
 func runInstallHostPiped(t *testing.T, container string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	root := repoRoot(t)
-	f, err := os.Open(filepath.Join(root, "deploy", "install-host.sh"))
+	f, err := os.Open(filepath.Join(root, "install.sh"))
 	if err != nil {
-		t.Fatalf("FAIL: opening deploy/install-host.sh: %v", err)
+		t.Fatalf("FAIL: opening install.sh: %v", err)
 	}
 	defer f.Close()
 	dockerArgs := append([]string{"exec", "-i", container, "bash", "-s", "--"}, args...)
@@ -1413,7 +1413,7 @@ func startC12Container(t *testing.T, name string) {
 	}
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"-v", root+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
 		skipUnlessCI(t, "C12 (stack): could not start throwaway container: %s", errOut)
@@ -1528,7 +1528,7 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	}
 
 	// Plain layout: no /docker-compose on this host at all.
-	outPlain, _, codePlain := exec_("/work/install-host.sh --dry-run 2>&1")
+	outPlain, _, codePlain := exec_("/work/install.sh --dry-run 2>&1")
 	if codePlain != 0 {
 		t.Fatalf("FAIL C12 (stack layout): plain --dry-run exit=%d: %s", codePlain, outPlain)
 	}
@@ -1542,7 +1542,7 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	// OMV layout: /docker-compose exists, and the proposed default sits
 	// directly inside it.
 	exec_("mkdir -p /docker-compose")
-	outOMV, _, codeOMV := exec_("/work/install-host.sh --dry-run 2>&1")
+	outOMV, _, codeOMV := exec_("/work/install.sh --dry-run 2>&1")
 	if codeOMV != 0 {
 		t.Fatalf("FAIL C12 (stack layout): omv --dry-run exit=%d: %s", codeOMV, outOMV)
 	}
@@ -1559,7 +1559,7 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	// even with /docker-compose present elsewhere on the host — the
 	// directory itself decides, not the host's mere possession of an
 	// OMV installation.
-	outElsewhere, _, codeElsewhere := exec_("/work/install-host.sh --dry-run --stack-dir /opt/sentinel 2>&1")
+	outElsewhere, _, codeElsewhere := exec_("/work/install.sh --dry-run --stack-dir /opt/sentinel 2>&1")
 	if codeElsewhere != 0 {
 		t.Fatalf("FAIL C12 (stack layout): elsewhere --dry-run exit=%d: %s", codeElsewhere, outElsewhere)
 	}
@@ -1575,7 +1575,7 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	// compose plugin, which enumerates by real path, never sees the
 	// stack at all.
 	exec_("ln -sfn /docker-compose /srv/compose")
-	outSymlinked, _, codeSymlinked := exec_("/work/install-host.sh --dry-run --stack-dir /srv/compose/sentinel 2>&1")
+	outSymlinked, _, codeSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose/sentinel 2>&1")
 	if codeSymlinked != 0 {
 		t.Fatalf("FAIL C12 (stack layout): symlinked --dry-run exit=%d: %s", codeSymlinked, outSymlinked)
 	}
@@ -1591,11 +1591,11 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	// plain — that would drop a stray docker-compose.yml into the
 	// directory where OMV enumerates every stack. Checked against both
 	// the literal path and a symlink resolving to it.
-	outRoot, _, codeRoot := exec_("/work/install-host.sh --dry-run --stack-dir /docker-compose 2>&1")
+	outRoot, _, codeRoot := exec_("/work/install.sh --dry-run --stack-dir /docker-compose 2>&1")
 	if codeRoot != 64 {
 		t.Errorf("FAIL C12 (stack layout): --stack-dir /docker-compose (the root) exit=%d, want 64: %s", codeRoot, outRoot)
 	}
-	outRootSymlinked, _, codeRootSymlinked := exec_("/work/install-host.sh --dry-run --stack-dir /srv/compose 2>&1")
+	outRootSymlinked, _, codeRootSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose 2>&1")
 	if codeRootSymlinked != 64 {
 		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose (symlink to the root) exit=%d, want 64: %s", codeRootSymlinked, outRootSymlinked)
 	}
@@ -1614,7 +1614,7 @@ func TestContainer_C12_StackDryRunSummaryHonest(t *testing.T) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
 
-	out, _, code := exec_("/work/install-host.sh --dry-run --stack-dir /opt/sentinel 2>&1")
+	out, _, code := exec_("/work/install.sh --dry-run --stack-dir /opt/sentinel 2>&1")
 	if code != 0 {
 		t.Fatalf("FAIL C12 (stack dry-run summary): exit=%d: %s", code, out)
 	}
@@ -1653,7 +1653,7 @@ func TestContainer_C12_StackEnvFileBackCompat(t *testing.T) {
 	}
 	exec_("mkdir -p /tmp/oldstyle && printf 'MAILRISE_SMTP_USER=u\\nMAILRISE_SMTP_PASS=p\\n' > /tmp/oldstyle/.env")
 
-	out1, errOut1, code1 := exec_("/work/install-host.sh --env-file /tmp/oldstyle/.env 2>&1")
+	out1, errOut1, code1 := exec_("/work/install.sh --env-file /tmp/oldstyle/.env 2>&1")
 	if code1 != 0 && code1 != 75 {
 		t.Fatalf("FAIL C12 (stack env-file back-compat): exit=%d (want 0 or 75, transient in this rootless test env): %s %s", code1, out1, errOut1)
 	}
@@ -1677,8 +1677,8 @@ func TestContainer_C12_StackMutualExclusion(t *testing.T) {
 		skipUnlessCI(t, "C12 (stack mutual exclusion): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 	out, errOut, code = runCmd(t, 30*time.Second, dockerBin(), "run", "--rm",
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
-		"debian:trixie-slim", "/work/install-host.sh", "--env-file", "/tmp/x", "--stack-dir", "/tmp/y")
+		"-v", root+":/work:ro",
+		"debian:trixie-slim", "/work/install.sh", "--env-file", "/tmp/x", "--stack-dir", "/tmp/y")
 	if code != 64 {
 		t.Fatalf("FAIL C12 (stack mutual exclusion): exit=%d, want 64: %s %s", code, out, errOut)
 	}
@@ -1689,7 +1689,7 @@ func TestContainer_C12_StackMutualExclusion(t *testing.T) {
 // terminal, the three prompts are answered and the values land exactly
 // where they belong — sentinel.env, and mailrise.conf's two targets
 // (sentinel and omv both address the same Telegram chat). `script`
-// allocates the pty; install-host.sh's own content still goes to the
+// allocates the pty; install.sh's own content still goes to the
 // child's stdin exactly as `curl | bash` would, decoupled from the
 // terminal `read -rs`/`read -r` reads from at /dev/tty.
 func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
@@ -1708,7 +1708,7 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 	const smtpPass = "test-smtp-secret-value"
 	answers := token + "\n" + chat + "\n" + smtpPass + "\n"
 	driveCmd := fmt.Sprintf(
-		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install-host.sh" /tmp/script.log`,
+		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install.sh" /tmp/script.log`,
 		shellQuote(answers),
 	)
 	outI, errOutI, codeI := exec_(driveCmd)
@@ -1752,7 +1752,7 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 // PASS only escape this exact gap by luck (compute_mail_status re-reads
 // the env file independently and catches a blank password on its own);
 // TELEGRAM_BOT_TOKEN/CHAT_ID have no such second check, and compose
-// does not :?-guard them. An install-host.sh that let this through
+// does not :?-guard them. An install.sh that let this through
 // would report success while producing a stack that never delivers a
 // notification and, once mailrise.conf's bind-mount target is missing,
 // crash-loops mailrise outright.
@@ -1772,7 +1772,7 @@ func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
 	const smtpPass = "test-smtp-secret-value"
 	answers := "\n\n" + smtpPass + "\n"
 	driveCmd := fmt.Sprintf(
-		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install-host.sh" /tmp/script2.log`,
+		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install.sh" /tmp/script2.log`,
 		shellQuote(answers),
 	)
 	out, errOut, code := exec_(driveCmd)
@@ -1819,7 +1819,7 @@ func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
 	name := "sentinel-c12-dup-test"
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"-v", root+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
 		skipUnlessCI(t, "C12 (duplicate blocks): could not start throwaway container: %s", errOut)
@@ -1834,12 +1834,12 @@ func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
 	const endMark = "# <<< agentic-server-supervisor (managed) <<<"
 
 	prep := `set -e
-cp -r /work /root/deploy
+cp -r /work /root/repo
 apt-get update -qq
 apt-get install -y -qq systemd >/dev/null 2>&1 || true
 groupadd -g 7777 systemd-journal 2>/dev/null || true
-printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/deploy/.env
-chmod +x /root/deploy/install-host.sh
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/repo/.env
+chmod +x /root/repo/install.sh
 cat > /etc/smartd.conf <<'SMARTD_EOF'
 ` + beginMark + `
 DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /usr/share/smartmontools/smartd-runner
@@ -1864,7 +1864,7 @@ SMARTD_EOF`
 		t.Fatalf("setup guard: /etc/smartd.conf must start with 2 managed blocks, got %d", got)
 	}
 
-	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	out1, errOut1, code1 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	if code1 != 0 && code1 != 75 {
 		t.Logf("first run exit=%d (non-fatal for this check): %s %s", code1, out1, errOut1)
 	}
@@ -1876,7 +1876,7 @@ SMARTD_EOF`
 	}
 	hash1, _, _ := exec_("sha256sum /etc/smartd.conf")
 
-	out2, _, _ := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	out2, _, _ := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	if !strings.Contains(out2, "step4 /etc/smartd.conf: already converged") {
 		t.Errorf("FAIL C12 (duplicate blocks): second run did not report convergence: %s", out2)
 	}
@@ -1911,7 +1911,7 @@ func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
 	name := "sentinel-c12-nocreds-test"
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"-v", root+":/work:ro",
 		"debian:trixie-slim", "sleep", "600")
 	if code != 0 {
 		skipUnlessCI(t, "C12 (mail creds missing): could not start throwaway container: %s", errOut)
@@ -1927,11 +1927,11 @@ func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
 	// case, deliberately distinct from MUST 1's package-absent test.
 	// .env is intentionally empty: no MAILRISE_SMTP_USER/PASS at all.
 	prep := `set -e
-cp -r /work /root/deploy
+cp -r /work /root/repo
 apt-get update -qq
 apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1 || true
-: > /root/deploy/.env
-chmod +x /root/deploy/install-host.sh
+: > /root/repo/.env
+chmod +x /root/repo/install.sh
 mkdir -p /etc/zfs/zed.d`
 	if out, errOut, code := exec_(prep); code != 0 {
 		skipUnlessCI(t, "C12 (mail creds missing): throwaway container prep failed: %s %s", out, errOut)
@@ -1940,7 +1940,7 @@ mkdir -p /etc/zfs/zed.d`
 		skipUnlessCI(t, "C12 (mail creds missing): msmtp did not actually install in this environment: %s", out)
 	}
 
-	out1, errOut1, code1 := exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
+	out1, errOut1, code1 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	if code1 != 78 {
 		t.Errorf("FAIL C12 (mail creds missing): exit code = %d, want 78 (required ops input missing, not 75's transient/retry): %s %s", code1, out1, errOut1)
 	}
@@ -1985,7 +1985,7 @@ func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
 	name := "sentinel-c12c-test"
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", filepath.Join(root, "deploy")+":/work:ro",
+		"-v", root+":/work:ro",
 		"debian:trixie-slim", "sleep", "300")
 	if code != 0 {
 		skipUnlessCI(t, "C12c: could not start throwaway container: %s", errOut)
@@ -1997,37 +1997,37 @@ func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
 	}
 
 	prep := `set -e
-cp -r /work /root/deploy
+cp -r /work /root/repo
 apt-get update -qq
 apt-get install -y -qq systemd >/dev/null 2>&1 || true
 groupmod -g 7777 systemd-journal 2>/dev/null || groupadd -g 7777 systemd-journal
-: > /root/deploy/.env
-chown 1000:1000 /root/deploy/.env
-chmod 600 /root/deploy/.env
-chmod +x /root/deploy/install-host.sh
+: > /root/repo/.env
+chown 1000:1000 /root/repo/.env
+chmod 600 /root/repo/.env
+chmod +x /root/repo/install.sh
 ! getent passwd 1000 >/dev/null 2>&1` // the whole point: uid 1000 must have NO passwd entry
 	if out, errOut, code := exec_(prep); code != 0 {
 		skipUnlessCI(t, "C12c: throwaway container prep failed (or uid 1000 unexpectedly has a passwd entry in this base image): %s %s", out, errOut)
 	}
 
-	out, errOut, _ = exec_("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env")
-	envContent, _, _ := exec_("cat /root/deploy/.env")
+	out, errOut, _ = exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	envContent, _, _ := exec_("cat /root/repo/.env")
 	if !strings.Contains(envContent, "JOURNAL_GID=7777") {
-		t.Fatalf("FAIL C12c: JOURNAL_GID=7777 missing from .env after install-host.sh against an unmapped-uid-owned .env (stdout=%q stderr=%q .env=%q)", out, errOut, envContent)
+		t.Fatalf("FAIL C12c: JOURNAL_GID=7777 missing from .env after install.sh against an unmapped-uid-owned .env (stdout=%q stderr=%q .env=%q)", out, errOut, envContent)
 	}
-	ownerAfter, _, _ := exec_("stat -c '%u:%g' /root/deploy/.env")
+	ownerAfter, _, _ := exec_("stat -c '%u:%g' /root/repo/.env")
 	if strings.TrimSpace(ownerAfter) != "1000:1000" {
 		t.Errorf("FAIL C12c: .env owner changed to %q, want preserved 1000:1000", strings.TrimSpace(ownerAfter))
 	}
 	logPass(t, "PASS C12c (JOURNAL_GID written and owner preserved despite no /etc/passwd entry for the owning uid)")
 }
 
-// TestContainer_C12_MsmtpDelivery: step3 of install-host.sh must produce
+// TestContainer_C12_MsmtpDelivery: step3 of install.sh must produce
 // a /etc/msmtprc that REAL msmtp can actually authenticate and deliver
 // through, not merely one containing the string "auth on". Uses a real
 // msmtp binary, a real SMTP server requiring AUTH, and the exact config
 // file the script writes — asserting the stub actually received an
-// authenticated delivery, not that install-host.sh exited 0.
+// authenticated delivery, not that install.sh exited 0.
 func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
@@ -2047,7 +2047,7 @@ func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	runArgs := []string{"run", "-d", "--name", name,
 		"--add-host", "host.docker.internal:host-gateway",
-		"-v", filepath.Join(root, "deploy") + ":/work:ro",
+		"-v", root + ":/work:ro",
 		"debian:trixie-slim", "sleep", "300"}
 	if _, errOut, code := runCmd(t, 60*time.Second, dockerBin(), runArgs...); code != 0 {
 		skipUnlessCI(t, "C12b: could not start throwaway container: %s", errOut)
@@ -2059,11 +2059,11 @@ func TestContainer_C12_MsmtpDelivery(t *testing.T) {
 	}
 
 	prep := `set -e
-cp -r /work /root/deploy
+cp -r /work /root/repo
 apt-get update -qq
 apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1
-chmod +x /root/deploy/install-host.sh
-printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/deploy/.env`
+chmod +x /root/repo/install.sh
+printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/repo/.env`
 	if out, errOut, code := exec_(prep); code != 0 {
 		skipUnlessCI(t, "C12b: throwaway container prep failed (msmtp package unavailable?): %s %s", out, errOut)
 	}
@@ -2074,9 +2074,9 @@ printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/de
 	// resolver in THIS environment actually answers is the one that
 	// matters.
 	for _, alias := range []string{"host.containers.internal", "host.docker.internal"} {
-		installCmd := fmt.Sprintf("cd /root/deploy && ./install-host.sh --env-file /root/deploy/.env --mailrise-host %s --mailrise-port %d", alias, stub.port())
+		installCmd := fmt.Sprintf("cd /root/repo && ./install.sh --env-file /root/repo/.env --mailrise-host %s --mailrise-port %d", alias, stub.port())
 		if out, errOut, code := exec_(installCmd); code != 0 && code != 75 {
-			t.Logf("C12b: install-host.sh with alias %s exited %d (skipping this alias): %s %s", alias, code, out, errOut)
+			t.Logf("C12b: install.sh with alias %s exited %d (skipping this alias): %s %s", alias, code, out, errOut)
 			continue
 		}
 

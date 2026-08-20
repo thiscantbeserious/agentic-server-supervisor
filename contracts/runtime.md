@@ -2,7 +2,7 @@
 
 > Conventions C1–C9 in [CONTRACTS.md](../CONTRACTS.md) are binding and win on conflict. Read them first.
 
-Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install-host.sh`, `.github/workflows/ci.yml`. The tick orchestration's own table tests live in `internal/runtime` and are re-verified inside the built image here.
+Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install.sh`, `.github/workflows/ci.yml`. The tick orchestration's own table tests live in `internal/runtime` and are re-verified inside the built image here.
 
 Everything this contract says obeys the Conventions; it adds only what the Conventions leave to the runtime.
 
@@ -277,7 +277,7 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     user: "10001:10001"
-    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install-host.sh}"]
+    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install.sh}"]
     pids_limit: 256
     mem_limit: 512m
     stop_grace_period: 15s
@@ -383,13 +383,13 @@ Invariants asserted by the container test: no `ports:` on `sentinel`; every bind
 
 ---
 
-### R5. `deploy/install-host.sh`
+### R5. `install.sh`
 
-`// ponytail: kept as a single bash script rather than promoted to a Go subcommand — it runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to bam just to write a handful of config files is more moving parts than an idempotent script. Upgrade path: a "sentinel install-host" subcommand if the host part ever grows.`
+`// ponytail: kept as a single bash script rather than promoted to a Go subcommand — it runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to bam just to write a handful of config files is more moving parts than an idempotent script. Upgrade path: a "sentinel install" subcommand if the host part ever grows.`
 
 **CLI**
 ```
-install-host.sh [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT] [--env-file PATH] [--stack-dir PATH] [--ref REF] [-h|--help]
+install.sh [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT] [--env-file PATH] [--stack-dir PATH] [--ref REF] [-h|--help]
 ```
 
 | Flag | Default | Meaning |
@@ -404,7 +404,7 @@ install-host.sh [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PO
 
 Requires root (`EUID=0`), else exit `77`. Requires Debian/`apt-get` + `systemctl`, else exit `69`.
 
-**Step 0 (new): stack creation, only when `--env-file` was not given.** The target invocation is `curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash` — nothing copied onto the host first, prompting interactively for what only a human can supply. `--env-file` stays exactly as it always has: given explicitly, Step 0 does not run at all, and the script behaves as every prior version did against that one file. This is the deliberate compatibility seam — the fetch-and-prompt path is additive, not a replacement for a caller who already has a filled env file.
+**Step 0 (new): stack creation, only when `--env-file` was not given.** The target invocation is `curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash` — nothing copied onto the host first, prompting interactively for what only a human can supply. `--env-file` stays exactly as it always has: given explicitly, Step 0 does not run at all, and the script behaves as every prior version did against that one file. This is the deliberate compatibility seam — the fetch-and-prompt path is additive, not a replacement for a caller who already has a filled env file.
 
 Where the stack lives: `--stack-dir` if given (every mode, always). Otherwise a default is detected — `/docker-compose/sentinel` if `/docker-compose` exists (the OpenMediaVault compose plugin's root), `/opt/sentinel` otherwise — and offered interactively (Enter accepts it) when a controlling terminal is available. Under `--check`/`--dry-run`, which must never prompt, the detected default is used silently and reported. With no `--stack-dir`, no terminal, and a real run, the script refuses outright: `exit 78` before touching the host at all, rather than guessing a directory to write into.
 
@@ -631,7 +631,7 @@ func Health(cfg *config.Config) (int, error)
 | C9 | `sentinel tick` with `TICK_INTERVAL=abc` ⇒ `78`; with `STATE_DIR` unwritable ⇒ `69`; with neither journal dir readable ⇒ `78`; `--loop --once` ⇒ `64`; a positional argument ⇒ `64` | C2 exit codes |
 | C10 | `docker compose config` shows for `sentinel`: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, `user: "10001:10001"`, no `ports`, no `privileged`, no `cap_add`, every bind `read_only: true`, no `/config` mount, no `TELEGRAM_*`, and **every** C3 variable present | security model §4 |
 | C11 | `SIGTERM` to a running container ⇒ exit `0` within 15 s; `/state/heartbeat` mtime younger than `3 × TICK_INTERVAL`; `sentinel health` exits `0` | R2 shutdown, healthcheck |
-| C12 | `install-host.sh --dry-run` on a throwaway rootfs changes nothing; two consecutive real runs yield identical sha256 for every touched file and the second prints `changed=0` and restarts no service | R5 idempotency |
+| C12 | `install.sh --dry-run` on a throwaway rootfs changes nothing; two consecutive real runs yield identical sha256 for every touched file and the second prints `changed=0` and restarts no service | R5 idempotency |
 | C13 | `actionlint` passes; the metadata step yields both `latest` and a full-SHA tag; the published image is pulled and `--version` runs | §2.9, "pull from GHCR works" |
 
 **Open ops inputs required for this suite to pass:** `AGY_URL` + `AGY_SHA512` (run `deploy/agy-build-args.sh` to resolve both from the vendor manifest), `AGY_CREDENTIALS_DIR` on the host, `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS`, and whether the GHCR package is public (else a one-time `docker login ghcr.io` on `bam`).

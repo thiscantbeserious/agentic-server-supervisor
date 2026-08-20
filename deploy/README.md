@@ -22,7 +22,7 @@ unreachable, and when the analyzer is falling back.
 The normal way in — nothing copied onto the host first:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
 ```
 
 This installs the host packages (rasdaemon, msmtp, smartd/ZED wiring — see
@@ -40,15 +40,15 @@ idempotent: it only fills in what is still missing.
 Pin a specific version instead of `main` with `--ref`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh | sudo bash -s -- --ref v1.2.3
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --ref v1.2.3
 ```
 
-**If you fetch the script itself from a tag, pass that same tag as `--ref`.** A `curl | bash` stream has no memory of where it came from — the script cannot infer its own ref — so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install-host.sh` from `v1.2.3` without also passing `--ref v1.2.3` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary — worth checking it reads what you expect.
+**If you fetch the script itself from a tag, pass that same tag as `--ref`.** A `curl | bash` stream has no memory of where it came from — the script cannot infer its own ref — so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install.sh` from `v1.2.3` without also passing `--ref v1.2.3` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary — worth checking it reads what you expect.
 
 `--check` and `--dry-run` never prompt and never write — safe to run
 repeatedly to preview what would happen, including where the stack would
 be created and which layout it would choose. Full flag reference:
-`install-host.sh --help`, or `contracts/runtime.md` R5.
+`install.sh --help`, or `contracts/runtime.md` R5.
 
 **Read the script first if you want to** — a `curl | sudo bash` that
 installs packages and writes to `/etc` is a reasonable thing to want to
@@ -56,9 +56,9 @@ read before running as root. It is a plain, gitignore-respecting bash
 script; nothing about it requires the pipe:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/deploy/install-host.sh -o install-host.sh
-less install-host.sh
-sudo bash install-host.sh --ref main   # same behavior, run from disk
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh -o install.sh
+less install.sh
+sudo bash install.sh --ref main   # same behavior, run from disk
 ```
 
 ## Setup (manual — filling in `.env` by hand instead of being prompted)
@@ -127,7 +127,7 @@ The Setup steps above still apply — `cp`, `chmod`, edit, `docker compose
 up -d` — with three OMV-specific constraints:
 
 **`--env-file` must target the real env file, never the `.env` symlink.**
-`install-host.sh` writes `JOURNAL_GID=` via `mktemp` then `install`, and
+`install.sh` writes `JOURNAL_GID=` via `mktemp` then `install`, and
 `install` replaces its destination rather than following it. Pointed at
 `.env`, it would silently turn the symlink into a regular file, leaving a
 stale `<stack>.env` beside a now-divorced `.env` — the OMV plugin and Docker

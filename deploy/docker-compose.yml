@@ -23,7 +23,7 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     user: "10001:10001"
-    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install-host.sh}"]
+    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install.sh}"]
     pids_limit: 256
     mem_limit: 512m
     stop_grace_period: 15s

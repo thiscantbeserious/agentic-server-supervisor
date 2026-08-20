@@ -247,6 +247,6 @@ The per-component contracts live under [contracts/](contracts/) — an implement
 | T4 analyze | [contracts/analyze.md](contracts/analyze.md) |
 | T5 state | [contracts/state.md](contracts/state.md) |
 | T6 notify + runtime | [contracts/notify.md](contracts/notify.md), [contracts/runtime.md](contracts/runtime.md) |
-| T7 image/CI/install | [contracts/runtime.md](contracts/runtime.md) (Dockerfile, compose, install-host.sh) |
+| T7 image/CI/install | [contracts/runtime.md](contracts/runtime.md) (Dockerfile, compose, install.sh) |
 
 Where a component contract disagrees with this file, this file wins (see top).
