@@ -2,7 +2,7 @@
 
 > Conventions C1–C9 in [CONTRACTS.md](../CONTRACTS.md) are binding and win on conflict. Read them first.
 
-Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install-host.sh`, `.github/workflows/ci.yml`. TODO **T7**, except the tick orchestration which lands in **T6** (`internal/runtime` table tests) and is re-verified inside the image in T7.
+Scope: `deploy/Dockerfile`, the `sentinel tick` and `sentinel health` subcommands (loop + orchestration, replacing `entrypoint.sh` + `tick.sh`), `internal/config`, `internal/logging`, the `sentinel` service in `docker-compose.yml`, `install-host.sh`, `.github/workflows/ci.yml`. The tick orchestration's own table tests live in `internal/runtime` and are re-verified inside the built image here.
 
 Everything this contract says obeys the Conventions; it adds only what the Conventions leave to the runtime.
 
@@ -41,7 +41,7 @@ That manifest publishes **sha512 only**. Requiring a sha256 forced the operator 
 
 **The tarball does NOT contain a file named `agy`.** Verified against the real artifact 2026-08-19 (version 1.1.15): the archive contains a single ELF x86-64 executable named **`antigravity`**, ~205 MB. The vendor installer extracts it and *installs* it as `agy` (`BINARY_PATH="$TARGET_DIR/agy"`), which is why the installed binary carries that name — and why an implementation written against a synthetic fixture named `agy` builds cleanly and then fails on the real artifact. **The Dockerfile must locate the executable in the tarball and install it as `/usr/local/bin/agy`, not search for a file already called `agy`.**
 
-**A multi-arch push produces a manifest list.** Each build job smoke-tests its own image before the list exists, so the ambiguity a manifest list creates — `docker run` being silently correct on every host, which is how an untested architecture stays untested quietly — never arises: there is no shared tag to resolve at that point, only a digest belonging to one platform. `merge` then verifies the assembled list advertises both. Note for T8: `docker compose pull` on `bam` selects amd64 from the list rather than pulling a single-architecture image — same result, different mechanism.
+**A multi-arch push produces a manifest list.** Each build job smoke-tests its own image before the list exists, so the ambiguity a manifest list creates — `docker run` being silently correct on every host, which is how an untested architecture stays untested quietly — never arises: there is no shared tag to resolve at that point, only a digest belonging to one platform. `merge` then verifies the assembled list advertises both. On the rollout host, `docker compose pull` selects amd64 from the list rather than pulling a single-architecture image — same result, different mechanism.
 
 **The image is built for `linux/amd64` AND `linux/arm64`, and both must work.** The vendor ships a distinct artifact per architecture and both are verified:
 
@@ -78,7 +78,7 @@ Without the builder pin, buildx runs stage 1 once **per platform**, so the non-n
 **Stage 1 — builder (`${GO_IMAGE}`)**
 - `COPY go.mod go.sum ./` → `go mod download` (own layer, cached).
 - `COPY . .`
-- `gofmt -l .` (must be empty), `go vet ./...`, `go test ./...` — any failure fails the build. This is where the T6 tables gate the image.
+- `gofmt -l .` (must be empty), `go vet ./...`, `go test ./...` — any failure fails the build. This is where `internal/runtime`'s own table tests gate the image.
 - `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/sentinel ./cmd/sentinel`
 - `agy`: select the URL/digest pair matching `TARGETARCH`, download it, verify with `sha512sum -c`, unpack, locate the **single executable** in the archive (by permission bit, never by filename — the vendor tarball ships it as `antigravity` on both architectures), and place it at `/out/agy`. Zero or more than one executable candidate ⇒ fail the build naming what was found.
 
@@ -127,7 +127,7 @@ sentinel health
 
    **`$AGY_HOME` is a persistent named volume, NOT tmpfs.** agy refreshes its OAuth token as it runs; on tmpfs that refresh is lost at every restart, and headless mode **cannot** re-authenticate — it prints an OAuth URL nobody will ever see and exits non-zero. The analyzer would then be permanently down after the first container restart, with the raw-alert path as the only surviving coverage. A `docker compose restart` must not cost the LLM stage.
 
-   **Seeding from `$AGY_SECRET_DIR` is an UNVERIFIED assumption and T8 must prove it empirically.** Measured on macOS 2026-08-16: agy's session is bound to the OS keychain (`svce=gemini`, `acct=antigravity`), and copying the entire `~/.gemini` tree into a fresh `HOME` did **not** restore authentication — only the original `HOME` worked. Linux has no keychain, so file-based credentials are expected to be portable there, but "expected" is not "verified". Before rollout, T8 runs the container with a seeded `$AGY_HOME` and confirms a real analysis (`status` from a live call, non-zero `usage.input_tokens`) rather than a fallback. If seeding does not work on Linux either, the LLM stage cannot run unattended and that must be known before the 24h trial, not during it.
+   **Seeding from `$AGY_SECRET_DIR` is an UNVERIFIED assumption that rollout must prove empirically.** Measured on macOS 2026-08-16: agy's session is bound to the OS keychain (`svce=gemini`, `acct=antigravity`), and copying the entire `~/.gemini` tree into a fresh `HOME` did **not** restore authentication — only the original `HOME` worked. Linux has no keychain, so file-based credentials are expected to be portable there, but "expected" is not "verified". Before rollout, the container is run with a seeded `$AGY_HOME` and must show a real analysis (`status` from a live call, non-zero `usage.input_tokens`) rather than a fallback. If seeding does not work on Linux either, the LLM stage cannot run unattended and that must be known before the 24h trial, not during it.
 
    `// ponytail: agy-home is a named volume because a lost token refresh means the analyzer never comes back — headless cannot re-auth.`
 5. `MkdirAll` of `history`, `active-alerts`, `outbox`, `raw-alerts`, `deep-queue` under `$STATE_DIR`, mode `0700`.
@@ -261,7 +261,7 @@ Reads `$STATE_DIR/**` and the ro host mounts of C4. Writes **only**: `$STATE_DIR
 
 ### R4. `deploy/docker-compose.yml` — service `sentinel`
 
-Only this service is in scope; `apprise` and `mailrise` come from T1 and are referenced, not redefined.
+Only this service is in scope; `apprise` and `mailrise` are defined by the notification stack and are referenced here, not redefined.
 
 ```yaml
 services:
@@ -374,7 +374,7 @@ Notes that are contract, not commentary:
 - `MAILRISE_USER`/`MAILRISE_PASS` are hard-required (`:?`) because mailrise enforces SMTP AUTH unconditionally; the second delivery path must not fail silently at the moment it is needed.
 - One network, `sentinel-net`, **not** `internal: true` — apprise needs outbound internet for Telegram, and `depends_on: service_healthy` plus DNS resolution of `apprise` require both services on the same non-internal network. `sentinel` publishes no ports; only `apprise` and `mailrise` publish, bound to a LAN interface.
 - The healthcheck is `sentinel health` — no shell, no `$$` interpolation trap.
-- The apprise config volume is seeded by the `apprise` service (T1). The sentinel container gets **no `/config` mount and no `TELEGRAM_*` variables**: the bot token stays out of the process that parses attacker-controlled log text. `APPRISE_CONFIG_FILE` is present only because `notify --seed-config` is an ops one-shot; the runtime never invokes it.
+- The apprise config volume is seeded by the `apprise` service. The sentinel container gets **no `/config` mount and no `TELEGRAM_*` variables**: the bot token stays out of the process that parses attacker-controlled log text. `APPRISE_CONFIG_FILE` is present only because `notify --seed-config` is an ops one-shot; the runtime never invokes it.
 - `.env.example` lists every variable compose interpolates **without a default** — every `:?` and every bare `${VAR}` — including `SENTINEL_TAG`, `AGY_CREDENTIALS_DIR`, `JOURNAL_GID`, `MAILRISE_SMTP_USER`, `MAILRISE_SMTP_PASS`, since an unset one either fails the stack or silently interpolates empty. Variables with a `:-default` are **not** copied in: their default already lives in the compose file and in CONTRACTS.md C3, and a third copy in `.env.example` is a third place for them to drift. An operator who wants to change one reads C3. Exactly one top-level `volumes:` and one `networks:` block in the file.
 - **agy credential mount:** agy holds an OAuth credential file plus config in the operator's home directory. That directory is mounted read-only at `/run/secrets/agy`; startup copies it into **`$AGY_HOME` = `/state/agy-home`, on the persistent `sentinel-state` volume**, so agy can refresh its access token without a writable host path. **Never tmpfs.** An earlier wording of this line said tmpfs and contradicted CONTRACTS.md C3, R2 step 4 and the `ponytail:` note at R2 — all of which require persistence, for a reason that is not stylistic: agy refreshes its OAuth token as it runs, and headless mode cannot re-authenticate a lost one. A tmpfs `$AGY_HOME` therefore works until the first container restart and then the analyzer never comes back, silently falling back for good. `AGY_CREDENTIALS_DIR` lives in `.env` (0600, gitignored) with the note "the container never writes back — re-authenticate on the host and restart sentinel". Docker `secrets:` is not used: it supports single files, agy needs a directory.
 - Any `:?` variable unset ⇒ `docker compose up` fails immediately. Fail fast beats a container that silently cannot read the journal or authenticate to mailrise.
@@ -447,7 +447,7 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 
 **A step whose output cannot work must not run.** When mail is unconfigured — the package absent *or* the credentials missing — steps 4 and 5 are skipped, because pointing `smartd -m` and `ZED_EMAIL_PROG` at an msmtp that cannot deliver is worse than leaving them alone: every SMART failure and pool event then invokes a mailer that silently drops it, while the summary reports the steps as updated. Gate all three on *mail is actually configured*, never on package presence alone — the package being installed says nothing about whether it can send.
 
-**Filesystem:** reads `/etc/os-release`, `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`, `/etc/msmtprc`, `--env-file`. Writes those same paths via `mktemp` + `install -m <mode>` atomic replace, with a `.bak-<epoch>` copy on first modification only. This script runs on the **host**, outside the read-only container promise; it is the one artifact that writes, it writes nothing under `/var` or `/home`, and it runs only in T8 after explicit approval.
+**Filesystem:** reads `/etc/os-release`, `/etc/smartd.conf`, `/etc/zfs/zed.d/zed.rc`, `/etc/msmtprc`, `--env-file`. Writes those same paths via `mktemp` + `install -m <mode>` atomic replace, with a `.bak-<epoch>` copy on first modification only. This script runs on the **host**, outside the read-only container promise; it is the one artifact that writes, it writes nothing under `/var` or `/home`, and it runs only during rollout, after explicit approval.
 
 ---
 
@@ -455,7 +455,7 @@ Content outside the markers is never modified. Rendering the block is a pure fun
 
 **Trigger:** `push` on `main` limited to `cmd/**`, `internal/**`, `deploy/**`, `test/**`, `go.mod`, `go.sum`, `.github/workflows/ci.yml`; `pull_request` on the same paths (build only, no push); `workflow_dispatch`.
 
-`deploy/**` is load-bearing and was missing: without it a Dockerfile-only change does not rebuild, and T8's `docker compose pull` on `bam` then returns a stale image that silently does not contain the change just made. `supervisor/**` was listed and does not exist in this repository — a leftover from the shell-script layout C1 abolished.
+`deploy/**` is load-bearing and was missing: without it a Dockerfile-only change does not rebuild, and a later `docker compose pull` on the rollout host then returns a stale image that silently does not contain the change just made. `supervisor/**` was listed and does not exist in this repository — a leftover from the shell-script layout C1 abolished.
 
 **Permissions:** `contents: read`, `packages: write`. Built-in `GITHUB_TOKEN` only — no repository secrets (PLAN §2.9).
 
@@ -576,13 +576,13 @@ func Health(cfg *config.Config) (int, error)
 
 `go test ./...`, table-driven, stdlib `testing`, hermetic and offline (C9). Every row names the acceptance criterion it maps to, so a failure points at the criterion.
 
-**`internal/runtime` — T6.** Apprise is an `httptest.Server` recorder; `collect`/`analyze`/`state`/`notify` are injected through `Deps`.
+**`internal/runtime`.** Apprise is an `httptest.Server` recorder; `collect`/`analyze`/`state`/`notify` are injected through `Deps`.
 
 | # | Table case | Assertion | Maps to |
 |---|---|---|---|
-| E1 | `ok_tick` | fixture OK facts + fixture OK report ⇒ `ExitCode == 0`; stdout JSON validates against `report.schema.json` **and** `report.Validate` | T6 AC "full tick" |
-| E2 | `notify_title_shape` | recorder receives exactly one `POST /notify/sentinel`; `title` matches `^\[(OK\|WATCH\|ALERT)\] [^:]+: .+$` | T6 AC message shape |
-| E3 | `raw_alert_without_agy` | facts built **by `collect` from a journal fixture** containing `priority: 2`, analyze stubbed to return its fallback + error ⇒ a raw POST arrives whose recorder timestamp precedes the fallback POST, `title` starts `[ALERT]`, body contains the raw line | T6 AC "kern.crit ⇒ raw alert without agy", design principle 4 |
+| E1 | `ok_tick` | fixture OK facts + fixture OK report ⇒ `ExitCode == 0`; stdout JSON validates against `report.schema.json` **and** `report.Validate` | full-tick acceptance |
+| E2 | `notify_title_shape` | recorder receives exactly one `POST /notify/sentinel`; `title` matches `^\[(OK\|WATCH\|ALERT)\] [^:]+: .+$` | notification message shape |
+| E3 | `raw_alert_without_agy` | facts built **by `collect` from a journal fixture** containing `priority: 2`, analyze stubbed to return its fallback + error ⇒ a raw POST arrives whose recorder timestamp precedes the fallback POST, `title` starts `[ALERT]`, body contains the raw line | `kern.crit` ⇒ raw alert without agy, design principle 4 |
 | E4 | `raw_alert_dedup` | second identical tick within `RawAlertRepeat` ⇒ no second raw POST; `RawAlertRepeat = 0` ⇒ exactly one more | raw-path dedup |
 | E5 | `collect_fails` | ⇒ `ExitCode == 2`, one POST, headline `Collector unavailable`, finding `component == "meta"` | ARCHITECTURE §5 |
 | E6 | `analyze_fails` | analyze returns `(fallbackReport, err)` ⇒ `ExitCode == 3`, one POST, the analyzer's own document is delivered byte-identically through `state`, and `runtime` authored no fallback | ARCHITECTURE §5, C8 |
@@ -600,7 +600,7 @@ func Health(cfg *config.Config) (int, error)
 | E18 | `shutdown` | `Loop` with a cancelled context returns `(0, nil)` within 5 s and starts no new tick | R2 step 8 |
 | E19 | `health` | fresh `heartbeat` ⇒ `0`; mtime older than `3 × TICK_INTERVAL` ⇒ `1`; missing ⇒ `1` | compose healthcheck |
 
-**`test/container_test.go`** (build tag `container`, `go test -tags container ./test`) — T7. Each case prints `PASS`/`FAIL`/`SKIP`; a SKIP is explicit, never a silent pass.
+**`test/container_test.go`** (build tag `container`, `go test -tags container ./test`). Each case prints `PASS`/`FAIL`/`SKIP`; a SKIP is explicit, never a silent pass.
 
 | # | Assertion | Maps to |
 |---|---|---|
@@ -618,4 +618,4 @@ func Health(cfg *config.Config) (int, error)
 | C12 | `install-host.sh --dry-run` on a throwaway rootfs changes nothing; two consecutive real runs yield identical sha256 for every touched file and the second prints `changed=0` and restarts no service | R5 idempotency |
 | C13 | `actionlint` passes; the metadata step yields both `latest` and a full-SHA tag; the published image is pulled and `--version` runs | §2.9, "pull from GHCR works" |
 
-**Open ops inputs before T7 can go green:** `AGY_URL` + `AGY_SHA512` (run `deploy/agy-build-args.sh` to resolve both from the vendor manifest), `AGY_CREDENTIALS_DIR` on the host, `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS`, and whether the GHCR package is public (else a one-time `docker login ghcr.io` on `bam`).
+**Open ops inputs required for this suite to pass:** `AGY_URL` + `AGY_SHA512` (run `deploy/agy-build-args.sh` to resolve both from the vendor manifest), `AGY_CREDENTIALS_DIR` on the host, `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS`, and whether the GHCR package is public (else a one-time `docker login ghcr.io` on `bam`).
