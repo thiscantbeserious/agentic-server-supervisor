@@ -1750,7 +1750,12 @@ func TestContainer_C13_WorkflowShape(t *testing.T) {
 	for _, want := range []string{
 		"type=raw,value=latest",
 		"type=sha,format=long",
-		"ghcr.io/${{ github.repository }}/sentinel",
+		// The metadata step's `images:` must use the already-lowercased
+		// image name (steps.image.outputs.name), not raw
+		// github.repository — otherwise the tags it produces can point
+		// at a different path than the digests build/merge actually
+		// pushed to, whenever the owner isn't already all-lowercase.
+		"images: ${{ steps.image.outputs.name }}",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("FAIL C13: build.yml missing %q", want)
