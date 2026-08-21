@@ -48,8 +48,11 @@ usage: $PROG [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT]
   --stack-dir PATH        create/use the compose stack here — fetches docker-compose.yml
                           and mailrise.conf from this script's own repo, prompts for the
                           bot token/chat id/mailrise password if missing (default:
-                          detected — /docker-compose/sentinel under OpenMediaVault,
-                          /opt/sentinel otherwise — offered interactively, Enter accepts it)
+                          detected — an OpenMediaVault compose root's own "<name>/sentinel"
+                          if exactly one is found on this host, /opt/sentinel if none are;
+                          several candidates are never picked silently — a numbered menu
+                          asks which one, or type a path of your own; offered
+                          interactively, Enter accepts a single detected default)
   --ref REF                git ref to fetch deploy/docker-compose.yml and
                           mailrise.conf.example from (default: main, or \$SENTINEL_REF)
   -h, --help              show this help
@@ -219,6 +222,15 @@ $MARK_END"
     return 1
   fi
 
+  # Computed here, before the CHECK/DRY_RUN early returns below, so a
+  # caller under either mode can still report "would collapse N blocks"
+  # accurately — block_count is known already at this point, and a
+  # collapse is a fact about the file's CURRENT content, not about
+  # whether this call is about to write anything.
+  if [ "$block_count" -gt 1 ]; then
+    RENDER_COLLAPSED="$block_count"
+  fi
+
   if [ "$CHECK" -eq 1 ]; then
     return 0
   fi
@@ -240,9 +252,6 @@ $MARK_END"
       # later marker pair (and its content) is dropped entirely rather
       # than re-emitted — collapsing N blocks into 1, not just refreshing
       # the content of each.
-      if [ "$block_count" -gt 1 ]; then
-        RENDER_COLLAPSED="$block_count"
-      fi
       awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v repl="$desired_block" '
         $0==b {if (!seen) {print repl; seen=1} skip=1; next}
         $0==e {if (skip) {skip=0; next}}
@@ -508,7 +517,7 @@ ensure_dir() {
     note "$desc: $dir already exists"
     return
   fi
-  note "$desc: creating $dir"
+  note "$desc: $(verb_phrase "creating" "would create") $dir"
   if [ "$CHECK" -eq 1 ]; then
     changed=$((changed+1))
     return
@@ -547,7 +556,7 @@ ensure_symlink() {
     TRANSIENT_FAIL=1
     return
   fi
-  note "stack symlink: $link -> $target"
+  note "stack symlink: $(verb_phrase "creating" "would create") $link -> $target"
   if [ "$CHECK" -eq 1 ]; then
     changed=$((changed+1))
     return
@@ -629,43 +638,282 @@ invoking_home() {
   printf '%s' "$HOME"
 }
 
-# detect_layout inspects STACK_DIR itself, never how it was chosen — an
-# explicit --stack-dir /docker-compose/sentinel gets the OMV layout
-# exactly the same as the auto-detected default would, and a typo'd
-# --stack-dir /docker-compose2/x does not. A plain directory gets
-# docker-compose.yml + .env directly: sentinel.yml plus a compose.yml
-# symlink would be pointless indirection anywhere that is not actually
-# an OMV compose root.
-detect_layout() {
-  if [ -d /docker-compose ] && [ "$(dirname "$STACK_DIR")" = "/docker-compose" ]; then
-    LAYOUT="omv"
-    COMPOSE_NAME="sentinel.yml"
-    ENV_NAME="sentinel.env"
-  else
-    LAYOUT="plain"
-    COMPOSE_NAME="docker-compose.yml"
-    ENV_NAME=".env"
+# compose_root_looks_omv DIR — true if DIR is laid out the way OMV's
+# compose plugin lays a shared-folder root out: at least one
+# subdirectory holding "<name>.yml" with a "compose.yml" symlink
+# pointing at it, the shape every OMV-created stack has regardless of
+# which shared folder the operator picked for the plugin. This is the
+# PRIMARY signal (over asking OMV itself, below): it tests the property
+# that actually matters — "is this directory laid out the way OMV lays a
+# compose root out" — rather than a path OMV happens to default to on
+# this one host, and it still works when --stack-dir names a compose
+# root this script would never have guessed. The trade-off it accepts:
+# a root with zero stacks created yet has nothing to pattern-match, so
+# this returns false for it — omv_confdbadm_compose_root below is what
+# that specific case falls back to.
+compose_root_looks_omv() {
+  local root="$1" d base
+  [ -d "$root" ] || return 1
+  for d in "$root"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    base="$(basename "$d")"
+    if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ] \
+       && [ "$(readlink "${d}/compose.yml")" = "${base}.yml" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# omv_confdbadm_compose_root — best-effort SECONDARY signal, authoritative
+# when it works: asks OMV's own config database where the compose
+# plugin's shared folder lives, instead of inferring it from disk
+# layout. It exists for the one case structural detection cannot see at
+# all — a freshly enabled compose plugin with zero stacks created yet,
+# so there is nothing on disk to pattern-match.
+#
+# NOT verified against a real OMV host as part of this change — CLAUDE.md
+# keeps T8's live validation against bam read-only, and querying
+# omv-confdbadm was out of scope for that pass; only a live call against
+# a real OMV installation could prove this parses what the command
+# actually emits. `conf.service.compose` is documented, across the OMV
+# versions consulted while writing this, to carry the shared folder as a
+# reference (`sharedfolderref`, a UUID) resolved through a second lookup
+# (`conf.system.sharedfolder`) — the parsing below degrades to "unknown"
+# (return 1) on any shape it does not recognise, including the command
+# being entirely absent on a non-OMV host, rather than guessing. No
+# caller ever prefers this over an explicit structural "no" — it only
+# answers the empty-root case compose_root_looks_omv cannot.
+omv_confdbadm_compose_root() {
+  command -v omv-confdbadm >/dev/null 2>&1 || return 1
+  local cfg ref path
+  cfg="$(omv-confdbadm read conf.service.compose 2>/dev/null)" || return 1
+  [ -n "$cfg" ] || return 1
+  ref="$(printf '%s' "$cfg" | grep -o '"sharedfolderref"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
+  [ -n "$ref" ] || return 1
+  path="$(omv-confdbadm read conf.system.sharedfolder 2>/dev/null \
+    | grep -B2 "\"uuid\"[[:space:]]*:[[:space:]]*\"${ref}\"" \
+    | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
+  [ -n "$path" ] || return 1
+  printf '%s' "$path"
+}
+
+# candidate_compose_roots — a BOUNDED list of directories worth checking
+# structurally when nothing has yet said where OMV's compose root is.
+# Deliberately fixed glob patterns, never a recursive `find /` or `find
+# /srv` — a real walk of a multi-disk NAS pool can take minutes and
+# looks indistinguishable from a hang. Each pattern reaches at most one
+# level into a plausible parent (`/docker-compose` itself, one level
+# under the shared-folder mount conventions OMV commonly uses —
+# `/srv/dev-disk-by-uuid-*`, `/srv/dev-disk-by-label-*`, `/srv/*` — and
+# one level under `/opt` and `/var/lib`, the two other places a manually
+# configured shared folder is commonly rooted). A bare `/*` scan of the
+# whole filesystem root was deliberately left out: it would need
+# explicit pruning of /proc, /sys, /dev, /run and similar pseudo
+# filesystems to stay bounded, and every realistic OMV shared-folder
+# convention is already covered by the patterns below. Not exhaustive —
+# a custom location matching none of these needs --stack-dir, and
+# resolve_stack_dir says so explicitly whenever it prints the candidate
+# list.
+candidate_compose_roots() {
+  local d
+  for d in /docker-compose \
+           /srv/dev-disk-by-uuid-*/* /srv/dev-disk-by-label-*/* /srv/* \
+           /opt/* /var/lib/*; do
+    [ -d "$d" ] && printf '%s\n' "$d"
+  done
+}
+
+# count_existing_stacks DIR — how many subdirectories of DIR are shaped
+# like an OMV-managed stack (the same "<name>.yml" + "compose.yml"
+# symlink shape compose_root_looks_omv checks for). Used only to give an
+# operator choosing among several candidates something to tell them
+# apart by besides the bare path.
+count_existing_stacks() {
+  local root="$1" d base n=0
+  for d in "$root"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    base="$(basename "$d")"
+    if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ]; then
+      n=$((n+1))
+    fi
+  done
+  printf '%d' "$n"
+}
+
+# detect_omv_compose_root_candidates — every directory that plausibly IS
+# an OMV compose root, one per line, deduplicated by resolved path.
+# Deliberately a LIST rather than a single "best" answer: a host can
+# have more than one directory matching the shape (a leftover from a
+# migrated install, a second data disk with its own shared folder), and
+# picking one silently is the same guess-on-the-operator's-behalf this
+# whole detection redesign exists to eliminate. Combines both signals —
+# structural matches among candidate_compose_roots, PLUS
+# omv_confdbadm_compose_root's answer even when it names a root with
+# zero stacks in it yet (the one case structural detection cannot see
+# at all) — rather than preferring one signal over the other.
+detect_omv_compose_root_candidates() {
+  local d resolved cfg seen=""
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if compose_root_looks_omv "$d"; then
+      resolved="$(readlink -f "$d")"
+      case " $seen " in
+        *" $resolved "*) ;;
+        *)
+          seen="$seen $resolved"
+          printf '%s\n' "$resolved"
+          ;;
+      esac
+    fi
+  done <<CANDIDATES
+$(candidate_compose_roots)
+CANDIDATES
+  if cfg="$(omv_confdbadm_compose_root)" && [ -n "$cfg" ] && [ -d "$cfg" ]; then
+    resolved="$(readlink -f "$cfg")"
+    case " $seen " in
+      *" $resolved "*) ;;
+      *) printf '%s\n' "$resolved" ;;
+    esac
   fi
 }
 
-# resolve_stack_dir sets STACK_DIR. Precedence: --stack-dir flag (always,
-# every mode) > interactive prompt with a detected default (real run,
-# terminal only) > the detected default itself, used silently
-# (--check/--dry-run, which must never prompt) > exit 78 (real run, no
-# terminal, no flag). That last case is a hard, immediate exit rather
-# than the deferred MISSING_ENV_INPUT path require_secret uses below:
-# without a stack directory there is no coherent env file for anything
-# else in this script to point at, so nothing downstream — not even the
-# host package steps — can proceed meaningfully, and writing a stack into
-# a guessed directory is worse than refusing outright.
+# detect_layout inspects STACK_DIR's PARENT itself, never how STACK_DIR
+# was chosen — an explicit --stack-dir pointing under a structurally
+# OMV-shaped root gets the OMV layout exactly the same as the
+# auto-detected default would. A plain directory gets docker-compose.yml
+# + .env directly: sentinel.yml plus a compose.yml symlink would be
+# pointless indirection anywhere that is not actually an OMV compose
+# root.
+detect_layout() {
+  local parent cfgroot
+  parent="$(dirname "$STACK_DIR")"
+  if compose_root_looks_omv "$parent"; then
+    LAYOUT="omv"
+    COMPOSE_NAME="sentinel.yml"
+    ENV_NAME="sentinel.env"
+    return
+  fi
+  # No sibling stack to pattern-match against — a first stack on a
+  # fresh OMV install, or an ordinary directory that just happens to be
+  # empty, look identical to structural detection. Fall back to asking
+  # OMV directly; anything short of an authoritative match (no
+  # omv-confdbadm, an unparsable answer, a different path entirely)
+  # means plain, exactly like any ordinary directory would get.
+  if cfgroot="$(omv_confdbadm_compose_root)" && [ -n "$cfgroot" ] \
+     && [ "$(readlink -f "$cfgroot" 2>/dev/null)" = "$parent" ]; then
+    LAYOUT="omv"
+    COMPOSE_NAME="sentinel.yml"
+    ENV_NAME="sentinel.env"
+    return
+  fi
+  LAYOUT="plain"
+  COMPOSE_NAME="docker-compose.yml"
+  ENV_NAME=".env"
+}
+
+# resolve_stack_dir sets STACK_DIR. Precedence: --stack-dir flag always
+# wins outright — no scan, no prompt, the operator being explicit beats
+# anything this script could detect. Otherwise the candidate count
+# decides:
+#   0 candidates  — the conventional /opt/sentinel default, exactly as
+#                   before detection existed at all.
+#   1 candidate   — proposed as the default, with a one-line reason so
+#                   the operator sees it was DETECTED, not decreed.
+#   2+ candidates — never picked silently: a numbered menu (real run,
+#                   terminal only) with an option to type a path of its
+#                   own; --check/--dry-run reports the ambiguity and the
+#                   full list without prompting (dry-run/check must
+#                   never prompt, and hiding the ambiguity in a preview
+#                   is worse than showing it); no terminal at all is
+#                   exit 78, same as the no-candidate case below, naming
+#                   every candidate in the message.
+# The one/several distinction all funnel through interactively (real
+# run, terminal) into the same prompt_with_default/have_tty shape 0
+# candidates already used, so a real run with exactly one candidate and
+# a real run with zero candidates read identically to the operator
+# except for the proposed default and the one-line "why".
 resolve_stack_dir() {
   if [ -n "$STACK_DIR" ]; then
     return
   fi
-  local proposed="/opt/sentinel"
-  if [ -d /docker-compose ]; then
-    proposed="/docker-compose/sentinel"
+  local candidates count=0 c
+  candidates="$(detect_omv_compose_root_candidates)"
+  if [ -n "$candidates" ]; then
+    count="$(printf '%s\n' "$candidates" | grep -c .)"
   fi
+
+  if [ "$count" -eq 0 ]; then
+    resolve_stack_dir_prompt "/opt/sentinel" ""
+    return
+  fi
+
+  if [ "$count" -eq 1 ]; then
+    echo "$PROG: detected a possible OpenMediaVault compose root at $candidates" >&2
+    resolve_stack_dir_prompt "${candidates}/sentinel" ""
+    return
+  fi
+
+  # 2+ candidates: never guessed. Listed with enough context (path, how
+  # many existing stacks) that a choice between them means something,
+  # and flagged as possibly incomplete — the scan is bounded (see
+  # candidate_compose_roots) and a custom location can still be missed.
+  echo "$PROG: multiple possible OpenMediaVault compose roots found — refusing to guess which one you meant:" >&2
+  local i=1 selected=""
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    echo "  $i) $c ($(count_existing_stacks "$c") existing stack(s))" >&2
+    i=$((i+1))
+  done <<CANDS
+$candidates
+CANDS
+  echo "  (this list is not guaranteed exhaustive — pass --stack-dir directly if yours is not shown)" >&2
+
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    note "stack directory: ambiguous — $count possible OMV compose roots found (see stderr for the list); pass --stack-dir to choose"
+    changed=$((changed+1))
+    return
+  fi
+
+  if have_tty; then
+    local choice
+    printf 'Enter a number (1-%d), or type a path: ' "$count" > /dev/tty
+    IFS= read -r choice < /dev/tty
+    case "$choice" in
+      ''|*[!0-9]*)
+        selected="$choice"
+        ;;
+      *)
+        if [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+          selected="$(printf '%s\n' "$candidates" | sed -n "${choice}p")/sentinel"
+        fi
+        ;;
+    esac
+    if [ -z "$selected" ]; then
+      echo "$PROG: no valid selection made — refusing to guess; re-run and choose a number or a path" >&2
+      exit 78
+    fi
+    STACK_DIR="$selected"
+    return
+  fi
+
+  echo "$PROG: no controlling terminal available to choose among them (this is what \`curl | sudo bash\` looks like without a real terminal) — re-run with a terminal attached, or pass --stack-dir explicitly" >&2
+  exit 78
+}
+
+# resolve_stack_dir_prompt PROPOSED _RESERVED — the shared real-run/
+# check/dry-run/no-tty decision every candidate-count branch above ends
+# in once it has settled on a single PROPOSED default: offered
+# interactively (Enter accepts it) when a terminal is available, used
+# silently under --check/--dry-run (which must never prompt), or — no
+# terminal, a real run — refused outright with exit 78 rather than
+# guessing a directory to write into. Factored out because the 0- and
+# 1-candidate cases are otherwise identical but for how PROPOSED was
+# chosen.
+resolve_stack_dir_prompt() {
+  local proposed="$1"
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     STACK_DIR="$proposed"
     return
@@ -685,19 +933,40 @@ resolve_stack_dir() {
 # on apt-get.
 step0a_layout() {
   resolve_stack_dir
+  # STACK_DIR stays empty here only in one case: --check/--dry-run found
+  # several possible compose roots and (correctly) refused to pick one —
+  # resolve_stack_dir already reported the ambiguity and the candidate
+  # list. There is no coherent directory left to preview further steps
+  # against, so this step stops here rather than resolving "" through
+  # readlink -f (which would silently resolve to the current directory).
+  if [ -z "$STACK_DIR" ]; then
+    return
+  fi
   # dirname (in detect_layout, below) is purely lexical, so a stack
-  # directory reached through a symlink into OMV's compose root (e.g.
-  # /srv/compose -> /docker-compose) would otherwise be classified
-  # "plain" even though it really sits inside /docker-compose — the
-  # files land in the right place on disk while OMV never enumerates
-  # the stack, which produces exactly the "the stack looks fine but the
-  # plugin doesn't know it exists" shape this whole design exists to
-  # avoid. readlink -f resolves every symlink component and still works
-  # when the deepest component does not exist yet, the common case for
-  # a stack being created for the first time.
+  # directory reached through a symlink into an OMV compose root would
+  # otherwise be classified "plain" even though it really sits inside
+  # one — the files land in the right place on disk while OMV never
+  # enumerates the stack, which produces exactly the "the stack looks
+  # fine but the plugin doesn't know it exists" shape this whole design
+  # exists to avoid. readlink -f resolves every symlink component and
+  # still works when the deepest component does not exist yet, the
+  # common case for a stack being created for the first time.
   STACK_DIR="$(readlink -f "$STACK_DIR")"
-  if [ "$STACK_DIR" = "/docker-compose" ]; then
-    echo "$PROG: --stack-dir /docker-compose is the OMV compose root itself, not a stack directory inside it — writing a compose file there would sit alongside every other stack's own directory instead of inside one; use a subdirectory, e.g. /docker-compose/sentinel" >&2
+  # Refusing the compose root ITSELF (not a stack directory inside one)
+  # follows the same two signals as detect_layout: structural shape
+  # first (STACK_DIR already holds other stacks), OMV's own config
+  # second (settles it even for a root with nothing in it yet). Neither
+  # signal is a literal path — a directory that merely happens to be
+  # named /docker-compose but is not actually a detected root is left
+  # alone; see compose_root_looks_omv/omv_confdbadm_compose_root above.
+  if compose_root_looks_omv "$STACK_DIR"; then
+    echo "$PROG: --stack-dir $STACK_DIR is itself an OMV compose root — it already holds other stacks laid out the way OMV's compose plugin lays them out — not a stack directory inside one; writing a compose file there would sit alongside every other stack's own directory instead of inside one; use a subdirectory, e.g. ${STACK_DIR}/sentinel" >&2
+    exit 64
+  fi
+  local omv_root_cfg
+  omv_root_cfg="$(omv_confdbadm_compose_root)" || omv_root_cfg=""
+  if [ -n "$omv_root_cfg" ] && [ "$(readlink -f "$omv_root_cfg" 2>/dev/null)" = "$STACK_DIR" ]; then
+    echo "$PROG: --stack-dir $STACK_DIR is the compose root OMV's own configuration reports, not a stack directory inside it; use a subdirectory, e.g. ${STACK_DIR}/sentinel" >&2
     exit 64
   fi
   detect_layout
@@ -830,7 +1099,7 @@ step1() {
     MSMTP_OK=1
     return
   fi
-  note "step1 packages: installing ${need[*]}"
+  note "step1 packages: $(verb_phrase "installing" "would install") ${need[*]}"
   if [ "$CHECK" -eq 1 ]; then
     changed=$((changed+1))
     RASDAEMON_OK=1
@@ -884,7 +1153,7 @@ step2() {
     note "step2 rasdaemon: already enabled and active"
     return
   fi
-  note "step2 rasdaemon: enabling and starting"
+  note "step2 rasdaemon: $(verb_phrase "enabling and starting" "would enable and start")"
   if [ "$CHECK" -eq 1 ]; then changed=$((changed+1)); return; fi
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] would run: systemctl enable --now rasdaemon"
@@ -938,9 +1207,9 @@ account default : sentinel"
 
   if render_managed_block "$file" "" "$body" 0600; then
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
-      note "step3 /etc/msmtprc: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+      note "step3 /etc/msmtprc: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
     else
-      note "step3 /etc/msmtprc: updated"
+      note "step3 /etc/msmtprc: $(verb_phrase "updated" "would be updated")"
     fi
     changed=$((changed+1))
   else
@@ -1069,9 +1338,9 @@ step4() {
   did_update=0
   if render_managed_block "$file" "$preamble" "$SMARTD_LINE" 0644; then
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
-      note "step4 /etc/smartd.conf: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+      note "step4 /etc/smartd.conf: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
     else
-      note "step4 /etc/smartd.conf: updated"
+      note "step4 /etc/smartd.conf: $(verb_phrase "updated" "would be updated")"
     fi
     changed=$((changed+1))
     did_update=1
@@ -1122,9 +1391,9 @@ ZED_NOTIFY_VERBOSE=1'
 
   if render_managed_block "$file" "" "$body" 0644; then
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
-      note "step5 $file: collapsed ${RENDER_COLLAPSED} managed blocks into 1"
+      note "step5 $file: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
     else
-      note "step5 $file: updated"
+      note "step5 $file: $(verb_phrase "updated" "would be updated")"
     fi
     changed=$((changed+1))
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then

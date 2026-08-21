@@ -27,23 +27,29 @@ curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-su
 
 This installs the host packages (rasdaemon, msmtp, smartd/ZED wiring — see
 `contracts/runtime.md` R5) **and** creates the compose stack itself: it
-detects whether the host is running OpenMediaVault's compose plugin and
-lays the stack out accordingly (`/docker-compose/sentinel/`, OMV's
-symlink shape, or a plain `/opt/sentinel/` otherwise), offering the
-detected directory in a prompt — press Enter to accept it, or type a
-different path. It then prompts for the Telegram bot token, chat id, and
+detects whether the host is running OpenMediaVault's compose plugin —
+by inspecting disk layout for the shape OMV's own stacks have, not by
+assuming a fixed path like `/docker-compose`, since the plugin's shared
+folder is something the operator chose in the OMV UI — and lays the
+stack out accordingly (OMV's symlink shape under whichever compose root
+was detected, or a plain `/opt/sentinel/` otherwise). With exactly one
+detected root it is offered in a prompt — press Enter to accept it, or
+type a different path; with more than one (a host can genuinely have
+two), a numbered list asks which one rather than guessing. It then
+prompts for the Telegram bot token, chat id, and
 a mailrise SMTP password, writes them into the stack's env file and into
 `mailrise.conf` (never echoed, never logged), and fetches
 `docker-compose.yml` from this same repository. Re-running is safe and
 idempotent: it only fills in what is still missing.
 
-Pin a specific version instead of `main` with `--ref`:
+`--ref` accepts any git ref — a tag to pin a specific version, or a branch to try one before it merges:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --ref v1.2.3
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/t8-rollout/install.sh | sudo bash -s -- --ref t8-rollout
 ```
 
-**If you fetch the script itself from a tag, pass that same tag as `--ref`.** A `curl | bash` stream has no memory of where it came from — the script cannot infer its own ref — so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install.sh` from `v1.2.3` without also passing `--ref v1.2.3` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary — worth checking it reads what you expect.
+**If you fetch the script itself from a non-`main` ref — a tag or a branch — pass that same ref as `--ref`.** A `curl | bash` stream has no memory of where it came from — the script cannot infer its own ref — so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install.sh` from `v1.2.3` (or from an unmerged branch, while testing a change before it lands on `main`) without also passing the matching `--ref` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary — worth checking it reads what you expect.
 
 `--check` and `--dry-run` never prompt and never write — safe to run
 repeatedly to preview what would happen, including where the stack would

@@ -1515,11 +1515,14 @@ func TestContainer_C12_StackNoTTYPartialProgress(t *testing.T) {
 
 // TestContainer_C12_StackLayoutDetection: the OMV symlink layout
 // (sentinel.yml/compose.yml/sentinel.env/.env) is only correct when the
-// stack directory's parent really is /docker-compose; anywhere else the
-// indirection is pointless and the plain layout
-// (docker-compose.yml/.env directly) is what belongs there. --dry-run is
-// used throughout: this asserts the DECISION, not the write, and needs
-// no secrets.
+// stack directory's parent is really laid out the way OMV's compose
+// plugin lays a shared-folder root out — sibling stacks, each holding
+// "<name>.yml" with a "compose.yml" symlink pointing at it — regardless
+// of what that root happens to be named on this particular host.
+// /docker-compose is one common name for it, never the definition:
+// these cases deliberately use OTHER paths to prove detection is
+// structural, not a hardcoded string. --dry-run is used throughout:
+// this asserts the DECISION, not the write, and needs no secrets.
 func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	name := "sentinel-c12-layout-test"
 	startC12Container(t, name)
@@ -1527,27 +1530,46 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
 
-	// Plain layout: no /docker-compose on this host at all.
-	outPlain, _, codePlain := exec_("/work/install.sh --dry-run 2>&1")
+	// Plain layout: nothing structurally OMV-shaped anywhere on the host.
+	outPlain, _, codePlain := exec_("/work/install.sh --dry-run --stack-dir /opt/sentinel 2>&1")
 	if codePlain != 0 {
 		t.Fatalf("FAIL C12 (stack layout): plain --dry-run exit=%d: %s", codePlain, outPlain)
 	}
 	if !strings.Contains(outPlain, "layout: plain") {
-		t.Errorf("FAIL C12 (stack layout): expected plain layout with no /docker-compose present, got: %s", outPlain)
+		t.Errorf("FAIL C12 (stack layout): expected plain layout with nothing OMV-shaped present, got: %s", outPlain)
 	}
 	if !strings.Contains(outPlain, "docker-compose.yml") || strings.Contains(outPlain, "sentinel.yml") {
 		t.Errorf("FAIL C12 (stack layout): plain layout must write docker-compose.yml directly, not sentinel.yml: %s", outPlain)
 	}
 
-	// OMV layout: /docker-compose exists, and the proposed default sits
-	// directly inside it.
+	// A directory literally NAMED /docker-compose that has nothing in it
+	// is not, by itself, evidence of an OMV compose root — the previous
+	// implementation hardcoded exactly this path and would have chosen
+	// "omv" here on the name alone. Structural detection must say plain:
+	// there is nothing to pattern-match, and no OMV config claiming it.
 	exec_("mkdir -p /docker-compose")
-	outOMV, _, codeOMV := exec_("/work/install.sh --dry-run 2>&1")
+	outNamedOnly, _, codeNamedOnly := exec_("/work/install.sh --dry-run --stack-dir /docker-compose/sentinel 2>&1")
+	if codeNamedOnly != 0 {
+		t.Fatalf("FAIL C12 (stack layout): empty /docker-compose --dry-run exit=%d: %s", codeNamedOnly, outNamedOnly)
+	}
+	if !strings.Contains(outNamedOnly, "layout: plain") {
+		t.Errorf("FAIL C12 (stack layout): an empty directory named /docker-compose must not be treated as an OMV root by name alone: %s", outNamedOnly)
+	}
+
+	// A structurally OMV-shaped root at a path that is NOT /docker-compose
+	// (a data disk shared folder, the common real-world case) — one
+	// pre-existing stack with the sentinel.yml + compose.yml symlink
+	// shape is enough to identify the root itself as OMV-managed.
+	const structuralRoot = "/srv/dev-disk-by-uuid-test1234/docker-compose"
+	exec_("mkdir -p " + structuralRoot + "/existingstack && " +
+		"printf 'services: {}\\n' > " + structuralRoot + "/existingstack/existingstack.yml && " +
+		"ln -sfn existingstack.yml " + structuralRoot + "/existingstack/compose.yml")
+	outOMV, _, codeOMV := exec_("/work/install.sh --dry-run --stack-dir " + structuralRoot + "/sentinel 2>&1")
 	if codeOMV != 0 {
-		t.Fatalf("FAIL C12 (stack layout): omv --dry-run exit=%d: %s", codeOMV, outOMV)
+		t.Fatalf("FAIL C12 (stack layout): structural omv --dry-run exit=%d: %s", codeOMV, outOMV)
 	}
 	if !strings.Contains(outOMV, "layout: omv") {
-		t.Errorf("FAIL C12 (stack layout): expected omv layout with /docker-compose present, got: %s", outOMV)
+		t.Errorf("FAIL C12 (stack layout): expected omv layout under a structurally OMV-shaped root at a non-/docker-compose path, got: %s", outOMV)
 	}
 	for _, want := range []string{"sentinel.yml", "compose.yml -> sentinel.yml", ".env -> sentinel.env"} {
 		if !strings.Contains(outOMV, want) {
@@ -1555,51 +1577,340 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 		}
 	}
 
-	// A stack directory OUTSIDE /docker-compose gets the plain layout
-	// even with /docker-compose present elsewhere on the host — the
-	// directory itself decides, not the host's mere possession of an
-	// OMV installation.
-	outElsewhere, _, codeElsewhere := exec_("/work/install.sh --dry-run --stack-dir /opt/sentinel 2>&1")
+	// Auto-detection (no --stack-dir at all) must find the SAME
+	// structurally-shaped root and propose "<root>/sentinel" under it,
+	// silently, since --dry-run must never prompt.
+	outAuto, _, codeAuto := exec_("/work/install.sh --dry-run 2>&1")
+	if codeAuto != 0 {
+		t.Fatalf("FAIL C12 (stack layout): auto-detect --dry-run exit=%d: %s", codeAuto, outAuto)
+	}
+	if !strings.Contains(outAuto, "stack directory: "+structuralRoot+"/sentinel") || !strings.Contains(outAuto, "layout: omv") {
+		t.Errorf("FAIL C12 (stack layout): auto-detection did not propose the structurally-shaped root %s: %s", structuralRoot, outAuto)
+	}
+
+	// A stack directory OUTSIDE any OMV-shaped root gets the plain
+	// layout even with one present elsewhere on the host — the
+	// directory itself decides, not the host's mere possession of one.
+	outElsewhere, _, codeElsewhere := exec_("/work/install.sh --dry-run --stack-dir /opt/sentinel-other 2>&1")
 	if codeElsewhere != 0 {
 		t.Fatalf("FAIL C12 (stack layout): elsewhere --dry-run exit=%d: %s", codeElsewhere, outElsewhere)
 	}
 	if !strings.Contains(outElsewhere, "layout: plain") {
-		t.Errorf("FAIL C12 (stack layout): --stack-dir /opt/sentinel must stay plain even with /docker-compose present elsewhere: %s", outElsewhere)
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /opt/sentinel-other must stay plain even with an OMV root present elsewhere: %s", outElsewhere)
 	}
 
-	// A stack directory reached THROUGH A SYMLINK into /docker-compose
-	// must still be recognized as omv: dirname is purely lexical, so
-	// without resolving the path first, /srv/compose/sentinel (where
-	// /srv/compose -> /docker-compose) would be misclassified plain —
-	// the files would land in the right place on disk while OMV's
-	// compose plugin, which enumerates by real path, never sees the
-	// stack at all.
-	exec_("ln -sfn /docker-compose /srv/compose")
-	outSymlinked, _, codeSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose/sentinel 2>&1")
+	// A stack directory reached THROUGH A SYMLINK into the structural
+	// root must still be recognized as omv: dirname is purely lexical,
+	// so without resolving the path first, /srv/compose2/sentinel (where
+	// /srv/compose2 -> the structural root) would be misclassified
+	// plain — the files would land in the right place on disk while
+	// OMV's compose plugin, which enumerates by real path, never sees
+	// the stack at all.
+	exec_("ln -sfn " + structuralRoot + " /srv/compose2")
+	outSymlinked, _, codeSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose2/sentinel 2>&1")
 	if codeSymlinked != 0 {
 		t.Fatalf("FAIL C12 (stack layout): symlinked --dry-run exit=%d: %s", codeSymlinked, outSymlinked)
 	}
 	if !strings.Contains(outSymlinked, "layout: omv") {
-		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose/sentinel (symlink to /docker-compose) must resolve to omv layout, got: %s", outSymlinked)
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose2/sentinel (symlink to the structural root) must resolve to omv layout, got: %s", outSymlinked)
 	}
 	if !strings.Contains(outSymlinked, "sentinel.yml") {
 		t.Errorf("FAIL C12 (stack layout): symlinked omv path must still get sentinel.yml, not docker-compose.yml: %s", outSymlinked)
 	}
 
-	// --stack-dir pointing at the OMV compose ROOT itself (not a stack
-	// directory inside it) must be refused, not silently treated as
-	// plain — that would drop a stray docker-compose.yml into the
-	// directory where OMV enumerates every stack. Checked against both
-	// the literal path and a symlink resolving to it.
-	outRoot, _, codeRoot := exec_("/work/install.sh --dry-run --stack-dir /docker-compose 2>&1")
+	// --stack-dir pointing at the detected OMV compose ROOT itself (not
+	// a stack directory inside it) must be refused, not silently
+	// treated as plain — that would drop a stray docker-compose.yml
+	// into the directory where OMV enumerates every stack. Checked
+	// against both the literal path and a symlink resolving to it.
+	outRoot, _, codeRoot := exec_("/work/install.sh --dry-run --stack-dir " + structuralRoot + " 2>&1")
 	if codeRoot != 64 {
-		t.Errorf("FAIL C12 (stack layout): --stack-dir /docker-compose (the root) exit=%d, want 64: %s", codeRoot, outRoot)
+		t.Errorf("FAIL C12 (stack layout): --stack-dir %s (the detected root) exit=%d, want 64: %s", structuralRoot, codeRoot, outRoot)
 	}
-	outRootSymlinked, _, codeRootSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose 2>&1")
+	outRootSymlinked, _, codeRootSymlinked := exec_("/work/install.sh --dry-run --stack-dir /srv/compose2 2>&1")
 	if codeRootSymlinked != 64 {
-		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose (symlink to the root) exit=%d, want 64: %s", codeRootSymlinked, outRootSymlinked)
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /srv/compose2 (symlink to the detected root) exit=%d, want 64: %s", codeRootSymlinked, outRootSymlinked)
 	}
-	logPass(t, "PASS C12 (stack layout: omv only inside /docker-compose, symlinks resolved, root itself refused)")
+
+	// The earlier empty /docker-compose directory is NOT a detected root
+	// (nothing structural, no OMV config claiming it) — pointing
+	// --stack-dir directly at it must NOT be refused. This is the
+	// positive proof that refusal now follows the detected shape, not
+	// the literal string "/docker-compose".
+	outNamedOnlyRoot, _, codeNamedOnlyRoot := exec_("/work/install.sh --dry-run --stack-dir /docker-compose 2>&1")
+	if codeNamedOnlyRoot != 0 {
+		t.Errorf("FAIL C12 (stack layout): --stack-dir /docker-compose (empty, not a detected root) must proceed as plain, not be refused: exit=%d: %s", codeNamedOnlyRoot, outNamedOnlyRoot)
+	}
+	logPass(t, "PASS C12 (stack layout: omv detected structurally, not by hardcoded path, symlinks resolved, detected root itself refused)")
+}
+
+// TestContainer_C12_StackLayoutConfigFallback: a freshly enabled OMV
+// compose plugin with zero stacks created yet has nothing on disk for
+// structural detection to pattern-match — the empty-root case R5 calls
+// out explicitly. omv-confdbadm is the fallback for exactly that case;
+// stubbed here (this container has no real OMV installation) to prove
+// the wiring, not the real command's output shape, which was not
+// available to verify against a live host for this change.
+func TestContainer_C12_StackLayoutConfigFallback(t *testing.T) {
+	name := "sentinel-c12-layout-cfgfallback-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	const emptyRoot = "/srv/dev-disk-by-uuid-fresh/docker-compose"
+	exec_("mkdir -p " + emptyRoot)
+	stub := `cat > /usr/local/bin/omv-confdbadm <<'STUB'
+#!/bin/sh
+if [ "$2" = "conf.service.compose" ]; then
+  printf '{"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
+elif [ "$2" = "conf.system.sharedfolder" ]; then
+  printf '[{"uuid":"11111111-1111-1111-1111-111111111111","path":"` + emptyRoot + `"}]\n'
+fi
+STUB
+chmod +x /usr/local/bin/omv-confdbadm`
+	if out, errOut, code := exec_(stub); code != 0 {
+		t.Fatalf("FAIL C12 (stack layout config fallback): stub setup failed: %s %s", out, errOut)
+	}
+
+	// The empty root has no siblings to pattern-match, so structural
+	// detection alone is inconclusive — the stubbed omv-confdbadm answer
+	// must be what settles it as omv.
+	out, _, code := exec_("/work/install.sh --dry-run --stack-dir " + emptyRoot + "/sentinel 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (stack layout config fallback): exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "layout: omv") {
+		t.Errorf("FAIL C12 (stack layout config fallback): an empty root confirmed by omv-confdbadm must still be detected as omv: %s", out)
+	}
+
+	// The empty root itself must be refused too, via the same
+	// config-based fallback (structural detection cannot see it either).
+	outRoot, _, codeRoot := exec_("/work/install.sh --dry-run --stack-dir " + emptyRoot + " 2>&1")
+	if codeRoot != 64 {
+		t.Errorf("FAIL C12 (stack layout config fallback): --stack-dir %s (the config-confirmed empty root) exit=%d, want 64: %s", emptyRoot, codeRoot, outRoot)
+	}
+
+	// Auto-detection with no --stack-dir must also find it via the stub
+	// and propose "<root>/sentinel" under it.
+	outAuto, _, codeAuto := exec_("/work/install.sh --dry-run 2>&1")
+	if codeAuto != 0 {
+		t.Fatalf("FAIL C12 (stack layout config fallback): auto-detect exit=%d: %s", codeAuto, outAuto)
+	}
+	if !strings.Contains(outAuto, "stack directory: "+emptyRoot+"/sentinel") || !strings.Contains(outAuto, "layout: omv") {
+		t.Errorf("FAIL C12 (stack layout config fallback): auto-detection did not propose the config-confirmed empty root: %s", outAuto)
+	}
+	logPass(t, "PASS C12 (stack layout config fallback: omv-confdbadm settles the empty-root case)")
+}
+
+// TestContainer_C12_StackDirCandidatesAmbiguous: a host can genuinely
+// have MORE THAN ONE directory structurally shaped like an OMV compose
+// root (a leftover from a migrated install, a second shared folder) —
+// auto-detection must never guess between them. Asserts the candidate
+// LIST itself (both real paths named, not just whichever one happens to
+// get picked), per the rule this project keeps re-learning: a test that
+// only checks the chosen path proves nothing about whether the scan
+// found the right candidates.
+func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
+	name := "sentinel-c12-candidates-ambiguous-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	const rootA = "/docker-compose"
+	const rootB = "/srv/dev-disk-by-uuid-second/docker-compose"
+	for _, root := range []string{rootA, rootB} {
+		exec_("mkdir -p " + root + "/existingstack && " +
+			"printf 'services: {}\\n' > " + root + "/existingstack/existingstack.yml && " +
+			"ln -sfn existingstack.yml " + root + "/existingstack/compose.yml")
+	}
+
+	// --dry-run: never prompts, must report the ambiguity AND name both
+	// candidates — a preview that silently picks one, or that hides the
+	// second candidate, is worse than one that shows the ambiguity.
+	outDry, _, codeDry := exec_("/work/install.sh --dry-run 2>&1")
+	if codeDry != 0 {
+		t.Fatalf("FAIL C12 (stack dir candidates ambiguous): --dry-run exit=%d: %s", codeDry, outDry)
+	}
+	for _, want := range []string{rootA, rootB} {
+		if !strings.Contains(outDry, want) {
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run output does not name candidate %q: %s", want, outDry)
+		}
+	}
+	if !strings.Contains(outDry, "ambiguous") && !strings.Contains(outDry, "multiple possible") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run does not flag the ambiguity in its output: %s", outDry)
+	}
+
+	// A real run with no controlling terminal and no --stack-dir must
+	// refuse outright (exit 78, the same code the zero-terminal/
+	// zero-candidate case already uses) and name both candidates in the
+	// refusal — never guess which one the operator meant.
+	outReal, errOutReal, codeReal := exec_("/work/install.sh 2>&1")
+	if codeReal != 78 {
+		t.Fatalf("FAIL C12 (stack dir candidates ambiguous): real run exit=%d, want 78: %s %s", codeReal, outReal, errOutReal)
+	}
+	for _, want := range []string{rootA, rootB} {
+		if !strings.Contains(outReal, want) {
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): real-run refusal does not name candidate %q: %s", want, outReal)
+		}
+	}
+	if out, _, _ := exec_("test -e " + rootA + "/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous): a stack directory was created despite refusing to choose")
+	}
+
+	// Interactive: a real terminal choosing "2" must land under the
+	// SECOND candidate specifically (not silently default to the
+	// first) — proves the numbered choice is wired to the right entry,
+	// not just that pressing a key unblocks the prompt.
+	if out, _, code := exec_("command -v script"); code != 0 {
+		skipUnlessCI(t, "C12 (stack dir candidates ambiguous): the `script` utility is not available in this environment: %s", out)
+	}
+	// A real run, not --check/--dry-run: --check/--dry-run never prompt
+	// at all (they take the "report and stop" branch above), so only a
+	// real run reaches the interactive numbered choice. "2" picks the
+	// directory, then three blank answers (Enter with nothing typed) at
+	// the token/chat id/mailrise password prompts that inevitably
+	// follow — a bare EOF there left `read` blocking against the pty
+	// instead of returning, hanging the run past this test's own
+	// timeout, so every remaining prompt gets an explicit empty
+	// answer instead. Enter-with-nothing at a real prompt is itself
+	// "still required" (require_secret's own fail-closed rule), landing
+	// on exit 78 — irrelevant here; what matters is which stack
+	// directory got resolved BEFORE any of that, printed unconditionally
+	// as soon as step0a_layout settles it.
+	driveCmd := `printf '2\n\n\n\n' | script -qec "bash -s -- < /work/install.sh" /tmp/script-ambig.log`
+	outI, errOutI, codeI := exec_(driveCmd)
+	if codeI != 78 {
+		t.Fatalf("FAIL C12 (stack dir candidates ambiguous, interactive): exit=%d, want 78 (secrets prompts hit EOF after the directory choice): %s %s", codeI, outI, errOutI)
+	}
+	if !strings.Contains(outI, "stack directory: "+rootB+"/sentinel") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous, interactive): choosing \"2\" did not select %s: %s", rootB, outI)
+	}
+	logPass(t, "PASS C12 (stack dir candidates ambiguous: never guessed, both candidates named, numbered choice wired correctly)")
+}
+
+// TestContainer_C12_StackDirCandidatesNone: nothing structurally
+// OMV-shaped anywhere on the host, and no omv-confdbadm — the
+// conventional /opt/sentinel default is proposed exactly as it was
+// before OMV detection existed at all, with no ambiguity language and
+// no candidate list (there is nothing to list).
+func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
+	name := "sentinel-c12-candidates-none-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	out, _, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (stack dir candidates none): --dry-run exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "stack directory: /opt/sentinel") {
+		t.Errorf("FAIL C12 (stack dir candidates none): expected the conventional /opt/sentinel default with nothing OMV-shaped present, got: %s", out)
+	}
+	for _, mustNotAppear := range []string{"ambiguous", "multiple possible", "detected a possible"} {
+		if strings.Contains(out, mustNotAppear) {
+			t.Errorf("FAIL C12 (stack dir candidates none): unexpected detection language %q with zero candidates: %s", mustNotAppear, out)
+		}
+	}
+	logPass(t, "PASS C12 (stack dir candidates none: conventional default, no phantom detection)")
+}
+
+// TestContainer_C12_DryRunVerbAudit: every "note" line that describes an
+// action this script would take must say "would" under --dry-run, never
+// claim the action already happened. A previous round fixed exactly the
+// lines a reviewer had quoted (ensure_dir's shared helper, step1, step2)
+// and left the same defect standing in step3/4/5's "updated"/"collapsed"
+// wording, which is reachable via render_managed_block returning
+// "changed" identically for --dry-run and a real write.
+func TestContainer_C12_DryRunVerbAudit(t *testing.T) {
+	name := "sentinel-c12-verbaudit-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// Run 1: a fresh container (nothing installed, no rasdaemon service,
+	// no stack directory yet) exercises ensure_dir, step1 and step2
+	// together — none of these three depend on mail being configured.
+	out1, errOut1, code1 := exec_("/work/install.sh --dry-run --stack-dir /opt/newstack 2>&1")
+	if code1 != 0 {
+		t.Fatalf("FAIL C12 (dry-run verb audit, run 1): exit=%d: %s %s", code1, out1, errOut1)
+	}
+	for _, mustNotAppear := range []string{
+		"stack directory: creating ",
+		"mailrise directory: creating ",
+		"step1 packages: installing ",
+		"step2 rasdaemon: enabling and starting",
+	} {
+		if strings.Contains(out1, mustNotAppear) {
+			t.Errorf("FAIL C12 (dry-run verb audit, run 1): claims completed action %q during --dry-run: %s", mustNotAppear, out1)
+		}
+	}
+	for _, mustAppear := range []string{
+		"stack directory: would create ",
+		"mailrise directory: would create ",
+		"step1 packages: would install ",
+		"step2 rasdaemon: would enable and start",
+	} {
+		if !strings.Contains(out1, mustAppear) {
+			t.Errorf("FAIL C12 (dry-run verb audit, run 1): missing conditional phrasing %q: %s", mustAppear, out1)
+		}
+	}
+
+	// Run 2: mail credentials present via --env-file, /etc/zfs/zed.d
+	// present, but /etc/msmtprc, /etc/smartd.conf and zed.rc all still
+	// absent — exercises step3/4/5's "updated" branch (the file does not
+	// exist yet, so render_managed_block reports "changed" even though
+	// --dry-run writes nothing).
+	exec_("mkdir -p /etc/zfs/zed.d && printf 'MAILRISE_SMTP_USER=u\\nMAILRISE_SMTP_PASS=p\\n' > /root/creds.env")
+	out2, errOut2, code2 := exec_("/work/install.sh --dry-run --env-file /root/creds.env 2>&1")
+	if code2 != 0 {
+		t.Fatalf("FAIL C12 (dry-run verb audit, run 2): exit=%d: %s %s", code2, out2, errOut2)
+	}
+	for _, mustNotAppear := range []string{
+		"step3 /etc/msmtprc: updated",
+		"step4 /etc/smartd.conf: updated",
+		"step5 /etc/zfs/zed.d/zed.rc: updated",
+	} {
+		if strings.Contains(out2, mustNotAppear) {
+			t.Errorf("FAIL C12 (dry-run verb audit, run 2): claims completed action %q during --dry-run: %s", mustNotAppear, out2)
+		}
+	}
+	for _, mustAppear := range []string{
+		"step3 /etc/msmtprc: would be updated",
+		"step4 /etc/smartd.conf: would be updated",
+		"step5 /etc/zfs/zed.d/zed.rc: would be updated",
+	} {
+		if !strings.Contains(out2, mustAppear) {
+			t.Errorf("FAIL C12 (dry-run verb audit, run 2): missing conditional phrasing %q: %s", mustAppear, out2)
+		}
+	}
+
+	// Run 3: a pre-existing /etc/msmtprc with TWO managed blocks (never
+	// produced by this script itself, but reachable from a restored
+	// backup or an interrupted run) exercises the "collapsed" wording
+	// specifically.
+	exec_(`cat > /etc/msmtprc <<'EOF'
+# >>> agentic-server-supervisor (managed) >>>
+stale one
+# <<< agentic-server-supervisor (managed) <<<
+# >>> agentic-server-supervisor (managed) >>>
+stale two
+# <<< agentic-server-supervisor (managed) <<<
+EOF`)
+	out3, errOut3, code3 := exec_("/work/install.sh --dry-run --env-file /root/creds.env 2>&1")
+	if code3 != 0 {
+		t.Fatalf("FAIL C12 (dry-run verb audit, run 3): exit=%d: %s %s", code3, out3, errOut3)
+	}
+	if strings.Contains(out3, "step3 /etc/msmtprc: collapsed") {
+		t.Errorf("FAIL C12 (dry-run verb audit, run 3): claims a completed collapse during --dry-run: %s", out3)
+	}
+	if !strings.Contains(out3, "step3 /etc/msmtprc: would collapse 2 managed blocks into 1") {
+		t.Errorf("FAIL C12 (dry-run verb audit, run 3): missing conditional collapse phrasing: %s", out3)
+	}
+	logPass(t, "PASS C12 (dry-run verb audit: every action note says would, not did)")
 }
 
 // TestContainer_C12_StackDryRunSummaryHonest: the run summary printed at
@@ -1701,7 +2012,14 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 	if out, _, code := exec_("command -v script"); code != 0 {
 		skipUnlessCI(t, "C12 (stack interactive): the `script` utility is not available in this environment: %s", out)
 	}
-	exec_("mkdir -p /docker-compose")
+	// A structurally OMV-shaped root (one sibling stack, the sentinel.yml
+	// + compose.yml symlink shape) — detection is structural now, not a
+	// bare "/docker-compose exists" check, so this must actually look
+	// like an OMV compose root for --stack-dir under it to get the OMV
+	// layout (sentinel.env) this test asserts against.
+	exec_("mkdir -p /docker-compose/existingstack && " +
+		"printf 'services: {}\\n' > /docker-compose/existingstack/existingstack.yml && " +
+		"ln -sfn existingstack.yml /docker-compose/existingstack/compose.yml")
 
 	const token = "TESTTOKEN_ABCDEF"
 	const chat = "-100999888"
@@ -1765,7 +2083,9 @@ func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
 	if out, _, code := exec_("command -v script"); code != 0 {
 		skipUnlessCI(t, "C12 (stack empty token): the `script` utility is not available in this environment: %s", out)
 	}
-	exec_("mkdir -p /docker-compose")
+	exec_("mkdir -p /docker-compose/existingstack && " +
+		"printf 'services: {}\\n' > /docker-compose/existingstack/existingstack.yml && " +
+		"ln -sfn existingstack.yml /docker-compose/existingstack/compose.yml")
 
 	// Enter, Enter (empty token, empty chat id), then a real mailrise
 	// password — the shape the reviewer measured against a real pty.
