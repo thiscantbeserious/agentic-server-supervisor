@@ -236,7 +236,30 @@ TZ=UTC
 ENV
 }
 
-# vm_run_install_checks PORT KEY USER REMOTE_REPO_DIR INSTALL_ARGS...
+# vm_run_install_checks PORT KEY USER REMOTE_REPO_DIR --stack-dir PATH [MORE INSTALL ARGS...]
+#
+# Deliberately tests the --stack-dir path, never --env-file: --stack-dir is
+# what the documented `curl | sudo bash` flow actually runs (create the
+# stack, fetch the compose file, prompt for secrets, write them);
+# --env-file is the older "I already filled in a file myself" path, and a
+# suite that only exercised that one would never test stack creation,
+# most of what the installer does today. The two are mutually exclusive
+# by install.sh's own design (one names a file to use as-is, the other
+# names a directory to create and populate), passing both is a usage
+# error, not a corner case, this function used to append --env-file to
+# every call regardless of what the caller already passed, which is
+# exactly the exit-64 "mutually exclusive" usage error this comment now
+# prevents from recurring.
+#
+# --stack-dir with no controlling terminal exits 78 rather than assume
+# consent for a missing secret (by design, R5), so the three secrets are
+# pre-seeded into the stack's own env file BEFORE the first run, the
+# same place install.sh would have written them after prompting, just
+# arriving there without a prompt to answer. Assumes PATH is a plain
+# (non-OMV) location, so install.sh's own layout detection resolves
+# ENV_NAME to plain ".env"; every caller today points PATH at an
+# ordinary directory for exactly this reason. A caller testing an actual
+# OMV compose root would need to seed "sentinel.env" instead.
 #
 # The assertions R6 says both variants share: install.sh reaches exit 0
 # (never yet achieved anywhere, see the design note this function's
@@ -248,13 +271,24 @@ ENV
 # function has no business knowing.
 vm_run_install_checks() {
   port="$1" key="$2" user="$3" repo="$4"; shift 4
-  install_args="$*"
 
-  vm_write_env_file "$port" "$key" "$user" "$repo/.env"
+  stack_dir="" prev=""
+  for a in "$@"; do
+    [ "$prev" = "--stack-dir" ] && stack_dir="$a"
+    prev="$a"
+  done
+  if [ -z "$stack_dir" ]; then
+    vm_log "vm_run_install_checks: no --stack-dir in install args ($*), this helper only tests that mode"
+    return 1
+  fi
+
+  vm_ssh "$port" "$key" "$user" "mkdir -p '$stack_dir'"
+  vm_write_env_file "$port" "$key" "$user" "$stack_dir/.env"
   before="$(mktemp)"; after="$(mktemp)"
   vm_dpkg_snapshot "$port" "$key" "$user" > "$before"
 
-  vm_log "install.sh run 1: sudo bash ./install.sh $install_args"
+  cmd="cd '$repo' && sudo bash ./install.sh $*"
+  vm_log "install.sh run 1: $cmd"
   # `out1="$(cmd)"; code1=$?` looks right but is not, under `set -e` (every
   # caller of this function has it) the assignment itself is the simple
   # command `-e` checks: a nonzero exit from the substitution ends the
@@ -264,7 +298,7 @@ vm_run_install_checks() {
   # printed, look identical to output being lost. `if var=$(cmd); then...`
   # is exempt from -e (a command tested by `if` never triggers it), so the
   # exit code and the captured text both survive to be reported.
-  if out1="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"; then
+  if out1="$(vm_ssh "$port" "$key" "$user" "$cmd 2>&1")"; then
     code1=0
   else
     code1=$?
@@ -279,7 +313,7 @@ vm_run_install_checks() {
   vm_assert_no_removed "$before" "$after" || return 1
 
   vm_log "install.sh run 2 (idempotency): expect changed=0"
-  if out2="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"; then
+  if out2="$(vm_ssh "$port" "$key" "$user" "$cmd 2>&1")"; then
     code2=0
   else
     code2=$?
@@ -294,8 +328,9 @@ vm_run_install_checks() {
     return 1
   fi
 
-  vm_log "install.sh --check after convergence: expect exit 0"
-  if vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' --check"; then
+  check_cmd="cd '$repo' && sudo bash ./install.sh $* --check"
+  vm_log "install.sh --check after convergence: $check_cmd"
+  if vm_ssh "$port" "$key" "$user" "$check_cmd"; then
     code3=0
   else
     code3=$?

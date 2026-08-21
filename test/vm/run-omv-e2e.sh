@@ -110,49 +110,18 @@ vm_log "run-omv-e2e: shared install.sh assertions"
 before_smartd="$(ssh_pw "cat /etc/smartd.conf")"
 before_plugins="$(ssh_pw "dpkg-query -W -f='\${Package}\n' 'openmediavault-*' | sort")"
 
-vm_run_install_checks_over_pw() {
-  # vm_run_install_checks needs vm_ssh's key-based SSH; the base image
-  # only carries the throwaway password account, so this variant's checks
-  # are re-run inline against ssh_pw rather than sharing that helper.
-  vm_write_env_file_pw
-  before="$(mktemp)"; after="$(mktemp)"
-  ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$before"
-
-  # Same `set -e` trap as lib.sh's vm_run_install_checks (this function
-  # exists only because that one needs key-based ssh, not because the
-  # bug is different): `out="$(cmd)"; code=$?` under `set -e` never
-  # reaches the `code=$?` line on a nonzero exit, the assignment itself
-  # is what -e checks. `if out=$(cmd); then code=0; else code=$?; fi` is
-  # exempt.
-  if out1="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"; then
-    code1=0
-  else
-    code1=$?
-  fi
-  printf '%s\n' "$out1"
-  [ "$code1" -eq 0 ] || { vm_log "FAIL: install.sh run 1 exit $code1, want 0"; return 1; }
-
-  ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$after"
-  vm_assert_no_removed "$before" "$after" || return 1
-
-  if out2="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"; then
-    code2=0
-  else
-    code2=$?
-  fi
-  printf '%s\n' "$out2"
-  [ "$code2" -eq 0 ] || { vm_log "FAIL: install.sh run 2 exit $code2, want 0"; return 1; }
-  printf '%s\n' "$out2" | grep -q 'changed=0' || { vm_log "FAIL: run 2 did not converge to changed=0"; return 1; }
-
-  if ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env --check"; then
-    code3=0
-  else
-    code3=$?
-  fi
-  [ "$code3" -eq 0 ] || { vm_log "FAIL: install.sh --check exit $code3, want 0"; return 1; }
-}
+# vm_run_install_checks needs vm_ssh's key-based SSH; the base image
+# only carries the throwaway password account, so this variant's checks
+# are re-run inline against ssh_pw rather than sharing that helper. Same
+# mode decision as the Debian variant and for the same reason: --stack-dir
+# is what the real `curl | sudo bash` flow runs, --env-file alone would
+# never exercise stack creation. The stack dir is an ordinary path, not
+# an OMV compose root (that layout is already exercised separately, just
+# above, via --dry-run's auto-detection), so install.sh resolves plain
+# ".env" here, matching what this function seeds.
+STACK_DIR_PW=/home/e2e/sentinel-stack
 vm_write_env_file_pw() {
-  ssh_pw "cat > /home/e2e/repo/.env" <<'ENV'
+  ssh_pw "mkdir -p $STACK_DIR_PW && cat > $STACK_DIR_PW/.env" <<'ENV'
 TELEGRAM_BOT_TOKEN=123456789:vm-e2e-not-a-real-token
 TELEGRAM_CHAT_ID=123456789
 MAILRISE_SMTP_USER=vm-e2e
@@ -163,6 +132,47 @@ APPRISE_PUID=1000
 APPRISE_PGID=1000
 TZ=UTC
 ENV
+}
+
+vm_run_install_checks_over_pw() {
+  vm_write_env_file_pw
+  before="$(mktemp)"; after="$(mktemp)"
+  ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$before"
+
+  install_cmd="cd /home/e2e/repo && sudo bash ./install.sh --stack-dir $STACK_DIR_PW"
+  vm_log "install.sh run 1: $install_cmd"
+  # Same `set -e` trap as lib.sh's vm_run_install_checks (this function
+  # exists only because that one needs key-based ssh, not because the
+  # bug is different): `out="$(cmd)"; code=$?` under `set -e` never
+  # reaches the `code=$?` line on a nonzero exit, the assignment itself
+  # is what -e checks. `if out=$(cmd); then code=0; else code=$?; fi` is
+  # exempt.
+  if out1="$(ssh_pw "$install_cmd 2>&1")"; then
+    code1=0
+  else
+    code1=$?
+  fi
+  printf '%s\n' "$out1"
+  [ "$code1" -eq 0 ] || { vm_log "FAIL: install.sh run 1 exit $code1, want 0"; return 1; }
+
+  ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$after"
+  vm_assert_no_removed "$before" "$after" || return 1
+
+  if out2="$(ssh_pw "$install_cmd 2>&1")"; then
+    code2=0
+  else
+    code2=$?
+  fi
+  printf '%s\n' "$out2"
+  [ "$code2" -eq 0 ] || { vm_log "FAIL: install.sh run 2 exit $code2, want 0"; return 1; }
+  printf '%s\n' "$out2" | grep -q 'changed=0' || { vm_log "FAIL: run 2 did not converge to changed=0"; return 1; }
+
+  if ssh_pw "$install_cmd --check"; then
+    code3=0
+  else
+    code3=$?
+  fi
+  [ "$code3" -eq 0 ] || { vm_log "FAIL: install.sh --check exit $code3, want 0"; return 1; }
 }
 vm_run_install_checks_over_pw
 
