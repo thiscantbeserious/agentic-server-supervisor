@@ -12,20 +12,27 @@
 set -eu
 set -o pipefail
 
-# Pinned rather than "latest": a moving install target would change the
-# image out from under its own content-hash tag without the tag noticing.
-# openmediavault.org's own documented install command as of this writing.
-# UNVERIFIED beyond documentation: no local sandbox can run apt against a
-# real Debian mirror, so whether this URL and this exact invocation still
-# work is proven only by the first real CI run, not by anything here.
-OMV_INSTALL_URL="https://packages.openmediavault.org/public/install"
+# packages.openmediavault.org/public/install no longer exists (404 direct,
+# 403 through the CDN); the maintained installer lives in the plugin
+# developers' repository. Pinned to a commit rather than master: the URL
+# feeds this image's content-hash tag, and a moving target would change what
+# the image contains while the tag stayed put.
+OMV_INSTALL_REF="6983f480513e23e8362a0f043879745df557cab7"
+OMV_INSTALL_URL="https://raw.githubusercontent.com/OpenMediaVault-Plugin-Developers/installScript/${OMV_INSTALL_REF}/install"
 
 echo "== provision-omv: base OS =="
 apt-get update
 apt-get install -y curl ca-certificates
 
 echo "== provision-omv: running OMV's own installer =="
-curl -fsSL "$OMV_INSTALL_URL" | bash
+# -n skips the installer's network reconfiguration, which purges cloud-init
+# and network-manager, rewrites the interfaces under systemd-networkd and
+# reboots. That would strip this VM of the DHCP-over-slirp setup QEMU gives
+# it and of the datasource the build boot depends on, so the machine that
+# came back would not be the one being provisioned. -r additionally refuses
+# any reboot: today every reboot path sits inside the block -n already
+# skips, and this keeps that true if a later revision adds another one.
+curl -fsSL "$OMV_INSTALL_URL" | bash -s -- -n -r
 
 echo "== provision-omv: OMV compose plugin =="
 # The plugin that actually writes the compose.yml symlinks this job exists
