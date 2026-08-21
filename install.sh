@@ -176,11 +176,18 @@ compute_mail_status() {
     SMTP_USER="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
     SMTP_PASS="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
   fi
-  if [ "$MSMTP_OK" -ne 1 ]; then
-    MAIL_OK=0
-    MAIL_NOT_OK_REASON="msmtp package not installed"
-    return
-  fi
+  # Credentials checked BEFORE MSMTP_OK, not after: step1 now installs
+  # msmtp only when credentials are already present (mail_wiring_wanted),
+  # so "credentials missing" and "package missing" are no longer
+  # independent facts on a first run, they are the same fact seen from
+  # two sides, and the msmtp-package branch below would otherwise
+  # shadow it every time, reporting a transient-sounding "package not
+  # installed" (no MISSING_ENV_INPUT, exit 75) for what is actually the
+  # permanent "a human has not filled in the env file yet" case (exit
+  # 78). Checking credentials first restores the distinction: package
+  # absence AFTER credentials are confirmed present can only mean the
+  # install itself failed (network, held package), which is genuinely
+  # retryable.
   if [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
     # mailrise enforces SMTP AUTH unconditionally (R4 requires both
     # MAILRISE_SMTP_USER and MAILRISE_SMTP_PASS with `:?`), so a real
@@ -193,6 +200,11 @@ compute_mail_status() {
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
       MISSING_ENV_INPUT=1
     fi
+    return
+  fi
+  if [ "$MSMTP_OK" -ne 1 ]; then
+    MAIL_OK=0
+    MAIL_NOT_OK_REASON="msmtp package not installed"
     return
   fi
   MAIL_OK=1
@@ -321,6 +333,73 @@ pkg_installed() {
   dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
+# existing_mail_transport_agent: the name of whichever installed package
+# (other than msmtp-mta itself) currently provides mail-transport-agent
+# on this host (postfix, exim4, sendmail, ...), read from dpkg's own
+# Provides field for every installed package rather than a hardcoded MTA
+# name list. This is deliberately the same field apt itself resolves a
+# conflict from: msmtp-mta declares `Conflicts: mail-transport-agent` in
+# its own control data (confirmed against real msmtp 1.8.28 on Debian
+# 13, `apt-cache show msmtp-mta`), so `apt-get install msmtp-mta` on a
+# host that already has postfix does not merely fail to coexist, apt
+# resolves the conflict by silently planning to REMOVE postfix, which is
+# exactly the incident this exists to prevent: postfix's own removal
+# cascaded into openmediavault core and ten of its plugins, because OMV
+# depends on postfix. Reading dpkg's Provides field (rather than a fixed
+# list of "postfix exim4 sendmail ...") means a provider this project
+# has never heard of is still detected, the same way apt itself would
+# find it. Empty output, no other provider found.
+existing_mail_transport_agent() {
+  dpkg-query -W -f='${Package}\t${Status}\t${Provides}\n' 2>/dev/null \
+    | awk -F'\t' '$2 == "install ok installed" && $1 != "msmtp-mta" && index($3, "mail-transport-agent") { print $1; exit }'
+}
+
+# mail_wiring_wanted: true when step3 (the only one of steps 3-5 with no
+# gate beyond mail being configured) would actually write /etc/msmtprc
+# once msmtp is installed, i.e. MAILRISE_SMTP_USER/PASS are already
+# present in ENV_FILE. Read directly here, before step1, rather than
+# waiting for compute_mail_status (which needs MSMTP_OK, the very thing
+# step1 is deciding, a circular dependency this sidesteps by reading the
+# same two keys independently).
+#
+# Deliberately NOT also gated on step4/step5's OMV-managed-file check:
+# those two steps having nothing to do on an OpenMediaVault host does
+# not mean msmtp has no purpose, step3 does not consult that marker at
+# all and legitimately writes /etc/msmtprc whenever credentials exist,
+# regardless of what OMV auto-generates elsewhere. Narrowing this on
+# step4/5's gate too would silently break step3 on exactly the platform
+# this project targets. What actually happened in production was a
+# FIRST run with no credentials in the env file yet, the case this
+# function alone is enough to catch: nothing downstream can use msmtp at
+# all until a human fills in the env file, so step1 has no reason to
+# install it in the meantime.
+mail_wiring_wanted() {
+  local u="" p=""
+  if [ -f "$ENV_FILE" ]; then
+    u="$(strip_quotes "$(grep "^MAILRISE_SMTP_USER=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
+    p="$(strip_quotes "$(grep "^MAILRISE_SMTP_PASS=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)")"
+  fi
+  [ -n "$u" ] && [ -n "$p" ]
+}
+
+# apt_would_remove PACKAGE..., the space-separated names apt's OWN
+# simulated install plan (`apt-get install -s`, read-only, "just print"
+# mode, touches nothing on disk) would remove to satisfy installing
+# PACKAGE, empty if none. This is the general form of the
+# mail-transport-agent conflict above: apt can resolve ANY future
+# package conflict by removing something, not only that one, and
+# --no-remove (below) only refuses it AFTER the fact. This is what lets
+# an operator be told WHAT before that refusal happens, the dry run that
+# preceded the real incident printed "would install rasdaemon
+# lm-sensors msmtp msmtp-mta" and nothing about the removal that install
+# went on to cause; a preview that cannot show the consequence is not a
+# preview of the decision actually being made.
+apt_would_remove() {
+  local sim
+  sim="$(apt-get install -s -y --no-install-recommends "$@" 2>/dev/null)"
+  printf '%s\n' "$sim" | awk '/^Remv /{printf "%s ", $2}'
+}
+
 # strip_quotes removes ONE matched pair of surrounding single or double
 # quotes from an env-file value. Quoting a value
 # (MAILRISE_SMTP_PASS="secret") is ordinary env-file style, and
@@ -397,16 +476,71 @@ prompt_with_default() {
   fi
 }
 
-# prompt_secret PROMPT, reads one line from /dev/tty with terminal echo
-# off (read -rs), so the value never appears on screen, in scrollback, or
-# in any session log a terminal multiplexer might keep. Same class of rule
+# prompt_secret PROMPT, reads one line from /dev/tty character by
+# character, printing one `*` per character typed so an operator pasting
+# or typing a long token gets feedback that keystrokes are landing,
+# without ever putting the value itself on screen, in scrollback, or in
+# any session log a terminal multiplexer might keep. Same class of rule
 # as C7's prohibition on logging the apprise key: a secret that touches
-# this script's own output at all is a secret that can leak through a log
-# nobody thought to protect.
+# this script's own output at all is a secret that can leak through a
+# log nobody thought to protect.
+#
+# The value is built by plain string concatenation of whatever `read -r
+# -n 1` hands back, one call per character, never by a mechanism this
+# project has already been burned by rewriting a credential in transit:
+# sed's `&`/`/` handling, bash pattern substitution's own undocumented
+# `&`-in-replacement behavior, `awk -v`'s escape processing, and a
+# `printf` format string in a test harness (see R5, mailrise.conf
+# rendering) are four separate real defects from four separate
+# "obviously safe" string operations touching a credential. `-r` is not
+# decorative here: without it, `read` treats a backslash as an escape
+# for the character that follows, corrupting exactly the class of value
+# (a password, a token) most likely to contain one. Backspace/DEL
+# deletes the last character from BOTH the buffer (`${val%?}`, which
+# removes one trailing byte, not one trailing grapheme, but a
+# credential is validated byte-for-byte against what the server
+# expects, not read as prose) and the visible `*` row; Enter is read as
+# a delimiter, not a character, `read -n 1` returns with an empty $ch
+# exactly then, terminating the loop without appending anything.
+#
+# `stty -echo` is set for the WHOLE loop, once, rather than relying on
+# `read -s` to toggle the terminal's echo flag on every single-character
+# call: `read -s` only suppresses echo for the duration of that one
+# call, and the brief window between consecutive calls while the next
+# one has not yet re-armed it is a real gap a fast keystroke could land
+# in and get echoed by the terminal itself, defeating the masking (not a
+# value-corruption risk, values are captured either way, but a needless
+# one to leave open when disabling echo for the whole read loop up
+# front removes it entirely). `read -s` is kept as a second layer in
+# case `stty -g` fails (returns empty, skipped): masking best-effort,
+# never letting a masking failure block capturing the value correctly.
 prompt_secret() {
-  local val=""
+  local val="" ch stty_orig=""
   printf '%s' "$1" > /dev/tty
-  read -rs val < /dev/tty
+  stty_orig="$(stty -g < /dev/tty 2>/dev/null)"
+  if [ -n "$stty_orig" ]; then
+    stty -echo < /dev/tty 2>/dev/null
+  fi
+  while IFS= read -r -s -n 1 ch < /dev/tty; do
+    if [ -z "$ch" ]; then
+      break
+    fi
+    case "$ch" in
+      $'\x7f' | $'\x08')
+        if [ -n "$val" ]; then
+          val="${val%?}"
+          printf '\b \b' > /dev/tty
+        fi
+        ;;
+      *)
+        val="${val}${ch}"
+        printf '*' > /dev/tty
+        ;;
+    esac
+  done
+  if [ -n "$stty_orig" ]; then
+    stty "$stty_orig" < /dev/tty 2>/dev/null
+  fi
   printf '\n' > /dev/tty
   printf '%s' "$val"
 }
@@ -641,7 +775,7 @@ ensure_curl() {
     return 1
   fi
   apt-get update -qq || true
-  apt-get install -y --no-install-recommends curl || true
+  apt-get install -y --no-install-recommends --no-remove curl || true
   command -v curl >/dev/null 2>&1
 }
 
@@ -1452,37 +1586,100 @@ step0b_secrets() {
 # --- step 1: packages ----------------------------------------------------
 
 step1() {
+  # desired: rasdaemon/lm-sensors always, they have standalone value
+  # regardless of mail (see docker_preflight's own comment on the same
+  # point). msmtp/msmtp-mta are added only when something downstream can
+  # actually use them, never installed on spec, that is the root cause
+  # underneath the production incident: a mail transport was installed
+  # for steps that went on to skip anyway.
+  local desired=(rasdaemon lm-sensors)
+  local existing_mta
+  existing_mta="$(existing_mail_transport_agent)"
+  if mail_wiring_wanted; then
+    desired+=(msmtp)
+    if [ -n "$existing_mta" ]; then
+      note "step1 packages: msmtp-mta will not be installed, $existing_mta already provides mail-transport-agent and msmtp-mta declares Conflicts: mail-transport-agent, apt would resolve that by removing $existing_mta; msmtp itself claims no such role and installs normally for step3's own use"
+    else
+      desired+=(msmtp-mta)
+    fi
+  else
+    note "step1 packages: msmtp/msmtp-mta not installed, no MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS in $ENV_FILE yet, so step3 has nothing to configure them for and steps 4-5 gate on the same thing; re-run once the env file has credentials"
+  fi
+
   need=()
-  for p in rasdaemon lm-sensors msmtp msmtp-mta; do
+  for p in "${desired[@]}"; do
     pkg_installed "$p" || need+=("$p")
   done
+
+  # want_msmtp mirrors, for the CHECK/DRY_RUN preview branches below,
+  # whether msmtp ends up in `desired` at all, RASDAEMON_OK/MSMTP_OK
+  # used to be set unconditionally to 1 in both of those, which was
+  # correct back when msmtp was unconditionally desired; forcing
+  # MSMTP_OK=1 now, when mail_wiring_wanted is false and msmtp was never
+  # added to `desired`, would preview steps 3-5 as if mail were about to
+  # work when nothing installs it this run.
+  local want_msmtp=0
+  mail_wiring_wanted && want_msmtp=1
+
   if [ "${#need[@]}" -eq 0 ]; then
-    note "step1 packages: already installed (rasdaemon lm-sensors msmtp msmtp-mta)"
-    RASDAEMON_OK=1
-    MSMTP_OK=1
+    note "step1 packages: already installed (${desired[*]})"
+    pkg_installed rasdaemon && RASDAEMON_OK=1
+    { pkg_installed msmtp || pkg_installed msmtp-mta; } && MSMTP_OK=1
     return
   fi
-  note "step1 packages: $(verb_phrase "installing" "would install") ${need[*]}"
-  if [ "$CHECK" -eq 1 ]; then
-    changed=$((changed+1))
-    RASDAEMON_OK=1
-    MSMTP_OK=1
-    return
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] would run: apt-get install -y --no-install-recommends ${need[*]}"
-    changed=$((changed+1))
-    RASDAEMON_OK=1
-    MSMTP_OK=1
-    return
-  fi
+
   # A host with stale apt lists fails with "Unable to locate package"
   # here, surfacing as exit 75 "safe to re-run" when re-running alone
   # does not fix it. update is idempotent and cheap; run it right
   # before the one step that needs current lists rather than assuming
-  # they're fresh.
-  apt-get update -qq || true
-  if ! apt-get install -y --no-install-recommends "${need[@]}"; then
+  # they're fresh. Skipped under --check/--dry-run: refreshing
+  # /var/lib/apt/lists is a host write, and both modes promise to
+  # change nothing, so their own removal preview below runs against
+  # whatever lists are already on disk, best-effort rather than
+  # guaranteed current.
+  local removed=""
+  if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+    apt-get update -qq || true
+  fi
+  removed="$(apt_would_remove "${need[@]}")"
+
+  note "step1 packages: $(verb_phrase "installing" "would install") ${need[*]}"
+  if [ -n "$removed" ]; then
+    note "step1 packages: WARNING, installing ${need[*]} would REMOVE: ${removed% }, recommend NOT proceeding until that conflict is resolved by hand; --no-remove refuses this outright on a real run rather than doing it silently"
+  fi
+
+  if [ "$CHECK" -eq 1 ]; then
+    changed=$((changed+1))
+    RASDAEMON_OK=1
+    [ "$want_msmtp" -eq 1 ] && MSMTP_OK=1
+    return
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would run: apt-get install -y --no-install-recommends --no-remove ${need[*]}"
+    changed=$((changed+1))
+    RASDAEMON_OK=1
+    [ "$want_msmtp" -eq 1 ] && MSMTP_OK=1
+    return
+  fi
+
+  if [ -n "$removed" ]; then
+    # Reuses confirm_monitoring_change (below, step4/step5's own
+    # [y/N]-from-/dev/tty helper): the shape is identical, a real host
+    # mutation bigger than this script's ordinary idempotent file
+    # writes, needing the operator's explicit yes, defaulting to no,
+    # never prompting under --check/--dry-run (already handled above,
+    # this branch is real-run only). A second prompt helper doing the
+    # same three things would be the thing worth avoiding, not the
+    # reuse across steps.
+    if ! confirm_monitoring_change "step1 packages: installing ${need[*]} would REMOVE ${removed% }, proceed anyway?"; then
+      note "step1 packages: skipped installing ${need[*]}, $CONFIRM_REASON (would have removed: ${removed% })"
+      pkg_installed rasdaemon && RASDAEMON_OK=1
+      { pkg_installed msmtp || pkg_installed msmtp-mta; } && MSMTP_OK=1
+      return
+    fi
+  fi
+
+  if ! apt-get install -y --no-install-recommends --no-remove "${need[@]}"; then
     echo "$PROG: apt-get install failed" >&2
     TRANSIENT_FAIL=1
   else
@@ -1497,7 +1694,7 @@ step1() {
   if [ "$RASDAEMON_OK" -ne 1 ]; then
     note "step1 packages: rasdaemon not installed, step2 will be skipped"
   fi
-  if [ "$MSMTP_OK" -ne 1 ]; then
+  if [ "$want_msmtp" -eq 1 ] && [ "$MSMTP_OK" -ne 1 ]; then
     note "step1 packages: msmtp not installed, steps 3-5's mail delivery will be skipped"
   fi
 }
