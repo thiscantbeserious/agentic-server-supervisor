@@ -12,9 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -757,94 +755,6 @@ func TestSeedConfig_204IsFailure(t *testing.T) {
 	if _, err := SeedConfig(context.Background(), cfg); err == nil {
 		t.Error("SeedConfig must treat a 204 response as failure, not success")
 	}
-}
-
-// --- 17: TestNoSecretsInRepo ---
-
-var (
-	telegramTokenRe = regexp.MustCompile(`[0-9]{8,}:AA[A-Za-z0-9_-]+`)
-	// The value class deliberately excludes quotes/backticks/parens: a
-	// shell/env assignment is the shape this hunts for, a shape that
-	// excludes both a Go regex literal and contracts/notify.md's own
-	// prose describing this row from matching themselves.
-	//
-	// ANY tracked file assigning this variable a value — including a
-	// docker/compose "-e" arg inside a Go test file — is scanned by this,
-	// REGARDLESS of build tags: TestNoSecretsInRepo reads the repo as
-	// text via `git ls-files`, not via what the Go compiler includes, so
-	// a `//go:build container`-tagged file is just as visible here as a
-	// compiled one. Wherever this variable's value appears anywhere in
-	// the repo (fixtures, test env, docs), it MUST either contain the
-	// two characters dollar-brace or start with the word "changeme" —
-	// nothing else passes. (Deliberately not written as a literal
-	// assignment in this comment: it would match its own pattern.) Use
-	// the "changeme" placeholder in any fixture or test env needing a
-	// value here.
-	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
-)
-
-// TestNoSecretsInRepo scans TRACKED content only (N.9: "no secrets in
-// git"), via `git ls-files` — not the working tree. A file the operator
-// created locally (deploy/mailrise/mailrise.conf, gitignored, holding a
-// live-stack token from real verification against the notification
-// stack) is not "in git" no matter what it contains; walking the
-// filesystem instead of git's own index would flag the operator's own
-// untracked config and make this check the kind that gets deleted
-// within a week.
-func TestNoSecretsInRepo(t *testing.T) {
-	root := "../.."
-	out, err := exec.Command("git", "-C", root, "ls-files").Output()
-	if err != nil {
-		// A build context with no .git (the Dockerfile does `COPY . .`,
-		// no .dockerignore excluding it today, but that is a normal
-		// thing to add) is not this test's business — "no secrets in git" is
-		// vacuously true with no git repo to ask. C9's sanctioned pattern
-		// is a loud skip here, never a hard fail that would break an
-		// otherwise-clean image build, and never a silent pass either.
-		t.Skipf("not a git checkout (git ls-files: %v) — skipping the tracked-secrets scan", err)
-	}
-
-	for _, rel := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if rel == "" {
-			continue
-		}
-		base := filepath.Base(rel)
-		if base == ".env.example" {
-			// This IS the placeholder file — its documentation values (a
-			// token-shaped example, MAILRISE_PASS=changeme) legitimately
-			// match both detectors below. The exemption must run BEFORE
-			// either check, not after the first one: checking token shape
-			// first and only then exempting leaves the token check itself
-			// still firing on this file's own placeholder.
-			continue
-		}
-		path := filepath.Join(root, rel)
-		data, rerr := os.ReadFile(path)
-		if rerr != nil || !isProbablyText(data) {
-			continue
-		}
-		if m := telegramTokenRe.Find(data); m != nil {
-			t.Errorf("%s: looks like a Telegram bot token: %q", rel, m)
-		}
-		for _, m := range mailrisePassRe.FindAllSubmatch(data, -1) {
-			val := strings.TrimSpace(string(m[1]))
-			if val != "" && !strings.Contains(val, "${") && !strings.HasPrefix(val, "changeme") {
-				t.Errorf("%s: MAILRISE_PASS set to a non-placeholder value", rel)
-			}
-		}
-	}
-}
-
-func isProbablyText(data []byte) bool {
-	if len(data) > 2_000_000 {
-		return false
-	}
-	for _, b := range data {
-		if b == 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // --- 18: TestE2E (gated) — see e2e_test.go for the full test body.

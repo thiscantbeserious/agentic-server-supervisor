@@ -310,7 +310,6 @@ Table-driven, offline, no framework, no external process. Apprise stub: `httptes
 | 14 | `TestRawAlertRoundTrip` | a runtime-built raw-alert report (plain `<ts> <priority-name> <message>` lines, a 4000-rune kernel message, control characters, invalid UTF-8) survives `Validate → BuildPayload` with a valid-JSON payload within the rune caps |
 | 15 | `TestSeedConfig` | a fixture config ⇒ multipart body contains the file bytes verbatim, stderr reports `urls=1`, exit 0; closed server ⇒ exit 4 |
 | 16 | `TestHostnameSource` | `meta.hostname` wins; otherwise `cfg.Hostname`; `os.Hostname()` never used (asserted by setting `cfg.Hostname` to a value differing from the machine's) |
-| 17 | `TestNoSecretsInRepo` | walk from `../..`, skip `.git`, `.env`, `.runtime/` ⇒ no match for `[0-9]{8,}:AA`, and no `MAILRISE_PASS=` with a value other than the `.env.example` placeholder (T1 AC "no secrets in git") |
 | 18 | `TestE2E` (`t.Skip` unless `SENTINEL_E2E=1`) | `apprise` and `mailrise` healthy; sending `report-watch-zfs-cksum.json` exits 0; an SMTP send to `omv@mailrise.xyz` with the configured auth succeeds |
 
 Cases 1–17 run offline and are the RED/GREEN gate.

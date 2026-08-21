@@ -317,7 +317,7 @@ func fullTickEnv(t *testing.T, stateDir string) []string {
 		"SENTINEL_HOSTNAME=bam",
 		"APPRISE_URL=" + apprise.URL,
 		"MAILRISE_USER=u",
-		"MAILRISE_PASS=changeme", // never actually used (this test only exercises the apprise path); matches TestNoSecretsInRepo's placeholder exemption
+		"MAILRISE_PASS=changeme", // never actually used: this test only exercises the apprise path
 	}
 }
 

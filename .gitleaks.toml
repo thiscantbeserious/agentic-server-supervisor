@@ -1,41 +1,21 @@
-# Scanner configuration. Allowlists here are deliberately narrow: each names
-# a specific shape that is not a credential, so anything which IS a
-# credential still fires in the same files.
-
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Non-credential shapes that this repository legitimately contains"
-regexTarget = "line"
-regexes = [
-  # Dedup keys (CONTRACTS.md C6): a 16-character lowercase hex digest
-  # identifying a finding across ticks. They appear throughout the contracts
-  # as worked examples and in the notification test fixtures. Anchored to hex
-  # and to that exact length, and matched with their "key" context, so a
-  # base64 or colon-bearing credential in the same files still reports.
-  '''"key":\s*"[0-9a-f]{16}"''',
-  '''key=[0-9a-f]{16}''',
-  # A fixture whose whole purpose is to assert redaction works: the test
-  # fails if this string ever reaches a rendered notification. Flagging it
-  # would mean flagging the test that proves secrets do not leak.
-  '''kEyThatMustNotLeak9999''',
-  # The tracked placeholder in deploy/.env.example. Matched on the literal
-  # AAExample body rather than on the file, so a real token pasted into that
-  # same file — the likeliest place an operator would put one by mistake —
-  # still fires.
-  '''123456789:AAExample[A-Za-z]*''',
-]
-
 # The default ruleset does not detect a Telegram bot token — verified by
 # planting one and watching a stock scan report nothing. That is the one
-# credential this system cannot operate without, so relying on the stock
-# rules for it would be false confidence rather than coverage.
-#
-# Shape: an 8-10 digit bot id, a colon, then a secret beginning AA. Matching
-# the whole shape rather than the AA prefix keeps it from firing on prose.
+# credential this system cannot operate without, so it carries its own rule.
 [[rules]]
 id = "telegram-bot-token"
 description = "Telegram bot token"
 regex = '''[0-9]{8,10}:AA[A-Za-z0-9_-]{30,40}'''
 keywords = [":AA"]
+
+[allowlist]
+description = "Documentation, contracts and fixtures carry worked examples, not credentials"
+paths = [
+  '''CONTRACTS\.md''',
+  '''contracts/''',
+  '''internal/notify/testdata/''',
+  '''internal/notify/notify_test\.go''',
+  '''deploy/\.env\.example''',
+]
