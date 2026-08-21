@@ -141,6 +141,19 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
   3. **Delete any `/config/<key>.cfg` in the apprise volume.** apprise ignores it while it looks authoritative; the local volume still holds one from T1 diagnosis.
   **Carried from T7 — watch during the trial, do not pre-fix:** `postApprise` shares Go's default HTTP transport pool across calls. Measured against a real apprise-api, a request landing on a connection the server has started tearing down fails with `transport: EOF` at roughly 3/40 (7.5%). Steady-state ticks are minutes apart against `IdleConnTimeout`'s 90s, so this should not surface in normal operation — the one path that posts back-to-back is `drainOutbox` draining a multi-item backlog, which only accumulates after apprise has already been down. If it recovers and the drain trips an EOF on a queued item, that item stays queued and retries next tick, having burned one attempt and moved SMTP escalation one step closer — degraded, not lost. Check the trial logs for `transport: EOF` during any post-recovery drain; if it recurs, `DisableKeepAlives` on the notify client is the proven one-line fix, held out of T7 as a deliberate scope call.
   **`install.sh`'s value-taking flags reject a following flag as their value.** `--mailrise-host --check` (value omitted, next token happens to be another flag) exits 64 rather than silently treating `--check` as the hostname and running for real — the hazard a supervised run could otherwise miss (`changed=N` would show it, but only if someone's watching) is closed at the parser, not documented as a thing to notice.
+- **T11 — host platform support beyond Debian/OMV**, in priority order: **Unraid > TrueNAS SCALE > Arch**.
+  **Build after T8's trial.** The Debian path must be proven on a real host before it is generalised, or the abstraction is designed against assumptions rather than behaviour.
+
+  **The constraint is persistence, not packaging.** Swapping `apt-get` for `pacman` is the small part. The installer's other three actions — writing `/etc/msmtprc`, adding `DEVICESCAN` to `/etc/smartd.conf`, wiring ZED — assume a writable, persistent `/etc` with systemd underneath. Two of the three targets break that assumption at a level no flag can paper over:
+
+  - **Unraid** runs its root filesystem from a RAM disk rebuilt at every boot, so writes to `/etc` are discarded on reboot. Slackware-based: no `apt`, no systemd, services are rc.d scripts. Persistence runs through `/boot/config` and the `go` script — a different mechanism, not a different command. It also ships its own notification system, which already delivers what the `smartd -m` → mailrise path delivers.
+  - **TrueNAS SCALE** is Debian with systemd and therefore looks closest, but its root is deliberately immutable and package installs are neither supported nor preserved across updates. It too has native alerting.
+  - **Arch** is genuinely just a package-manager swap: `pacman`, systemd, writable `/etc`.
+
+  **The shape this implies is a seam, not a matrix.** The container half — supervisor, apprise, mailrise — already runs anywhere Docker does, on both published architectures, unchanged. Only host integration varies. On Unraid and TrueNAS the right answer is likely to **stop writing to `/etc` at all** and hook the platform's existing alert plumbing instead, which makes this an architecture decision rather than an installer flag. Sizing follows from that: Arch is a package-manager abstraction, Unraid is the real work, TrueNAS may reduce to "use the platform's own alerting".
+
+  **Recon before design, read-only and announced, exactly as the Debian path was surveyed:** what each host already has installed, how its notification system is invoked, whether `smartd` is already configured and monitoring a non-zero device count, and what survives a reboot. Designing this from documentation rather than from the machines would repeat the mistake that made `install.sh`'s first draft assume a path it had never seen.
+
 - **T10 (optional, later) — mute**: suppress notifications for a chosen window without stopping the supervisor.
   **Build after T8's 24h trial, not before.** The trial is the data that says whether mute is needed, which durations matter, and what should bypass one. If the trial yields four messages a day the answer is "not needed"; if it yields forty, the interesting question is why, and a mute button would be treating the symptom.
 
@@ -155,7 +168,7 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
 
 - **T9 (optional, later)** — ZeroClaw investigator (upstream) reacting to ALERT, read-only whitelist. Own branch, only after 2 weeks of stable operation.
 
-**Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8. (T3–T6 need T2; T6 needs T1.)
+**Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8 → T11. (T3–T6 need T2; T6 needs T1. T11 generalises the host integration T8 proves.)
 
 **Open inputs from the user:** Telegram bot token + chat ID (for T1 verification); go per TODO.
 
