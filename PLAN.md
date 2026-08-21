@@ -154,6 +154,17 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
 
   **Recon before design, read-only and announced, exactly as the Debian path was surveyed:** what each host already has installed, how its notification system is invoked, whether `smartd` is already configured and monitoring a non-zero device count, and what survives a reboot. Designing this from documentation rather than from the machines would repeat the mistake that made `install.sh`'s first draft assume a path it had never seen.
 
+- **T12 — CI supply-chain hardening, completing what the first pass started.** MVP scope, not optional: the pipeline holds `packages: write`, so a compromised step publishes an image under this repository's name that the rollout host then pulls.
+
+  **Already in place:** every action pinned by commit SHA rather than a mutable tag (the vector used to retag actions and silently swap code under every consumer), a secret-scanning job holding no token, no secrets and no registry scope, and GitHub's native secret scanning with push protection plus Dependabot security updates.
+
+  **What remains:**
+  - **Scan the built image, not only the source.** Source scanning cannot see a value that enters through a build argument, a cached layer, or a base image, and the image is the artifact that reaches the host. This is the check that matches the actual threat model. Gate the tag on it: digests may publish, a tag may not move to an image that failed a scan.
+  - **Generic-secret detection.** Provider-pattern matching catches a Telegram token and misses a mailrise password, which is the credential this deployment actually turns on. GitHub's non-provider patterns and validity checks cover it where the plan allows; otherwise the scanner job's own ruleset must.
+  - **Egress control.** The strongest answer to a compromised step is that it cannot reach the network to exfiltrate anything. GitHub's native egress firewall enforces this outside the runner VM, so it holds even against root inside the job. Adopt it when it ships rather than building a substitute.
+
+  **The principle to preserve when extending any of this:** a job that holds nothing is worthless to whoever compromises it. Every addition that wants a token in order to be more helpful — commenting on pull requests, pushing fixes — trades away the property that makes the job safe.
+
 - **T10 (optional, later) — mute**: suppress notifications for a chosen window without stopping the supervisor.
   **Build after T8's 24h trial, not before.** The trial is the data that says whether mute is needed, which durations matter, and what should bypass one. If the trial yields four messages a day the answer is "not needed"; if it yields forty, the interesting question is why, and a mute button would be treating the symptom.
 
@@ -168,7 +179,7 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
 
 - **T9 (optional, later)** — ZeroClaw investigator (upstream) reacting to ALERT, read-only whitelist. Own branch, only after 2 weeks of stable operation.
 
-**Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8 → T11. (T3–T6 need T2; T6 needs T1. T11 generalises the host integration T8 proves.)
+**Dependencies:** T1‖T2 → T3 → T4 → T5 → T6 → T7 → T8 → T11. (T3–T6 need T2; T6 needs T1. T11 generalises the host integration T8 proves. T12 is independent of the rollout and can land at any point.)
 
 **Open inputs from the user:** Telegram bot token + chat ID (for T1 verification); go per TODO.
 
