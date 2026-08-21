@@ -66,7 +66,7 @@ Confirmed (systemd man pages, netdata code/docs, node_exporter README, all 2-0):
 
 Unverified (test empirically in T7, do not assume): `sensors -j` with `/sys:ro` unprivileged; rasdaemon file permissions; NVMe SMART; OOM-kill events; read_only pitfalls (tmpfs, DNS, TZ).
 
-### 2.7 Target server analysis `bam` (192.168.1.151, read-only, 2026-08-15)
+### 2.7 Reference host survey (read-only, 2026-08-15)
 Debian 13 (trixie), kernel 7.1.3, **is itself the OMV box** (openmediavault 8.5.6), real Docker 29.7.2:
 - Journal persistent, setgid `systemd-journal` (**GID 999** → the `group_add` value is settled)
 - ZFS 2.4.3: pools `cache` + `hotstore` (mirror); **zed and smartd already running** — only the mail target is missing
@@ -84,8 +84,8 @@ The supervisor is one Go binary (`sentinel`, subcommands) instead of bash script
 
 ```mermaid
 flowchart TB
-    subgraph bam["Target server bam (Debian 13, OMV)"]
-        subgraph host["Host — native, minimal"]
+    subgraph target["Reference host (Debian 13, OMV)"]
+        subgraph native["Host — native, minimal"]
             rasd["rasdaemon<br/>(tracepoints → /var/lib/rasdaemon)"]
             smartd["smartd -m<br/>(LLM-free disk alerts)"]
             zed["zfs-zed ZED_EMAIL_ADDR<br/>(LLM-free ZFS alerts)"]
