@@ -152,7 +152,28 @@ echo "== provision-omv: materialising a real compose stack =="
 # variant exists: every hand-written fixture used a relative one, which is
 # why the compose-root defect survived them all. createsymlinks defaults to
 # 1, so the symlink needs no further setting.
-rpc "Compose" "setFile" '{"name":"e2e-probe","description":"compose-root detection probe","body":"services:\n  probe:\n    image: busybox\n    command: [\"true\"]\n","showenv":false,"env":"","showoverride":false,"override":""}' >/dev/null
+#
+# setFile is allowed to fail. It saves the object and then deploys, and that
+# deploy restarts the engine daemon the call is running inside, so the call
+# dies with its own connection and OMV reports the contentless "Invalid RPC
+# response. Please check the syslog". The journal shows the engine being
+# stopped mid-call with omv-salt still running under it. The plugin's own
+# test harness expects this too and recovers the uuid from the list instead.
+#
+# So: save, then confirm from the database that it really is saved, then
+# deploy from here, where no restart can pull the ground out.
+rpc "Compose" "setFile" '{"name":"e2e-probe","description":"compose-root detection probe","body":"services:\n  probe:\n    image: busybox\n    command: [\"true\"]\n","showenv":false,"env":"","showoverride":false,"override":""}' >/dev/null \
+  || echo "provision-omv: setFile reported a failure, checking whether the object was stored regardless" >&2
+
+file_uuid="$(rpc "Compose" "getFileList" '{"start":0,"limit":100,"sortfield":"name","sortdir":"ASC"}' 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = d.get("data", d) if isinstance(d, dict) else d
+print(next((r["uuid"] for r in rows if r.get("name") == "e2e-probe"), ""))
+' 2>/dev/null || true)"
+[ -n "$file_uuid" ] || { echo "provision-omv: no e2e-probe in the compose file list, setFile stored nothing" >&2; exit 1; }
+echo "provision-omv: compose file stored as $file_uuid"
+
 omv-salt deploy run compose
 
 echo "== provision-omv: proving the layout is what the test expects =="
