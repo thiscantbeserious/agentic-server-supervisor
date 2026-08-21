@@ -40,7 +40,7 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 └── .github/workflows/ci.yml        # lint + test + e2e + build + push → ghcr.io (latest + SHA)
 ```
 
-Rollout on `bam` is exactly: `curl -fsSL .../install.sh | sudo bash`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.
+Rollout on the target host is exactly: `curl -fsSL .../install.sh | sudo bash`, `docker compose up -d`. Embedded assets (schemas, prompt) live inside their `internal/` packages via `go:embed` — no loose config files to ship.
 
 ## 2. Component Specification
 
@@ -104,7 +104,7 @@ R8 case C2 already asserts `journalctl -D /host/journal -n1` exits `0` with the 
 
 Deliberately not in T6: `internal/runtime` was reviewed and approved without it, and reopening an approved branch to add behaviour is how an approval stops meaning anything. T7 re-verifies the runtime inside the image and owns C2, so it is the natural home.
 
-### Read-only survey of `bam`, 2026-08-18
+### Read-only survey of the target host, 2026-08-18
 
 Measured before T7 so the image is written against the host as it is, not as assumed. Read-only throughout; nothing installed, written or restarted.
 
@@ -129,11 +129,11 @@ smartd[2658]: Configuration file /etc/smartd.conf parsed but has no entries
 smartd[2658]: Monitoring 0 ATA/SATA, 0 SCSI/SAS and 0 NVMe devices
 ```
 
-So `bam` has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
+So the target host has no SMART monitoring today, and `internal/collect` sources the `smart` section from `journal -t smartd` — it would be permanently empty, which reads as healthy rather than as broken. R3's `install.sh` writes the `DEVICESCAN` line that fixes this, which makes that script the difference between disk monitoring existing and not. T8 must confirm after running it that `smartd` reports a non-zero device count, not merely that the unit is active.
 
 **Care with `command -v` on this host:** the login PATH omits `/usr/sbin`, so `smartd`, `smartctl` and `rasdaemon` all appear absent when they are not. Check with `dpkg-query` or an absolute path. This produced a wrong reading during the survey itself.
 
-- **T8 — target server rollout `bam`** (= OMV host): packages, smartd/ZED mail paths, `docker compose pull` from GHCR, 24 h trial run. Does NOT run autonomously — every action on the host is announced first.
+- **T8 — target server rollout** (an OpenMediaVault host): packages, smartd/ZED mail paths, `docker compose pull` from GHCR, 24 h trial run. Does NOT run autonomously — every action on the host is announced first.
   AC: tick loop runs; heartbeat arrives; injected error ⇒ Telegram < 6 min; `smartctl -M test` mail ⇒ Telegram; `zpool scrub` ⇒ ZED event in the next report; no spam. V: `test/rollout-checklist.md`.
   **Credential hygiene carried from T1 — do before rollout, not during:**
   1. **Rotate the bot token.** The token used for T1's local verification was pasted into a chat transcript, so treat it as compromised: `/revoke` in @BotFather, then update `mailrise.conf` (both the `sentinel:` and `omv:` blocks) and re-run the apprise `POST /add/sentinel`.
@@ -173,7 +173,7 @@ So `bam` has no SMART monitoring today, and `internal/collect` sources the `smar
   2. **Telegram command — has a security cost that must be stated.** Accepting `/mute 6h` from Telegram means `sentinel` polls `getUpdates`, which means giving the bot token to the process that parses attacker-controlled log text. That is the one boundary the whole notification design is built around (ARCHITECTURE §3: `notify` is the only component that knows what the notification service is, and it holds no credential). **Do not take this option.**
   3. **Separate poller container.** A fourth service in the compose stack holds the token, polls `getUpdates`, and writes the same `mute-until` file to the shared volume. `sentinel` stays token-free and only reads the file. Gets phone-side control while keeping the boundary; costs one more container. Option 1 is a prerequisite either way, since both write the same file.
 
-  **The open design question, which the trial should answer:** what bypasses a mute? A mute that hides a dying disk is how people lose pools. The instinct is that `alert` severity always gets through while `watch`/`info` and the heartbeat are suppressed, with the muted state named in the message so the operator knows it is overriding — but that is a guess about how noisy `bam` actually is, and the trial replaces the guess.
+  **The open design question, which the trial should answer:** what bypasses a mute? A mute that hides a dying disk is how people lose pools. The instinct is that `alert` severity always gets through while `watch`/`info` and the heartbeat are suppressed, with the muted state named in the message so the operator knows it is overriding — but that is a guess about how noisy the host actually is, and the trial replaces the guess.
 
   **Whatever the rule, the exit code and `sentinel health` must never be muted** — same principle as the raw-alert scan-failure throttle (runtime R3.3): quiet in the channel a human reads, loud everywhere a machine looks.
 
@@ -209,7 +209,7 @@ The implementer's report is: the diff + verbatim RED output + verbatim GREEN out
 
    Mechanics: print mode does **not** read stdin, so the prompt must be an argument, and `--print-timeout` needs a duration unit (`10m`, not `300`). Permissions live in **`~/.gemini/antigravity-cli/settings.json`** (the path `~/.gemini/settings.json` is silently ignored — the log line `applyUserSettings: no shared config permissions` is the tell), as `action(target)` rules under `permissions.allow`: `read_file(...)` **and** `command(...)` are both needed, because agy shells out to `find`/`grep` as well as using its native reader. Writes and network are in `deny`. Diagnose any denial with `--log-file <path>` and grep `permission_manager` for the exact action it wanted. `--dangerously-skip-permissions` is not used.
 
-   c. **Live validation against reality (mandatory from T3 on, read-only):** synthetic fixtures encode the assumptions of whoever wrote them, so before a TODO can be proposed for merge its assumptions are checked against the actual target `bam` — **strictly read-only, every command announced first** (CLAUDE.md ground rule; installs and deploys remain T8-after-approval). What this means concretely: real data replayed through the new code (e.g. captured `journalctl -o json` records fed through the parser), and every environmental assumption the component makes verified on the host rather than assumed — permissions and GIDs, which paths exist, whether the required binaries are installed, real volumes and record counts.
+   c. **Live validation against reality (mandatory from T3 on, read-only):** synthetic fixtures encode the assumptions of whoever wrote them, so before a TODO can be proposed for merge its assumptions are checked against the actual target host — **strictly read-only, every command announced first** (CLAUDE.md ground rule; installs and deploys remain T8-after-approval). What this means concretely: real data replayed through the new code (e.g. captured `journalctl -o json` records fed through the parser), and every environmental assumption the component makes verified on the host rather than assumed — permissions and GIDs, which paths exist, whether the required binaries are installed, real volumes and record counts.
    This gate has already paid for itself: it confirmed `systemd-journal` GID 999 and that `/run/log/journal` exists (so the two-directory merge is live, not theoretical), showed `/proc/spl/kstat/zfs/` mixes files with pool directories, established that a 24h kernel window is ~1400 records (right-sizing the 20000 cap), and proved the dedup key collapses **real** zed evidence across differing `eid=`/offset/size values.
    Where a component cannot be exercised against the host without deploying (that is T8), say so explicitly in the PR rather than implying coverage that does not exist.
 

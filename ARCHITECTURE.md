@@ -49,7 +49,7 @@ A read-only server supervisor that:
 ### 2.5 Deep research 1: architecture validation (adversarially verified, 2026-08-15)
 Confirmed (unanimous, primary sources):
 - **rasdaemon** is the canonical collection layer for EDAC/MCE/PCIe-AER — tracepoints, no dmesg text scraping; SQLite backend officially "experimental" → read via `ras-mc-ctl`/journal, not the DB directly (6-0)
-- **PCIe-AER** is default-enabled on RHEL-like systems; Red Hat recommends rasdaemon exactly for this role (4-0). *Caveat:* firmware-first platforms (APEI/GHES) report through a different path — check at rollout (`dmesg | grep -i ghes`; on `bam`: no hits ✅)
+- **PCIe-AER** is default-enabled on RHEL-like systems; Red Hat recommends rasdaemon exactly for this role (4-0). *Caveat:* firmware-first platforms (APEI/GHES) report through a different path — check at rollout (`dmesg | grep -i ghes`; on the reference host: no hits ✅)
 - **smartd** has built-in email warnings (`-m`/`-M`) — pointable straight at mailrise ⇒ **LLM-free disk alert path out of the box** (6-0)
 - Schema-constrained LLM output reduces hallucinated rationales; LLM parsing tolerates format drift better than regex (4-0, single arXiv review → medium)
 

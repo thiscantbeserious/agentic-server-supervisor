@@ -95,7 +95,7 @@ with 0600 — it exits immediately with `Permission denied: '/etc/mailrise.conf'
 answers. Verified locally 2026-08-17.
 
 The tradeoff is real — the file holds the bot token, so 0644 exposes it to any
-local user on the host. Do not chown it to 999 instead: on `bam` gid 999 is
+local user on the host. Do not chown it to 999 instead: on the reference host gid 999 is
 `systemd-journal`, which would hand the token to every journal reader.
 
 **mailrise does not expand environment variables** — it loads the file as plain
@@ -219,7 +219,7 @@ socket instead:
 export DOCKER_HOST="unix://$(podman machine inspect podman-machine-default --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
 ```
 
-Not needed on `bam`, which runs real Docker.
+Not needed on a host running real Docker.
 
 ## Binding
 

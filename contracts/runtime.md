@@ -385,7 +385,7 @@ Invariants asserted by the container test: no `ports:` on `sentinel`; every bind
 
 ### R5. `install.sh`
 
-`// ponytail: kept as a single bash script rather than promoted to a Go subcommand — it runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to bam just to write a handful of config files is more moving parts than an idempotent script. Upgrade path: a "sentinel install" subcommand if the host part ever grows.`
+`// ponytail: kept as a single bash script rather than promoted to a Go subcommand — it runs on the host as root before the image exists, needs apt-get and systemctl, and shipping a second Go binary to the host just to write a handful of config files is more moving parts than an idempotent script. Upgrade path: a "sentinel install" subcommand if the host part ever grows.`
 
 **CLI**
 ```
@@ -662,4 +662,4 @@ func Health(cfg *config.Config) (int, error)
 | C12 | `install.sh --dry-run` on a throwaway rootfs changes nothing; two consecutive real runs yield identical sha256 for every touched file and the second prints `changed=0` and restarts no service | R5 idempotency |
 | C13 | `actionlint` passes; the metadata step yields both `latest` and a full-SHA tag; the published image is pulled and `--version` runs | §2.9, "pull from GHCR works" |
 
-**Open ops inputs required for this suite to pass:** `AGY_URL` + `AGY_SHA512` (run `deploy/agy-build-args.sh` to resolve both from the vendor manifest), `AGY_CREDENTIALS_DIR` on the host, `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS`, and whether the GHCR package is public (else a one-time `docker login ghcr.io` on `bam`).
+**Open ops inputs required for this suite to pass:** `AGY_URL` + `AGY_SHA512` (run `deploy/agy-build-args.sh` to resolve both from the vendor manifest), `AGY_CREDENTIALS_DIR` on the host, `MAILRISE_SMTP_USER`/`MAILRISE_SMTP_PASS`, and whether the GHCR package is public (else a one-time `docker login ghcr.io` on the host).

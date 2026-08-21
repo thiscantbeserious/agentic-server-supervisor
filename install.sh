@@ -1,7 +1,7 @@
 #!/bin/bash
 # install.sh — R5. The one deliberate bash artifact in this
 # repo: it runs on the host as root before the sentinel image exists,
-# needs apt-get and systemctl, and shipping a second Go binary to bam
+# needs apt-get and systemctl, and shipping a second Go binary to the host
 # just to write a handful of config files is more moving parts than an
 # idempotent script. Upgrade path: a "sentinel install" subcommand
 # if the host part ever grows.
@@ -776,8 +776,8 @@ omv_confdbadm_bin() {
 #
 # The SUCCESSFUL output shape (the `sharedfolderref` → `conf.system.
 # sharedfolder` UUID resolution below) is still NOT verified against a
-# real OMV host as part of this change — CLAUDE.md keeps T8's live
-# validation against bam read-only, and the read-only probe that did run
+# real OMV host as part of this change — the working rules keep live
+# validation against the target host read-only, and the read-only probe that did run
 # needs root to see a real answer, which the operator declined to hand
 # over interactively. `conf.service.compose` is documented, across the
 # OMV versions consulted while writing this, to carry the shared folder
