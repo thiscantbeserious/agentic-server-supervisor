@@ -443,7 +443,12 @@ jobs:
         run: |
           if docker pull "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"; then
             echo "vm-e2e-omv: cache HIT, ${{ steps.tag.outputs.tag }}"
-            docker create --name omv-base-extract "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"
+            # The trailing "true" is never executed. The image is FROM scratch
+            # and carries no CMD, and docker create refuses to make a
+            # container with no command at all, so it needs a placeholder to
+            # record. Only the cache-hit path reaches this, which is why it
+            # stayed hidden until an image was published for the first time.
+            docker create --name omv-base-extract "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}" true
             docker cp omv-base-extract:/base.qcow2 /tmp/omv-base.qcow2
             docker rm omv-base-extract
           else
