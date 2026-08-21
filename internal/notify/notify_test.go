@@ -12,9 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -299,7 +297,7 @@ func TestSendFailures(t *testing.T) {
 }
 
 // TestPostFailureLogKeys asserts N.3.5's two distinct log keys for a
-// failed POST, "http=<code>" or "transport=<err>" — not one generic
+// failed POST, "http=<code>" or "transport=<err>", not one generic
 // "error" key a log-scraping alert can't distinguish by cause.
 func TestPostFailureLogKeys(t *testing.T) {
 	r := loadFixture(t, "report-ok.json")
@@ -340,7 +338,7 @@ func TestPostFailureLogKeys(t *testing.T) {
 // TestAppriseKeyNeverLeaks asserts APPRISE_KEY cannot leak. It sits in
 // the URL path of every apprise request, so both a deliberate message
 // (the 204 case) and an incidental one (a *url.Error's Error() embeds the
-// full request URL) can leak it into a returned error or a log line —
+// full request URL) can leak it into a returned error or a log line,
 // C7 / N.3.5 require redaction at every site that logs, wraps, or
 // returns an error that can reach a caller. A distinctive
 // non-default key is required: the default ("sentinel") is indistinguishable
@@ -393,7 +391,7 @@ func TestAppriseKeyNeverLeaks(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected a delivery error")
 			}
-			// Check the key itself AND its percent-encoded form — the
+			// Check the key itself AND its percent-encoded form, the
 			// encoded form is what a *url.Error actually prints, and is
 			// the exact gap a plain literal-match redactor misses.
 			encoded := (&url.URL{Path: c.key}).EscapedPath()
@@ -478,7 +476,7 @@ func TestSMTPFallback(t *testing.T) {
 }
 
 // TestSMTPBody_NoMarkdown is 31cec31 item 1, end-to-end through Send: the
-// DATA block must be the plain-text body (N.3.6), never payload.Body — the
+// DATA block must be the plain-text body (N.3.6), never payload.Body, the
 // cksum fixture's markdown-heavy content (**Findings**, _Analysis:_,
 // backtick-wrapped evidence) is exactly what a real mailrise message
 // forwarded literally before this fix.
@@ -495,7 +493,7 @@ func TestSMTPBody_HTML(t *testing.T) {
 	dataText := smtp.dataText
 	smtp.mu.Unlock()
 
-	// 2593e07: the SMTP path now sends text/html, not text/plain — mailrise
+	// 2593e07: the SMTP path now sends text/html, not text/plain, mailrise
 	// selects the notification format from Content-Type.
 	if !strings.Contains(dataText, "Content-Type: text/html; charset=utf-8") {
 		t.Errorf("SMTP message is not Content-Type: text/html: %s", dataText)
@@ -519,7 +517,7 @@ func TestSMTPBody_HTML(t *testing.T) {
 
 // TestSMTPBody_StripsUnsafeButKeepsFidelity is the 0bdf468 amendment: the
 // HTML path must still drop invalid UTF-8 and control characters the way
-// Sanitize always did for the markdown path — html.EscapeString alone
+// Sanitize always did for the markdown path, html.EscapeString alone
 // only handles the five XML entities, not NUL/BEL/invalid UTF-8. RFC 5321 §2.3.1
 // forbids NUL in SMTP DATA, and a message declaring charset=utf-8 must
 // not carry invalid UTF-8. This is checked in the SAME test as the
@@ -730,7 +728,7 @@ func TestSeedConfig(t *testing.T) {
 
 // TestSeedConfig_204IsFailure asserts N.3.1's 204 rule ("the key was not
 // registered") applies to /add/{key} exactly as it does to /notify/{key}
-// — a 204 there means apprise did NOT accept the config, the one outcome
+// , a 204 there means apprise did NOT accept the config, the one outcome
 // SeedConfig exists to prevent silently.
 func TestSeedConfig_204IsFailure(t *testing.T) {
 	dir := t.TempDir()
@@ -759,92 +757,4 @@ func TestSeedConfig_204IsFailure(t *testing.T) {
 	}
 }
 
-// --- 17: TestNoSecretsInRepo ---
-
-var (
-	telegramTokenRe = regexp.MustCompile(`[0-9]{8,}:AA[A-Za-z0-9_-]+`)
-	// The value class deliberately excludes quotes/backticks/parens: a
-	// shell/env assignment is the shape this hunts for, a shape that
-	// excludes both a Go regex literal and contracts/notify.md's own
-	// prose describing this row from matching themselves.
-	//
-	// ANY tracked file assigning this variable a value — including a
-	// docker/compose "-e" arg inside a Go test file — is scanned by this,
-	// REGARDLESS of build tags: TestNoSecretsInRepo reads the repo as
-	// text via `git ls-files`, not via what the Go compiler includes, so
-	// a `//go:build container`-tagged file is just as visible here as a
-	// compiled one. Wherever this variable's value appears anywhere in
-	// the repo (fixtures, test env, docs), it MUST either contain the
-	// two characters dollar-brace or start with the word "changeme" —
-	// nothing else passes. (Deliberately not written as a literal
-	// assignment in this comment: it would match its own pattern.) Use
-	// the "changeme" placeholder in any fixture or test env needing a
-	// value here.
-	mailrisePassRe = regexp.MustCompile("MAILRISE" + "_PASS=([A-Za-z0-9!@#%^&*_+./:-]+)")
-)
-
-// TestNoSecretsInRepo scans TRACKED content only (N.9: "no secrets in
-// git"), via `git ls-files` — not the working tree. A file the operator
-// created locally (deploy/mailrise/mailrise.conf, gitignored, holding a
-// live-stack token from real verification against the notification
-// stack) is not "in git" no matter what it contains; walking the
-// filesystem instead of git's own index would flag the operator's own
-// untracked config and make this check the kind that gets deleted
-// within a week.
-func TestNoSecretsInRepo(t *testing.T) {
-	root := "../.."
-	out, err := exec.Command("git", "-C", root, "ls-files").Output()
-	if err != nil {
-		// A build context with no .git (the Dockerfile does `COPY . .`,
-		// no .dockerignore excluding it today, but that is a normal
-		// thing to add) is not this test's business — "no secrets in git" is
-		// vacuously true with no git repo to ask. C9's sanctioned pattern
-		// is a loud skip here, never a hard fail that would break an
-		// otherwise-clean image build, and never a silent pass either.
-		t.Skipf("not a git checkout (git ls-files: %v) — skipping the tracked-secrets scan", err)
-	}
-
-	for _, rel := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if rel == "" {
-			continue
-		}
-		base := filepath.Base(rel)
-		if base == ".env.example" {
-			// This IS the placeholder file — its documentation values (a
-			// token-shaped example, MAILRISE_PASS=changeme) legitimately
-			// match both detectors below. The exemption must run BEFORE
-			// either check, not after the first one: checking token shape
-			// first and only then exempting leaves the token check itself
-			// still firing on this file's own placeholder.
-			continue
-		}
-		path := filepath.Join(root, rel)
-		data, rerr := os.ReadFile(path)
-		if rerr != nil || !isProbablyText(data) {
-			continue
-		}
-		if m := telegramTokenRe.Find(data); m != nil {
-			t.Errorf("%s: looks like a Telegram bot token: %q", rel, m)
-		}
-		for _, m := range mailrisePassRe.FindAllSubmatch(data, -1) {
-			val := strings.TrimSpace(string(m[1]))
-			if val != "" && !strings.Contains(val, "${") && !strings.HasPrefix(val, "changeme") {
-				t.Errorf("%s: MAILRISE_PASS set to a non-placeholder value", rel)
-			}
-		}
-	}
-}
-
-func isProbablyText(data []byte) bool {
-	if len(data) > 2_000_000 {
-		return false
-	}
-	for _, b := range data {
-		if b == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// --- 18: TestE2E (gated) — see e2e_test.go for the full test body.
+// --- 18: TestE2E (gated), see e2e_test.go for the full test body.

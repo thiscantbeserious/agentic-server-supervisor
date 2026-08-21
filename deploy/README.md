@@ -8,16 +8,66 @@ notifications; `sentinel` is the supervisor itself, defined exactly as
 ## Why two services
 
 `apprise` is the one component that knows how to reach Telegram. `sentinel`
-POSTs JSON to it and never holds the bot token — the token stays out of the
+POSTs JSON to it and never holds the bot token, the token stays out of the
 process that parses attacker-controlled log text.
 
 `mailrise` exists because the things most likely to notice a dying disk can only
 send mail: OpenMediaVault, `smartd -m`, and `zfs-zed`'s `ZED_EMAIL_ADDR`. They
 deliver SMTP to mailrise, which forwards through the same apprise instance. That
-is the **LLM-free path** — it works when the supervisor is down, when agy is
+is the **LLM-free path**, it works when the supervisor is down, when agy is
 unreachable, and when the analyzer is falling back.
 
-## Setup
+## Quick install
+
+The normal way in, nothing copied onto the host first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
+```
+
+This installs the host packages (rasdaemon, msmtp, smartd/ZED wiring, see
+`contracts/runtime.md` R5) **and** creates the compose stack itself: it
+detects whether the host is running OpenMediaVault's compose plugin,
+by inspecting disk layout for the shape OMV's own stacks have, not by
+assuming a fixed path like `/docker-compose`, since the plugin's shared
+folder is something the operator chose in the OMV UI, and lays the
+stack out accordingly (OMV's symlink shape under whichever compose root
+was detected, or a plain `/opt/sentinel/` otherwise). With exactly one
+detected root it is offered in a prompt, press Enter to accept it, or
+type a different path; with more than one (a host can genuinely have
+two), a numbered list asks which one rather than guessing. It then
+prompts for the Telegram bot token, chat id, and
+a mailrise SMTP password, writes them into the stack's env file and into
+`mailrise.conf` (never echoed, never logged), and fetches
+`docker-compose.yml` from this same repository. Re-running is safe and
+idempotent: it only fills in what is still missing.
+
+`--ref` accepts any git ref, a tag to pin a specific version, or a branch to try one before it merges:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --ref v1.2.3
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/t8-rollout/install.sh | sudo bash -s -- --ref t8-rollout
+```
+
+**If you fetch the script itself from a non-`main` ref, a tag or a branch, pass that same ref as `--ref`.** A `curl | bash` stream has no memory of where it came from, the script cannot infer its own ref, so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install.sh` from `v1.2.3` (or from an unmerged branch, while testing a change before it lands on `main`) without also passing the matching `--ref` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary, worth checking it reads what you expect.
+
+`--check` and `--dry-run` never prompt and never write, safe to run
+repeatedly to preview what would happen, including where the stack would
+be created and which layout it would choose. Full flag reference:
+`install.sh --help`, or `contracts/runtime.md` R5.
+
+**Read the script first if you want to**, a `curl | sudo bash` that
+installs packages and writes to `/etc` is a reasonable thing to want to
+read before running as root. It is a plain, gitignore-respecting bash
+script; nothing about it requires the pipe:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh -o install.sh
+less install.sh
+sudo bash install.sh --ref main   # same behavior, run from disk
+```
+
+## Setup (manual, filling in `.env` by hand instead of being prompted)
 
 ```bash
 cd deploy
@@ -27,7 +77,7 @@ chmod 600 .env
 $EDITOR .env                      # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, MAILRISE_SMTP_*
 
 cp mailrise/mailrise.conf.example mailrise/mailrise.conf
-chmod 644 mailrise/mailrise.conf  # NOT 600 — see below
+chmod 644 mailrise/mailrise.conf  # NOT 600, see below
 $EDITOR mailrise/mailrise.conf    # same token and chat id, same SMTP user/pass
 
 docker compose up -d
@@ -39,25 +89,85 @@ are tracked and must never contain a real token.
 
 **`mailrise.conf` must be world-readable (0644), not 0600.** mailrise runs as
 uid 999 inside its container and cannot read a file owned by your host user
-with 0600 — it exits immediately with `Permission denied: '/etc/mailrise.conf'`.
+with 0600, it exits immediately with `Permission denied: '/etc/mailrise.conf'`.
 `restart: unless-stopped` then hides it: the container crash-loops while
 `docker compose ps` keeps reporting `Up`, and the SMTP port simply never
 answers. Verified locally 2026-08-17.
 
-The tradeoff is real — the file holds the bot token, so 0644 exposes it to any
-local user on the host. Do not chown it to 999 instead: on `bam` gid 999 is
+The tradeoff is real, the file holds the bot token, so 0644 exposes it to any
+local user on the host. Do not chown it to 999 instead: on the reference host gid 999 is
 `systemd-journal`, which would hand the token to every journal reader.
 
-**mailrise does not expand environment variables** — it loads the file as plain
+**mailrise does not expand environment variables**, it loads the file as plain
 YAML, so a literal `$TELEGRAM_BOT_TOKEN` would be accepted as part of the URL
 and produce an invalid Telegram target. You would discover that the first time
 an alert failed to arrive, which is why the values are written in rather than
 interpolated.
 
+## Deploying under OpenMediaVault
+
+**The Quick install above already does everything in this section for
+you**, it detects an OMV compose root and lays the stack out correctly,
+including every constraint below. This section is for anyone using the
+manual `--env-file` path against a stack directory they built by hand
+instead, where none of these constraints are enforced automatically.
+
+OpenMediaVault's compose plugin owns `/docker-compose/`, one directory per
+stack, and does not lay the stack out the way the plain `cd deploy` Setup
+above assumes:
+
+```
+/docker-compose/<stack>/
+├── <stack>.yml                 real compose file, named after the stack
+├── compose.yml  -> <stack>.yml     symlink
+├── <stack>.env                 real env file
+├── .env         -> <stack>.env     symlink
+└── compose.override.yml        optional
+```
+
+There is also a shared `/docker-compose/global.env` the plugin injects into
+every stack. It is currently empty; anything added there later applies to
+this stack too.
+
+The Setup steps above still apply, `cp`, `chmod`, edit, `docker compose
+up -d`, with three OMV-specific constraints:
+
+**`--env-file` must target the real env file, never the `.env` symlink.**
+`install.sh` writes `JOURNAL_GID=` via `mktemp` then `install`, and
+`install` replaces its destination rather than following it. Pointed at
+`.env`, it would silently turn the symlink into a regular file, leaving a
+stale `<stack>.env` beside a now-divorced `.env`, the OMV plugin and Docker
+then disagree about what the environment is, and nothing announces it. Use
+`--env-file /docker-compose/<stack>/<stack>.env`, the real file, always.
+
+**`mailrise/mailrise.conf` is a relative bind mount** (`docker-compose.yml`:
+`./mailrise/mailrise.conf:/etc/mailrise.conf:ro`), so a `mailrise/`
+subdirectory has to exist inside the stack directory itself, everything
+else in the compose file is either a named volume or an absolute path, and
+this mount is the only one that moves with the stack. The 0644-not-0600
+rule above applies to that copy: get the permission wrong here, standing in
+the actual stack directory, and mailrise crash-loops exactly as described.
+
+**`AGY_CREDENTIALS_DIR` pointing at a path that does not exist fails
+silently.** Compose only guards that the variable is *set*
+(`${AGY_CREDENTIALS_DIR:?...}`), not that the path exists, and Docker
+creates a missing bind source as an empty root-owned directory. `agy` then
+starts with no credentials and never authenticates, while `docker compose
+ps` reports everything running. Confirm the directory exists and holds real
+credentials before `up -d`.
+
+The degraded behavior in that state is bounded, not total: every triage
+call fails and `internal/analyze` returns its deterministic fallback report
+one `alert`-severity finding (`component: meta`) per tick, carrying all
+of that tick's raw `emerg`/`crit` kernel lines (capped at
+`RAW_ALERT_MAX_LINES`, default 20) verbatim in its evidence, not one
+finding per line. No hardware event is lost; only the LLM's own triage,
+correlation and recommendation text is.
+
 ## Seed the apprise config key
 
 `apprise/sentinel.cfg` is a template. The real configuration lives in the
-`apprise-config` volume and carries the token. **Register it through the API —
+`apprise-config` volume and carries the token. **Register it through the API,
 do not drop a file into `/config`:**
 
 ```bash
@@ -68,7 +178,7 @@ curl -fsS -X POST -d 'urls=tgram://<BOT_TOKEN>/<CHAT_ID>' \
 
 Writing `/config/sentinel.cfg` directly does **not** register the key. This
 image keeps configurations under `/config/store/<key>/`, so a hand-written
-`<key>.cfg` is ignored — and the failure is silent in the worst way: a
+`<key>.cfg` is ignored, and the failure is silent in the worst way: a
 subsequent `POST /notify/sentinel` returns **HTTP 204**, which looks like
 success, while nothing is sent anywhere. A correctly registered key returns 200
 on delivery, or 424 with the reason when delivery fails. Verified locally
@@ -81,7 +191,7 @@ one-shot the runtime never invokes.
 
 Two paths reach Telegram: the apprise path sentinel uses directly, and the
 SMTP path smartd/ZED/OMV use through mailrise. Both must land. Until they do
-the stack is not working — the supervisor can compute a perfect report and
+the stack is not working, the supervisor can compute a perfect report and
 still never reach you.
 
 A 2xx is not proof on its own: **204 means the key was never registered and
@@ -109,7 +219,7 @@ socket instead:
 export DOCKER_HOST="unix://$(podman machine inspect podman-machine-default --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
 ```
 
-Not needed on `bam`, which runs real Docker.
+Not needed on a host running real Docker.
 
 ## Binding
 

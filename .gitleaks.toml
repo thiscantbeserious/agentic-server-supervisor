@@ -1,0 +1,21 @@
+[extend]
+useDefault = true
+
+# The default ruleset does not detect a Telegram bot token, verified by
+# planting one and watching a stock scan report nothing. That is the one
+# credential this system cannot operate without, so it carries its own rule.
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''[0-9]{8,10}:AA[A-Za-z0-9_-]{30,40}'''
+keywords = [":AA"]
+
+[allowlist]
+description = "Documentation, contracts and fixtures carry worked examples, not credentials"
+paths = [
+  '''CONTRACTS\.md''',
+  '''contracts/''',
+  '''internal/notify/testdata/''',
+  '''internal/notify/notify_test\.go''',
+  '''deploy/\.env\.example''',
+]

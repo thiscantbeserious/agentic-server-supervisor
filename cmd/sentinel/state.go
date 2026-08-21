@@ -47,7 +47,7 @@ func runState(args []string) (int, error) {
 		return 64, nil
 	}
 	// C2/S.1: "history [n] and outbox-ack <id> are the only subcommands
-	// taking a positional argument" — process/outbox-add/outbox-take take
+	// taking a positional argument", process/outbox-add/outbox-take take
 	// none, and a stray one past what's allowed is a usage error (64), not
 	// something to silently ignore.
 	if maxPositional := stateMaxPositional[sub]; len(args)-1 > maxPositional {
@@ -77,7 +77,7 @@ func runState(args []string) (int, error) {
 				// Usage error (64), not this call's error: the diagnostic
 				// already went to stderr above, and C2's contract is
 				// every Run returns (int, error) with error carrying an
-				// internal failure — a malformed CLI argument isn't one.
+				// internal failure, a malformed CLI argument isn't one.
 				fmt.Fprintln(os.Stderr, "sentinel state history: n must be a non-negative integer")
 				return 64, nil //nolint:nilerr // convErr is reported via stderr above, not this return
 			}

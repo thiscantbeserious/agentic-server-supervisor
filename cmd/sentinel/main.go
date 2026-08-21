@@ -21,7 +21,7 @@ import (
 	"syscall"
 
 	// Embeds the IANA time zone database so config.Load's TZ validation
-	// (time.LoadLocation) never depends on system zoneinfo being present —
+	// (time.LoadLocation) never depends on system zoneinfo being present,
 	// the debian-slim runtime image is CGO_ENABLED=0 and may not ship it.
 	_ "time/tzdata"
 
@@ -104,7 +104,7 @@ func printUsage() {
 // logLevelForSubcommandError re-reads LOG_LEVEL for logSubcommandError:
 // run() never holds a *config.Config (each subcommand loads its own), so a
 // second, cheap config.Load() call is how this stays honoring the
-// configured level rather than hardcoding one — a bare os.Getenv would
+// configured level rather than hardcoding one, a bare os.Getenv would
 // bypass internal/config as the single loader (C1). LevelInfo is the
 // fallback for the one case that second call can itself fail: reporting
 // that config.Load() failed, which is exactly what logSubcommandError
@@ -178,14 +178,14 @@ func runTick(args []string) (int, error) {
 	}
 
 	// R2: "Startup sequence (--loop, and once before the single tick in
-	// --once)" — preflight, the read-only lint, and agy-home seeding run
+	// --once)", preflight, the read-only lint, and agy-home seeding run
 	// here too, not only inside Loop().
 	if code, err := runtime.StartupPreflight(context.Background(), cfg); err != nil {
 		return code, fmt.Errorf("tick: %w", err)
 	}
 
 	// R3.1's tick-seq counter is scoped to the sentinel-tick command, not
-	// to --loop — seq 0 tells Tick to allocate the next one from
+	// to --loop, seq 0 tells Tick to allocate the next one from
 	// $STATE_DIR/tick-seq itself, same file --loop advances.
 	res := runtime.Tick(context.Background(), cfg, 0, deps)
 	if res.Report != nil {

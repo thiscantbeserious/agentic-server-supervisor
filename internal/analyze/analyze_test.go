@@ -1,4 +1,4 @@
-// Test contract: contracts/analyze.md. Table-driven, hermetic, offline —
+// Test contract: contracts/analyze.md. Table-driven, hermetic, offline,
 // RunAgy/CollectDeep are replaced by table-supplied funcs, never a
 // real agy binary (except the DefaultDeps/exec.LookPath path exercised
 // directly by case 4, and the SENTINEL_REAL_AGY-gated variants).
@@ -37,7 +37,7 @@ func newTestConfig(t *testing.T) *config.Config {
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("TMPDIR", t.TempDir())
 	// AGY_HOME's default is a persistent volume path (agy's OAuth token
-	// refresh needs a persistent volume, never tmpfs) — a path no test
+	// refresh needs a persistent volume, never tmpfs), a path no test
 	// sandbox can create. runAgy MkdirAlls it if absent, so an unwritable
 	// ambient default would silently turn every real-exec test into an
 	// agy_failed ("create AGY_HOME") instead of exercising what it's meant
@@ -65,14 +65,14 @@ func captureLog(t *testing.T) *bytes.Buffer {
 }
 
 // TestNewLogger_HonorsLogLevel asserts Run() wires cfg.LogLevel through
-// to newLogger() rather than hardcoding slog.LevelInfo — otherwise
+// to newLogger() rather than hardcoding slog.LevelInfo, otherwise
 // LOG_LEVEL=DEBUG would produce no extra output and LOG_LEVEL=ERROR would
 // suppress nothing, despite config.Load() validating the variable
 // strictly enough to refuse startup over a typo (exit 78).
 //
-// Drives the real construction path end to end — LOG_LEVEL through
+// Drives the real construction path end to end, LOG_LEVEL through
 // config.Load(), then logging.ParseLevel(cfg.LogLevel) into newLogger(),
-// the exact call Run() makes — rather than hand-building a slog.Logger,
+// the exact call Run() makes, rather than hand-building a slog.Logger,
 // which would pass even if Run() itself never wired cfg.LogLevel through.
 func TestNewLogger_HonorsLogLevel(t *testing.T) {
 	t.Run("DEBUG level logger emits a debug record", func(t *testing.T) {
@@ -111,7 +111,7 @@ type agyRecorder struct {
 
 // stub scripts RunAgy with a sequence of MODEL RESPONSE texts (what used
 // to be the raw stub return value before --output-format json became
-// mandatory) — each is automatically wrapped in a valid SUCCESS envelope
+// mandatory), each is automatically wrapped in a valid SUCCESS envelope
 // so every existing call site keeps meaning "the model said this" without
 // needing to know about the envelope. Use stubRaw for tests that need to
 // control the envelope itself (e.g. the agy_empty case).
@@ -123,8 +123,8 @@ func (r *agyRecorder) stub(responses ...string) func(ctx context.Context, o Opti
 	return r.stubRaw(wrapped...)
 }
 
-// stubRaw scripts RunAgy with raw bytes returned verbatim — no envelope
-// wrapping — for tests exercising envelope decoding itself.
+// stubRaw scripts RunAgy with raw bytes returned verbatim, no envelope
+// wrapping, for tests exercising envelope decoding itself.
 func (r *agyRecorder) stubRaw(responses ...string) func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 	return func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 		b, err := os.ReadFile(promptPath)
@@ -142,7 +142,7 @@ func (r *agyRecorder) stubRaw(responses ...string) func(ctx context.Context, o O
 }
 
 // mustEnvelope wraps a model response text in a minimal valid
-// --output-format json envelope (status SUCCESS, non-zero input_tokens) —
+// --output-format json envelope (status SUCCESS, non-zero input_tokens),
 // the shape every real agy invocation now produces.
 func mustEnvelope(response string) string {
 	b, err := json.Marshal(agyEnvelope{
@@ -273,7 +273,7 @@ func zfsTriageReport() report.Report {
 func zfsKey() string { return dedup.Key("zfs", zfsEvidence) }
 
 // zfsDeepDiveResponse is the mini-schema RPC payload a deep dive
-// agy call would return — analysis/recommendation only, no key/severity to
+// agy call would return, analysis/recommendation only, no key/severity to
 // echo back (the merge identifies the finding by the candidate analyze
 // itself sent, never by anything the model echoes).
 func zfsDeepDiveResponse() deepDiveResponse {
@@ -403,7 +403,7 @@ func TestRun_ZFSCksum_WatchWithDeepDive(t *testing.T) {
 
 	// The line's component slot must stay "analyze" (the handler diverts
 	// any attr literally keyed "component" into that slot, so the
-	// deep-dive line must not use that key for the target component name —
+	// deep-dive line must not use that key for the target component name,
 	// a prior version did, producing "INFO zfs deep-dive key=..." instead
 	// of "INFO analyze deep-dive target=zfs key=...").
 	logLine := buf.String()
@@ -475,7 +475,7 @@ func TestRun_AgyMissing_KernelSectionErrorSurfaced(t *testing.T) {
 // TestRun_PromptWriteFailure_InternalErrorNotAgyFailed is the design
 // review's second honesty fix: a failure before agy ever runs (here,
 // TMPDIR unwritable so the prompt file can't be created) must be labelled
-// "internal_error", not "agy_failed" — the old code blamed "the analyzer
+// "internal_error", not "agy_failed", the old code blamed "the analyzer
 // exited non-zero" for a binary that was never invoked.
 func TestRun_PromptWriteFailure_InternalErrorNotAgyFailed(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -587,7 +587,7 @@ func TestRun_CorrectionBlockCarriesRealValidationError(t *testing.T) {
 // TestBuildCorrection_ExactBytes pins buildCorrection's rendered output to
 // the exact bytes the pre-refactor Go string literal produced (sha256
 // ebc6bbd0426562dfb5db29184f9c6cd8b0fc43442112dd463f6833c924eaf0b8, 449
-// bytes for this input) — a substring check alone would pass even if the
+// bytes for this input), a substring check alone would pass even if the
 // template lost a word, a punctuation mark, or the 300-rune truncation
 // bound, none of which any other test in this file catches. buildCorrection
 // is the one prompt-shell fragment not covered by TestPromptGoldenFiles, so
@@ -649,7 +649,7 @@ func TestBuildCorrection_TruncatesValidationErrorTo300Runes(t *testing.T) {
 }
 
 // =====================================================================
-// Case 6: deep-dive cap — three NEW deep-capable findings, one consumed
+// Case 6: deep-dive cap, three NEW deep-capable findings, one consumed
 // =====================================================================
 
 func threeCandidatesReport() (report.Report, string, string, string) {
@@ -800,7 +800,7 @@ func TestRun_KeyAgreement(t *testing.T) {
 	}
 
 	// Same zed[PID] token in both (that token has no "=" and its digits are
-	// not a whole field, so it survives unmasked by design — only the
+	// not a whole field, so it survives unmasked by design, only the
 	// leading timestamp and the eid= digits are expected to collapse).
 	const ev1 = "Aug 15 09:41:02 bam zed[2914]: eid=118 class=checksum pool='hotstore' cksum_errors=1"
 	const ev2 = "Aug 16 10:02:19 bam zed[2914]: eid=452 class=checksum pool='hotstore' cksum_errors=1"
@@ -893,7 +893,7 @@ func TestRun_PromptInjectionGuard_DeepDive(t *testing.T) {
 		}
 	}
 	// The deep-dive boundary replaces only the FIRST SENTENCE of the triage
-	// boundary paragraph — the rest of the injection guard must survive
+	// boundary paragraph, the rest of the injection guard must survive
 	// verbatim into deep dive. A regression once dropped it entirely: a
 	// paragraph that only NAMES "HISTORY"/"FINDING"/"DEEP CONTEXT" (the
 	// check above) passes even with every actual guard sentence missing,
@@ -978,7 +978,7 @@ func TestRun_HistoryWindowing(t *testing.T) {
 
 // TestRun_HistoryWindow_IgnoresNonJSONFiles is a regression test for a fix
 // that once shipped with no test protecting it. state writes history
-// atomically via os.CreateTemp(dir, ".tmp-*") then rename — a non-".json"
+// atomically via os.CreateTemp(dir, ".tmp-*") then rename, a non-".json"
 // file sitting in history/ must never consume a slot in the HISTORY_N
 // window. With HISTORY_N=1 and a
 // lexicographically-later non-JSON file present, an unfiltered
@@ -1003,7 +1003,7 @@ func TestRun_HistoryWindow_IgnoresNonJSONFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Lexicographically AFTER the real file's name, so an unfiltered sort
-	// would pick this one as "newest" — and it is not valid report JSON,
+	// would pick this one as "newest", and it is not valid report JSON,
 	// so it would be silently skipped, leaving zero history lines.
 	if err := os.WriteFile(filepath.Join(histDir, "1700000002-000002.tmp-notjson"), []byte("not a report"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1041,7 +1041,7 @@ func TestRun_NilRunAgy_DoesNotPanic(t *testing.T) {
 // an analyzer failure. Without the guard, a SIGTERM during `tick --loop`
 // would be classified agy_failed and fabricate an ALERT fallback
 // ("analyzer exited non-zero") for a shutdown that has nothing wrong with
-// it — plus spurious warnings and state/outbox writes during shutdown.
+// it, plus spurious warnings and state/outbox writes during shutdown.
 // Run() returns (nil, err) here, the one deliberate exception to "always
 // returns a non-nil report", documented on Run's own doc comment.
 func TestRun_ContextCanceled_AuthorsNoReport(t *testing.T) {
@@ -1056,7 +1056,7 @@ func TestRun_ContextCanceled_AuthorsNoReport(t *testing.T) {
 		t.Fatalf("err = %v, want errors.Is(err, context.Canceled)", err)
 	}
 	if rep != nil {
-		t.Fatalf("rep = %+v, want nil — no report may be authored for a cancellation", rep)
+		t.Fatalf("rep = %+v, want nil, no report may be authored for a cancellation", rep)
 	}
 	if strings.Contains(buf.String(), "fallback report built") {
 		t.Fatalf("a fallback was built for a cancellation: %s", buf.String())
@@ -1104,7 +1104,7 @@ func TestRun_DefaultDeps_ContextCanceled_DoesNotBuildFallback(t *testing.T) {
 // TestRun_HistoryProjectionCarriesEvidenceAndCounters is the load-bearing
 // fix: dedup.EvidenceCore masks digits, so the
 // key alone can never prove a counter grew. Assert the ACTUAL counter text
-// and the actual occurrences/first_seen values reach the prompt — a
+// and the actual occurrences/first_seen values reach the prompt, a
 // count-only assertion would pass while carrying an empty projection.
 func TestRun_HistoryProjectionCarriesEvidenceAndCounters(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -1211,7 +1211,7 @@ func TestRun_ResolvedOverwritesModelOutput(t *testing.T) {
 
 // TestRun_ResolvedIsKeyRegardlessOfEvidenceLength guards contracts/
 // analyze.md §6 step 7: resolved[] carries the finding's 16-hex dedup.Key,
-// never its evidence — so an evidence line's length (this fixture is 94
+// never its evidence, so an evidence line's length (this fixture is 94
 // runes, well over the schema's 80-rune resolved[] maxLength) has no
 // bearing on whether the emitted entry validates. Before the key-based
 // migration this evidence would have had to be truncated to fit; a key
@@ -1222,7 +1222,7 @@ func TestRun_ResolvedIsKeyRegardlessOfEvidenceLength(t *testing.T) {
 	if err := os.MkdirAll(histDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// 94 runes — realistic ZED-line length, well over the schema's 80-rune
+	// 94 runes, realistic ZED-line length, well over the schema's 80-rune
 	// resolved[] maxLength.
 	longEvidence := "eid=1841 class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt-longname cksum_errors=1"
 	if n := len([]rune(longEvidence)); n <= 80 {
@@ -1265,7 +1265,7 @@ func TestRun_ResolvedIsKeyRegardlessOfEvidenceLength(t *testing.T) {
 // TestGuardRecommendations_BlanksAndRaisesFinding asserts the guard's core
 // rule: a dangerous recommendation must be blanked, not merely truncated or
 // left as prose the operator could copy-paste, and the withholding must
-// be visible as a finding — silence is not a valid degraded state.
+// be visible as a finding, silence is not a valid degraded state.
 func TestGuardRecommendations_BlanksAndRaisesFinding(t *testing.T) {
 	cfg := newTestConfig(t)
 	key := zfsKey()
@@ -1340,7 +1340,7 @@ func TestGuardRecommendations_LeavesSafeRecommendationAlone(t *testing.T) {
 // withheld-notice finding when already at the schema's 20-item cap,
 // silently blanking a recommendation with no trace in the document. The
 // guard must make room (evicting an existing finding) rather than drop the
-// notice — losing the record of a withheld dangerous recommendation is
+// notice, losing the record of a withheld dangerous recommendation is
 // worse than losing one other finding.
 func TestGuardRecommendations_NeverSilentlyDroppedAtFindingsCap(t *testing.T) {
 	rep := &report.Report{
@@ -1383,7 +1383,7 @@ func TestGuardRecommendations_NeverSilentlyDroppedAtFindingsCap(t *testing.T) {
 }
 
 // TestRun_DeepDiveHeadlineReplacesTriage asserts: an optional deep dive
-// headline REPLACES triage's when present, valid and non-empty — the
+// headline REPLACES triage's when present, valid and non-empty, the
 // notification title must reflect what the deep collect found, not stay
 // frozen on the shallow tick view.
 func TestRun_DeepDiveHeadlineReplacesTriage(t *testing.T) {
@@ -1407,7 +1407,7 @@ func TestRun_DeepDiveHeadlineReplacesTriage(t *testing.T) {
 		t.Fatalf("Run() unexpected error: %v", err)
 	}
 	if rep.Headline == triage.Headline {
-		t.Fatalf("Headline still equals triage's %q — deep dive headline was not applied", triage.Headline)
+		t.Fatalf("Headline still equals triage's %q, deep dive headline was not applied", triage.Headline)
 	}
 	if rep.Headline != withHeadline.Headline {
 		t.Fatalf("Headline = %q, want the deep dive headline %q", rep.Headline, withHeadline.Headline)
@@ -1440,7 +1440,7 @@ func TestRun_DeepDiveNoHeadline_KeepsTriageHeadline(t *testing.T) {
 // =====================================================================
 
 // fileFingerprint captures enough to detect a MODIFICATION, not just
-// existence — path-only snapshots pass a test that silently rewrote a
+// existence, path-only snapshots pass a test that silently rewrote a
 // pre-existing file's content in place.
 type fileFingerprint struct {
 	size int64
@@ -1477,7 +1477,7 @@ func TestRun_ReadOnlyGuarantee(t *testing.T) {
 	cfg := newTestConfig(t)
 
 	// A pre-existing file outside deep-queue/ that Run must leave BYTE
-	// IDENTICAL — a path-existence-only snapshot cannot catch an in-place
+	// IDENTICAL, a path-existence-only snapshot cannot catch an in-place
 	// rewrite of this file's content.
 	preexisting := filepath.Join(cfg.StateDir, "active-alerts", "untouched.json")
 	if err := os.MkdirAll(filepath.Dir(preexisting), 0o700); err != nil {
@@ -1716,7 +1716,7 @@ func TestRun_Fallback_NewestLinesSurvive_RuneBudgetBinds(t *testing.T) {
 	// With ~80-rune messages the 900-rune budget binds before the 20-line
 	// cap does: fewer than 20 lines must survive, and the newest lines
 	// within the count-capped window (down to line5) must NOT all be
-	// present — in particular the oldest of that window, line5, must be
+	// present, in particular the oldest of that window, line5, must be
 	// gone.
 	lineCount := len(strings.Split(strings.TrimSpace(ev), "\n"))
 	if lineCount >= cfg.RawAlertMaxLines {
@@ -1778,7 +1778,7 @@ func TestRun_NoMarkdownInOutput(t *testing.T) {
 		check(t, rep)
 	})
 	// The fallback document carries the mapped human <REASON> phrase
-	// (fallback.go's reasonPhrase), never the machine <CODE> — no markdown
+	// (fallback.go's reasonPhrase), never the machine <CODE>, no markdown
 	// exception for the fallback, so it is checked exactly like every
 	// other case.
 	t.Run("fallback", func(t *testing.T) {
@@ -1822,7 +1822,7 @@ func TestFallback_ReportTextCarriesPhraseNotCode(t *testing.T) {
 // Case 12c (analyze-owned half): every document analyze emits validates.
 // The runtime-owned half (raw-alert / collector fallbacks) does not exist
 // until the runtime package lands and is deferred there explicitly by the
-// contract's test table — not stubbed here.
+// contract's test table, not stubbed here.
 // =====================================================================
 
 func TestRun_EveryEmittedDocumentValidates(t *testing.T) {
@@ -1937,7 +1937,7 @@ func TestPromptGoldenFiles_EmptyHistory(t *testing.T) {
 		t.Fatalf("empty-history prompt is missing a fence marker:\n%s", s1)
 	}
 	if strings.Contains(s1, "RESOLVED") {
-		t.Fatalf("resolved is output-only (commit ba631ca) — the triage prompt must not mention it:\n%s", s1)
+		t.Fatalf("resolved is output-only (commit ba631ca), the triage prompt must not mention it:\n%s", s1)
 	}
 	compareGolden(t, "testdata/prompt-triage-empty-history.golden", s1)
 }
@@ -1956,7 +1956,7 @@ func compareGolden(t *testing.T, path, got string) {
 // TestRun_RealAgy_CleanTick is the real-agy variant of case 1: gated
 // behind SENTINEL_REAL_AGY=1 and a real "agy" on PATH, asserting
 // semantics only (status class) so wording drift in the model's output
-// cannot make the suite flaky. It t.Skip()s LOUDLY otherwise — a dead test
+// cannot make the suite flaky. It t.Skip()s LOUDLY otherwise, a dead test
 // that silently reports green without ever executing hides real gaps.
 func TestRun_RealAgy_CleanTick(t *testing.T) {
 	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
@@ -1981,7 +1981,7 @@ func TestRun_RealAgy_CleanTick(t *testing.T) {
 
 // TestRun_RealAgy_BudgetSizedPromptGetsRealAnswer is the test obligation
 // from t4's live-validation round: only a real agy binary can catch a
-// stdin/argv mismatch or the antigravity-cli#76 silent-stdout-drop — a
+// stdin/argv mismatch or the antigravity-cli#76 silent-stdout-drop, a
 // stub can never fail this way, no matter how it's written, because it is
 // Go code that reads whatever the test hands it. This calls
 // DefaultDeps(cfg).RunAgy directly (bypassing Run's retry/fallback
@@ -2028,16 +2028,16 @@ func TestRun_RealAgy_BudgetSizedPromptGetsRealAnswer(t *testing.T) {
 		t.Fatalf("envelope status = %q, want SUCCESS", env.Status)
 	}
 	if strings.TrimSpace(env.Response) == "" {
-		t.Fatal("envelope response is empty — the antigravity-cli#76 silent-drop defect, or the prompt never reached agy")
+		t.Fatal("envelope response is empty, the antigravity-cli#76 silent-drop defect, or the prompt never reached agy")
 	}
 	if env.Usage.InputTokens == 0 {
-		t.Fatal("envelope input_tokens is 0 — the prompt did not actually reach the model")
+		t.Fatal("envelope input_tokens is 0, the prompt did not actually reach the model")
 	}
 }
 
 // TestRun_AgyEmpty_ProducesFallback is main's exact reproduction: a stub
-// emitting {"status":"SUCCESS","response":"","usage":{"input_tokens":0}} —
-// the shape of the antigravity-cli#76 silent-stdout-drop — must produce
+// emitting {"status":"SUCCESS","response":"","usage":{"input_tokens":0}},
+// the shape of the antigravity-cli#76 silent-stdout-drop, must produce
 // the fallback, not a crash and not a silent OK.
 func TestRun_AgyEmpty_ProducesFallback(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -2067,7 +2067,7 @@ func TestRun_AgyEmpty_ProducesFallback(t *testing.T) {
 }
 
 // TestRun_AgyEmpty_TransientRetries is the retry-eligible agy_empty
-// sub-case: status SUCCESS, tokens spent, but an empty response —
+// sub-case: status SUCCESS, tokens spent, but an empty response,
 // plausibly a transient antigravity-cli#76 drop, worth one retry.
 func TestRun_AgyEmpty_TransientRetries(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -2090,15 +2090,15 @@ func TestRun_AgyEmpty_TransientRetries(t *testing.T) {
 
 // TestRun_AgyEmpty_ZeroTokens_DoesNotRetry is the NOT-retry-eligible
 // agy_empty sub-case: input_tokens == 0 means the prompt never reached a
-// model that answered. Retrying re-runs the identical broken invocation —
-// a retry cannot fix a dead binary — so this must fail immediately, not
+// model that answered. Retrying re-runs the identical broken invocation,
+// a retry cannot fix a dead binary, so this must fail immediately, not
 // double the outage window.
 func TestRun_AgyEmpty_ZeroTokens_DoesNotRetry(t *testing.T) {
 	cfg := newTestConfig(t)
 	rec := &agyRecorder{}
 	// A non-empty response paired with zero tokens would still be
 	// systemic (the envelope itself says the model was never actually
-	// invoked) — assert the count-as-0-tokens rule fires regardless of
+	// invoked), assert the count-as-0-tokens rule fires regardless of
 	// response content, isolating it from the "response empty" check.
 	d := Deps{RunAgy: rec.stubRaw(`{"status":"SUCCESS","response":"a hallucinated answer","usage":{"input_tokens":0}}`)}
 
@@ -2158,7 +2158,7 @@ func TestIsAgyAuthFailure(t *testing.T) {
 
 // TestRun_DefaultDeps_AgyUnauth_ProducesAgyUnauthReason is a hermetic
 // reproduction of the OAuth failure via a stub `agy` on PATH that exits
-// non-zero and writes an OAuth prompt to stderr — the real signature agy
+// non-zero and writes an OAuth prompt to stderr, the real signature agy
 // produces when its headless session token has expired and cannot be
 // refreshed (contracts/runtime.md, live-gate finding).
 func TestRun_DefaultDeps_AgyUnauth_ProducesAgyUnauthReason(t *testing.T) {
@@ -2198,7 +2198,7 @@ exit 1
 func TestRun_DefaultDeps_CreatesMissingAgyHome(t *testing.T) {
 	cfg := newTestConfig(t)
 	// newTestConfig points AGY_HOME at a real t.TempDir() (for every OTHER
-	// test's hermeticity) — undo that here to exercise the "absent"
+	// test's hermeticity), undo that here to exercise the "absent"
 	// case: a path that does not exist yet, one level under a temp dir.
 	cfg.AgyHome = filepath.Join(t.TempDir(), "does-not-exist-yet", "agy-home")
 	if _, err := os.Stat(cfg.AgyHome); !os.IsNotExist(err) {
@@ -2292,7 +2292,7 @@ func TestGuardRecommendations_BroadenedPatterns(t *testing.T) {
 		// would still fail even with the interpreter tokens absent).
 		// "node" is deliberately NOT in this list: ordinary storage
 		// vocabulary, not on the target host, weakest attack value /
-		// highest false-positive risk of the set — see
+		// highest false-positive risk of the set, see
 		// TestGuardRecommendations_RealisticOpsProseSurvives for the
 		// corresponding "must survive" case.
 		{"bare zsh token, no domain", "Drop into zsh and check the counter manually."},
@@ -2335,7 +2335,7 @@ func TestGuardRecommendations_BroadenedPatterns(t *testing.T) {
 // TestGuardRecommendations_BackupShIsDeliberatelyRejected states the
 // benign "backup.sh" case's outcome explicitly, not left ambiguous.
 // Decision: REJECTED (blanked). ".sh" is a live TLD (Saint Helena) and
-// dropping it from safeSuffix closes the "evil.sh" bypass — keeping
+// dropping it from safeSuffix closes the "evil.sh" bypass, keeping
 // "backup.sh" as a false positive is the accepted cost of closing that
 // hole; a suppressed benign suggestion costs one visible meta finding, a
 // missed "evil.sh" costs a compromised host.
@@ -2350,17 +2350,17 @@ func TestGuardRecommendations_BackupShIsDeliberatelyRejected(t *testing.T) {
 	}
 	guardRecommendations(rep)
 	if rep.Findings[0].Recommendation != "" {
-		t.Fatalf("backup.sh was accepted; the deliberate decision (see comment) is REJECTED — if this now legitimately passes, the safeSuffix set changed and this test's decision needs revisiting, not silently invalidating: got %q", rep.Findings[0].Recommendation)
+		t.Fatalf("backup.sh was accepted; the deliberate decision (see comment) is REJECTED, if this now legitimately passes, the safeSuffix set changed and this test's decision needs revisiting, not silently invalidating: got %q", rep.Findings[0].Recommendation)
 	}
 }
 
 // TestGuardRecommendations_OperationalProseTable is the contract's own
 // mandatory table: "Every revision of this guard must be tested against
-// BOTH tables" — the attack table
+// BOTH tables", the attack table
 // (TestGuardRecommendations_BroadenedPatterns) and this one, verbatim
 // from the contract, at minimum. Three consecutive rounds produced a
 // false-positive class from testing only the attack side (narrative
-// bodies, then token substrings, then comparison operators) — this table
+// bodies, then token substrings, then comparison operators), this table
 // exists so a fourth can't happen the same way.
 func TestGuardRecommendations_OperationalProseTable(t *testing.T) {
 	cases := []string{
@@ -2445,7 +2445,7 @@ func TestGuardRecommendations_RealisticOpsProseSurvives(t *testing.T) {
 // TestBuildTriagePrompt_ReducesOversizedFacts asserts:
 // PROMPT_MAX_BYTES bounds the WHOLE assembled prompt, not the facts alone.
 // A facts document that would blow the budget must be rendered against a
-// reduced copy, not the original — leaving the final prompt within budget
+// reduced copy, not the original, leaving the final prompt within budget
 // and its FACTS section showing meta.truncated.
 func TestBuildTriagePrompt_ReducesOversizedFacts(t *testing.T) {
 	cfg := newTestConfig(t) // default PROMPT_MAX_BYTES (20000)
@@ -2477,12 +2477,12 @@ func TestBuildTriagePrompt_ReducesOversizedFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(stillUnreduced) != string(unreduced) {
-		t.Fatal("the original facts were mutated by the prompt-budget reduction — only a copy may be touched")
+		t.Fatal("the original facts were mutated by the prompt-budget reduction, only a copy may be touched")
 	}
 }
 
 // bigDeepFacts builds a facts.Facts with a Deep section carrying n long
-// ZED-event entries — realistic shape for "a 24h ZED window", the exact
+// ZED-event entries, realistic shape for "a 24h ZED window", the exact
 // case main names as what deep dive exists to analyze and what an
 // unbudgeted prompt would fail on every time.
 func bigDeepFacts(n int) *facts.Facts {
@@ -2503,7 +2503,7 @@ func bigDeepFacts(n int) *facts.Facts {
 // TestBuildDeepDivePrompt_ReducesOversizedDeepDocument guards a real
 // defect: triage respected PROMPT_MAX_BYTES but deep dive marshaled
 // CollectDeep's output straight into the prompt unbudgeted. A deep collect
-// can reach FACTS_MAX_BYTES (262144) — on Linux a single argv string past
+// can reach FACTS_MAX_BYTES (262144), on Linux a single argv string past
 // MAX_ARG_STRLEN (128 KiB) fails execve with E2BIG, and anything past
 // ~30KB silently returns an empty response. Unfixed, deep dive fails
 // SYSTEMATICALLY for every realistic deep collect, exactly the case it
@@ -2534,14 +2534,14 @@ func TestBuildDeepDivePrompt_ReducesOversizedDeepDocument(t *testing.T) {
 		t.Fatalf("reduced deep document in the prompt does not show truncated=true:\n%s", prompt)
 	}
 
-	// The original deep facts must be untouched — same rule as triage:
+	// The original deep facts must be untouched, same rule as triage:
 	// only a copy is ever reduced.
 	stillUnreduced, err := json.Marshal(deep)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(stillUnreduced) != string(unreduced) {
-		t.Fatal("the original deep facts were mutated by the prompt-budget reduction — only a copy may be touched")
+		t.Fatal("the original deep facts were mutated by the prompt-budget reduction, only a copy may be touched")
 	}
 }
 
@@ -2556,7 +2556,7 @@ func TestRun_DefaultDeps_PromptReachesArgv(t *testing.T) {
 	binDir := t.TempDir()
 	// The check is keyed to the per-run NONCE, not a fixed literal: a fixed
 	// marker like "SECURITY BOUNDARY" only proves "some text reached argv"
-	// — feeding the stub nothing but that literal string would still pass.
+	//, feeding the stub nothing but that literal string would still pass.
 	// The nonce is unguessable and unique per Run() call, so
 	// extracting it from the opening <<<FACTS_...>>> fence and confirming
 	// the SAME nonce closes it proves three things at once: the real
@@ -2585,14 +2585,14 @@ fi
 
 	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, DefaultDeps(cfg))
 	// The stub's response ("argv-len=N") is not valid report JSON, so this
-	// ends in the fallback either way — the assertion that matters is
+	// ends in the fallback either way, the assertion that matters is
 	// WHICH reason, proving the prompt reached argv non-empty rather than
 	// being silently dropped (which would produce agy_empty).
 	if err == nil {
 		t.Fatal("Run() expected a non-nil error (the stub's response is not report JSON)")
 	}
 	if strings.Contains(rep.Body, "reason: analyzer returned no answer") {
-		t.Fatalf("stub reported an empty prompt — the prompt did not reach argv:\n%s", rep.Body)
+		t.Fatalf("stub reported an empty prompt, the prompt did not reach argv:\n%s", rep.Body)
 	}
 }
 

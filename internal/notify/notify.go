@@ -2,7 +2,7 @@
 // notification service is (ARCHITECTURE §3, design principle 3). It
 // renders a report.Report into the apprise JSON payload, sends it (or a
 // mailrise SMTP fallback), and offers the ops-only apprise config seeding
-// path. It sends; it does not decide and it does not queue — no dedup, no
+// path. It sends; it does not decide and it does not queue, no dedup, no
 // rate limiting, no outbox. `state` owns all of that (N.0).
 //
 // notify never holds a Telegram credential: TELEGRAM_BOT_TOKEN/CHAT_ID are
@@ -53,7 +53,7 @@ func wrapErr(target error, format string, args ...any) error {
 // unwrapURLErr strips the request URL out of a *url.Error before it can
 // reach a log line or a returned error string (C7: "Never logged: ...
 // APPRISE_KEY"). APPRISE_KEY is the last path segment of every apprise
-// request, and net/url percent-encodes that segment into Error()'s text —
+// request, and net/url percent-encodes that segment into Error()'s text,
 // a literal string match (redact, below) only catches keys with no
 // character Go escapes, which is most keys but not all (a space, a
 // non-ASCII character). Never letting the URL into the error at all is
@@ -82,7 +82,7 @@ func redact(cfg *config.Config, err error) string {
 }
 
 // logPostFailure is N.3.5: "post failed (http=<code> or transport=<err>)"
-// — two distinct log keys, not one generic "error". postApprise's error
+// , two distinct log keys, not one generic "error". postApprise's error
 // text is always either "http <code>: ..." or "transport: ...", so the
 // prefix tells us which key applies; the http case logs just the code,
 // matching the contract's http=<code> shape rather than the full body text.
@@ -110,7 +110,7 @@ func newLogger(level slog.Level) *slog.Logger {
 }
 
 // Validate is the structural check N.2 describes: presence and enum
-// membership only, never rune bounds or component enums — that schema run
+// membership only, never rune bounds or component enums, that schema run
 // already happened upstream in analyze and again in state. A violation
 // must be caught before any network call (N.2), so both Run and Send call
 // it first.
@@ -180,7 +180,7 @@ func Send(ctx context.Context, cfg *config.Config, r report.Report, smtpFallback
 // postApprise is N.3.1: POST ${APPRISE_URL}/notify/${APPRISE_KEY}.
 //
 // N.3.1: "204 No Content is a FAILURE, despite being 2xx." apprise returns
-// 204 when the configuration key is not registered — nothing was sent,
+// 204 when the configuration key is not registered, nothing was sent,
 // to anyone, while every log line would say "sent" if 204 were treated
 // like every other 2xx. The same rule applies on the retry path: a 204
 // must never OutboxAck.
@@ -205,7 +205,7 @@ func postApprise(ctx context.Context, cfg *config.Config, payload Payload) error
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent {
-		// C7 forbids logging APPRISE_KEY — "apprise key not registered"
+		// C7 forbids logging APPRISE_KEY, "apprise key not registered"
 		// carries the same operational meaning without naming it.
 		return fmt.Errorf("http 204: apprise key not registered, nothing sent")
 	}

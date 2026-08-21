@@ -31,7 +31,7 @@ func Key(component, evidence string) string {
 // survive.
 //
 // Per C6, masking is "=" -scoped, not whole-field: each field is split on
-// "=", the token regexes applied to each part, then rejoined with "=" —
+// "=", the token regexes applied to each part, then rejoined with "=",
 // this is what lets a rising "cksum_errors=1" -> "cksum_errors=7" (or a
 // changing "eid=" digit) collapse to the same key while identifiers with
 // no "=" (e.g. "nvme0n1") survive untouched.
@@ -77,7 +77,7 @@ func EvidenceCore(evidence string) string {
 }
 
 // asciiLower lowercases ASCII letters only, leaving every other rune
-// (including non-ASCII letters) untouched — C6 requires this instead of
+// (including non-ASCII letters) untouched, C6 requires this instead of
 // strings.ToLower, which would also fold non-ASCII case.
 func asciiLower(s string) string {
 	out := make([]rune, 0, len(s))

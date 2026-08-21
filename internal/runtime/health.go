@@ -1,4 +1,4 @@
-// health.go: Health() — the compose healthcheck (R2).
+// health.go: Health(), the compose healthcheck (R2).
 package runtime
 
 import (

@@ -33,7 +33,7 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 		return err
 	}
 
-	// Sync to ensure durability, then Close — both checked: a buffered
+	// Sync to ensure durability, then Close, both checked: a buffered
 	// write can still fail on Close (e.g. ENOSPC surfacing late), and a
 	// silently-failed Close is a truncated file this func would otherwise
 	// report as written successfully.
@@ -53,7 +53,7 @@ func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error 
 		return err
 	}
 
-	// Atomic rename — on failure the temp file must not be left behind: a
+	// Atomic rename, on failure the temp file must not be left behind: a
 	// stray .tmp-* in history/ evicts a real report from analyze's window
 	// (S.9 case 2), and one anywhere else is a write outside the C4
 	// whitelist that outlives this call.

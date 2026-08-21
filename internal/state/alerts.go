@@ -24,8 +24,8 @@ type ActiveAlert struct {
 
 // Both loaders enforce alert.Key against the authoritative identifier the
 // record was actually found under (the lookup key here, the filename in
-// loadAlertByFile) before handing it back. Every downstream join —
-// saveAlert, step (e)'s unlink, expireStaleAlerts — trusts alert.Key
+// loadAlertByFile) before handing it back. Every downstream join,
+// saveAlert, step (e)'s unlink, expireStaleAlerts, trusts alert.Key
 // verbatim into a path, so this is the one place that has to check it: a
 // body whose "key" field disagrees with reality is corrupt per S.7
 // ("deleted, finding treated as new"), same as unparsable JSON, and every

@@ -21,8 +21,8 @@ import (
 // --- Critical item #2: tick MUST nil-check analyze.Run's report before
 // marshaling. On a cancelled context Run returns (nil, err) deliberately;
 // this test reaches that exact branch by having the stub RunAgy itself
-// return it — the same shape the real analyze.Run produces on
-// context.Canceled (contracts/analyze.md §1) — and proves Tick does not
+// return it, the same shape the real analyze.Run produces on
+// context.Canceled (contracts/analyze.md §1), and proves Tick does not
 // panic and authors nothing. Deleting the nil-check in tick.go must make
 // this test fail (verified below the test, in prose, per the task brief;
 // the reviewer/gate re-runs this by literally removing the check).
@@ -52,10 +52,10 @@ func TestTick_NilCheckOnCancelledAnalyze(t *testing.T) {
 		t.Errorf("Err = %v, want context.Canceled", res.Err)
 	}
 	if res.Report != nil {
-		t.Errorf("Report = %+v, want nil — a cancelled analysis must author nothing", res.Report)
+		t.Errorf("Report = %+v, want nil, a cancelled analysis must author nothing", res.Report)
 	}
 	if res.Notified {
-		t.Error("Notified = true, want false — nothing should have been sent")
+		t.Error("Notified = true, want false, nothing should have been sent")
 	}
 	if rec.count() != 0 {
 		t.Errorf("apprise received %d requests, want 0 (a cancelled analysis must send nothing)", rec.count())
@@ -147,7 +147,7 @@ func TestLoop_Shutdown(t *testing.T) {
 }
 
 // TestNextTickSeq_MissingWarnsToo asserts R3.1's "Missing or unparseable
-// ⇒ start at 1 and WARN" covers the missing case, not just unparseable —
+// ⇒ start at 1 and WARN" covers the missing case, not just unparseable,
 // the far more common real case (a fresh $STATE_DIR on first boot,
 // tick-seq simply absent) must not start at 1 silently.
 func TestNextTickSeq_MissingWarnsToo(t *testing.T) {
@@ -182,7 +182,7 @@ func TestHealth(t *testing.T) {
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	// Health() compares against cfg.Now (the test clock, C9) — pin the
+	// Health() compares against cfg.Now (the test clock, C9), pin the
 	// file's mtime to it explicitly rather than relying on the real wall
 	// clock, which may disagree with cfg.Now by however old the fixture
 	// date is.

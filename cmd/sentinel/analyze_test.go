@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// runBinStdin is runBin plus piped stdin — `sentinel analyze` is the only
+// runBinStdin is runBin plus piped stdin, `sentinel analyze` is the only
 // subcommand that reads stdin (contracts/analyze.md §1), so this helper
 // lives next to its own tests rather than in the shared main_test.go.
 func runBinStdin(t *testing.T, bin string, env []string, stdin string, args ...string) (stdout, stderr string, exitCode int) {

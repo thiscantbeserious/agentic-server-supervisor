@@ -18,7 +18,7 @@ import (
 // historyFinding is the compact projection of a past finding carried in the
 // prompt. Evidence, occurrences and first_seen are load-bearing: the dedup
 // key deliberately masks digits, so "cksum_errors=1" and "cksum_errors=7"
-// share a key — the key alone proves recurrence but can never prove
+// share a key, the key alone proves recurrence but can never prove
 // growth. The model is asked to compare counters across ticks; without the
 // evidence text that comparison is impossible and it answers from
 // imagination.
@@ -116,14 +116,14 @@ func newestHistory(hist []report.Report) *report.Report {
 // this tick, as their 16-hex dedup.Key (contracts/analyze.md §6 step 7,
 // CONTRACTS.md C5/C6). Computed in Go, overwriting whatever the model
 // emitted: set arithmetic over data we already hold does not belong in a
-// probabilistic component. Only the newest report is compared — anything
+// probabilistic component. Only the newest report is compared, anything
 // older was already announced resolved.
 //
 // Keys, not evidence: evidence used to be truncated to 80 runes because
 // findings have no headline of their own, which made two alerts agreeing
 // in their first 80 runes indistinguishable and forced `state` to match on
 // headline-or-evidence to compensate. The key is exact, already computed
-// in this step, and needs no truncation — dedup.Key's output is always
+// in this step, and needs no truncation, dedup.Key's output is always
 // 16 hex chars, well under the schema's 80-rune resolved[] bound.
 func computeResolved(newest *report.Report, current []report.Finding) []string {
 	if newest == nil {

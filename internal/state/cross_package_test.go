@@ -14,14 +14,14 @@ import (
 // half and C9's "cross-package agreement is asserted, not assumed": one
 // test proves analyze and state derive the identical key from the same
 // evidence. literalDedupKey (used elsewhere in this package) only proves
-// state matches the C6 algorithm in isolation — it never calls analyze.
+// state matches the C6 algorithm in isolation, it never calls analyze.
 //
 // analyze.Fallback is the cheapest real, LLM-free path through analyze
 // that computes a key (fallback.go: key := dedup.Key("meta", raw)). A
 // single short, low-priority kernel line makes raw == the finding's
 // evidence exactly (no truncation), so the finding analyze hands back can
-// be fed into state.Process — with its key stripped, so state must
-// recompute it — and the two keys compared directly.
+// be fed into state.Process, with its key stripped, so state must
+// recompute it, and the two keys compared directly.
 func TestCrossPackage_AnalyzeAndStateDeriveTheSameKey(t *testing.T) {
 	cfg := &config.Config{RawAlertMaxPriority: 2, RawAlertMaxLines: 20, Hostname: "host"}
 	line := "kernel: nvme0n1: I/O error, dev nvme0n1, sector 12345"

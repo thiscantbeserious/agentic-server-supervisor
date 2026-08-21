@@ -33,7 +33,7 @@ func minimalOK() map[string]any {
 
 // acceptCases and rejectCases are the shared fixture tables driving
 // TestValidate_Accepts/TestValidate_Rejects AND the C9 cross-check
-// TestValidateAgreesWithSchema below — a fixture added here is
+// TestValidateAgreesWithSchema below, a fixture added here is
 // automatically checked against both Validate and report.schema.json.
 var acceptCases = []struct {
 	name string
@@ -82,8 +82,8 @@ func TestValidate_Accepts(t *testing.T) {
 // schemaDivergesFromValidate names reject-case fixtures where Validate and
 // report.schema.json legitimately disagree, so nobody "fixes" the gap in
 // the wrong direction later. Currently: JSON Schema cannot express "status
-// equals highest finding severity" (C5) — that rule is prose-only in the
-// schema's description field — so a document with status=ALERT/WATCH and
+// equals highest finding severity" (C5), that rule is prose-only in the
+// schema's description field, so a document with status=ALERT/WATCH and
 // no findings of that severity is schema-valid but Validate-invalid.
 var schemaDivergesFromValidate = map[string]bool{
 	"status inconsistent with highest severity (alert finding but status WATCH)": true,
@@ -129,7 +129,7 @@ var rejectCases = []struct {
 		d["findings"] = []any{findingWith("first_seen", -1)}
 	}},
 	// occurrences is omitempty, so an explicit 0 is indistinguishable from an
-	// absent field after unmarshal — the schema's minimum:1 must still hold.
+	// absent field after unmarshal, the schema's minimum:1 must still hold.
 	{"explicit occurrences 0", func(d map[string]any) {
 		d["status"] = "WATCH"
 		d["findings"] = []any{findingWith("occurrences", 0)}
@@ -245,7 +245,7 @@ func repeatRune(r rune, n int) string {
 // EVERY fixture in acceptCases and rejectCases (the same tables backing
 // TestValidate_Accepts/TestValidate_Rejects) through both report.Validate
 // and report.schema.json, so a fixture added to catch one validator's bug
-// automatically exercises the other. jsonschema/v6 is test-only (C5, D7) —
+// automatically exercises the other. jsonschema/v6 is test-only (C5, D7),
 // never imported by runtime code. The one known, named, legitimate
 // divergence is schemaDivergesFromValidate above (status/severity
 // consistency is not expressible in JSON Schema).
@@ -300,7 +300,7 @@ func TestValidateAgreesWithSchema(t *testing.T) {
 			schemaErr := sch.Validate(inst)
 			if schemaDivergesFromValidate[tc.name] {
 				if schemaErr != nil {
-					t.Errorf("%q is documented as a known Validate/schema divergence (schema should still ACCEPT it), but the schema now rejects it too — update schemaDivergesFromValidate", tc.name)
+					t.Errorf("%q is documented as a known Validate/schema divergence (schema should still ACCEPT it), but the schema now rejects it too, update schemaDivergesFromValidate", tc.name)
 				}
 				return
 			}

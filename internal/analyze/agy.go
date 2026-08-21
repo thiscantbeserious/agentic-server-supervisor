@@ -35,7 +35,7 @@ var (
 	errAgyUnauth = errors.New("agy: not authenticated")
 
 	// errAgyEmptySystemic: the envelope reports a failed call or zero
-	// input tokens — the prompt never reached a model that answered, so a
+	// input tokens, the prompt never reached a model that answered, so a
 	// retry would re-run the identical broken invocation. An empty response
 	// from a call that did spend tokens is the one empty-output case that
 	// is plausibly transient and stays retry-eligible.
@@ -44,7 +44,7 @@ var (
 
 // agyEnvelope is agy's --output-format json wrapper. agy has an open
 // upstream defect (antigravity-cli#76): --print silently drops stdout in
-// non-TTY contexts — exactly how sentinel spawns it — returning exit 0
+// non-TTY contexts, exactly how sentinel spawns it, returning exit 0
 // with nothing, so a caller cannot otherwise tell "no response" from
 // "response lost". The envelope makes that distinguishable: a dropped
 // prompt reports status="SUCCESS" with an empty response and zero tokens.
@@ -58,8 +58,8 @@ type agyEnvelope struct {
 
 // decodeAgyEnvelope unwraps agy's --output-format json envelope and rejects
 // answers that never happened. agy has an upstream defect where print mode
-// silently drops stdout in non-TTY contexts — exactly how this package
-// spawns it — returning exit 0 with nothing, so a bare read cannot tell
+// silently drops stdout in non-TTY contexts, exactly how this package
+// spawns it, returning exit 0 with nothing, so a bare read cannot tell
 // "no response" from "response lost". The envelope makes it distinguishable:
 // a failed status or zero input tokens means the prompt never reached the
 // model (not retryable); a successful, token-spending call with an empty
@@ -79,7 +79,7 @@ func decodeAgyEnvelope(out []byte) (string, error) {
 }
 
 // normalizeAgyOutput trims whitespace and strips a single leading ```json
-// (or ```) fence line and trailing fence line — the two decorations models
+// (or ```) fence line and trailing fence line, the two decorations models
 // habitually add around JSON they were told to return bare.
 func normalizeAgyOutput(out []byte) []byte {
 	s := strings.TrimSpace(string(out))
@@ -127,7 +127,7 @@ func (w *limitedBuffer) Write(p []byte) (int, error) {
 // produces a hallucinated answer to an empty question. The prompt file is
 // still written for debugging and the retry append, but it is passed by
 // value. The environment is reduced to PATH, HOME, TMPDIR, TZ, LANG and
-// AGY_* — never the full process environment, which carries notification
+// AGY_*, never the full process environment, which carries notification
 // secrets that must not leak into a subprocess.
 //
 // A cancelled context is reported as cancellation, checked before the
@@ -179,7 +179,7 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 }
 
 // isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
-// text itself is never logged — log lines must not carry subprocess output —
+// text itself is never logged, log lines must not carry subprocess output,
 // only this in-process check reads it.
 func isAgyAuthFailure(stderr string) bool {
 	return strings.Contains(stderr, "Authentication required") ||
@@ -187,7 +187,7 @@ func isAgyAuthFailure(stderr string) bool {
 }
 
 // minimalAgyEnv builds the minimal env passed to agy: PATH, HOME(=AGY_HOME),
-// TMPDIR, TZ, LANG, AGY_* only — never the process's full environment,
+// TMPDIR, TZ, LANG, AGY_* only, never the process's full environment,
 // which could carry notification secrets that must not leak into a
 // subprocess.
 func minimalAgyEnv(cfg *config.Config) []string {

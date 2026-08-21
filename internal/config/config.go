@@ -1,7 +1,7 @@
 // Package config is the single env loader (C1, C3). Load() reads every
 // environment variable listed in CONTRACTS.md §C3 once; a malformed,
 // out-of-range, or non-numeric-where-numeric value returns an *Error
-// naming the variable — cmd/sentinel maps that to exit 78. Downstream
+// naming the variable, cmd/sentinel maps that to exit 78. Downstream
 // packages receive *Config, never call os.Getenv themselves.
 package config
 
@@ -22,7 +22,7 @@ import (
 )
 
 // Error is a configuration error naming the offending variable (C3: "exit
-// 78 naming the variable"; C7: never print the value, only the name — the
+// 78 naming the variable"; C7: never print the value, only the name, the
 // Reason describes the constraint, never the offending input).
 type Error struct {
 	Var    string
@@ -38,7 +38,7 @@ func errf(name, format string, args ...any) *Error {
 }
 
 // noMax marks a range as having no documented upper bound (C3: "every
-// other numeric variable > 0" — no ceiling given). An explicit sentinel
+// other numeric variable > 0", no ceiling given). An explicit sentinel
 // forces every call site to state its bounds instead of leaving one out
 // by accident.
 const noMax = math.MaxInt
@@ -50,14 +50,14 @@ const noMax = math.MaxInt
 const maxConvertedDuration = 24 * time.Hour
 
 // maxSecondsBeforeOverflow is the largest second count that stays inside
-// maxConvertedDuration once multiplied by time.Second — checked before the
+// maxConvertedDuration once multiplied by time.Second, checked before the
 // multiplication so the comparison itself never overflows.
 const maxSecondsBeforeOverflow = int(maxConvertedDuration / time.Second)
 
 type Config struct {
 	TickInterval           time.Duration
 	TickWindow             time.Duration
-	TickWindowRaw          string // as configured, e.g. "10m" — facts.meta.window echoes this, never TickWindow.String() (C3)
+	TickWindowRaw          string // as configured, e.g. "10m", facts.meta.window echoes this, never TickWindow.String() (C3)
 	DeepWindow             time.Duration
 	DeepWindowRaw          string
 	SectionTimeout         time.Duration
@@ -150,7 +150,7 @@ func Load() (*Config, error) {
 
 	cfg.AgyBin = loadString("AGY_BIN", "agy")
 	// /state/agy-home, NOT tmpfs: agy refreshes its OAuth token as it runs,
-	// and headless mode cannot re-authenticate once that refresh is lost —
+	// and headless mode cannot re-authenticate once that refresh is lost,
 	// a tmpfs HOME would leave the analyzer permanently down after the
 	// first container restart (contracts/runtime.md, live-gate finding).
 	cfg.AgyHome = loadString("AGY_HOME", "/state/agy-home")
@@ -189,7 +189,7 @@ func Load() (*Config, error) {
 	}
 	// These four stay plain int seconds in Config and only become durations
 	// in state/runtime, but C3's 24h bound is on the variable, not on the
-	// Go type Config happens to store it in (commit c5cab9a) — Load bounds
+	// Go type Config happens to store it in (commit c5cab9a), Load bounds
 	// them here so a downstream consumer can't forget to.
 	if cfg.RawAlertRepeatSeconds, err = loadIntRange("RAW_ALERT_REPEAT_SECONDS", 3600, 1, maxSecondsBeforeOverflow); err != nil {
 		return nil, err
@@ -274,7 +274,7 @@ func loadString(name, def string) string {
 }
 
 // loadIntRange reads an integer variable, applying def when unset and
-// rejecting anything outside [min,max] — every numeric C3 variable states
+// rejecting anything outside [min,max], every numeric C3 variable states
 // its bounds explicitly (see the noMax sentinel above).
 func loadIntRange(name string, def, min, max int) (int, error) {
 	raw := os.Getenv(name)
@@ -327,7 +327,7 @@ func loadDuration(name, def string) (time.Duration, error) {
 
 // loadDurationRaw is loadDuration plus the exact configured string
 // (C3: "Config exposes the parsed time.Duration and the raw configured
-// string" — meta.window echoes the raw form, "10m" not "10m0s").
+// string", meta.window echoes the raw form, "10m" not "10m0s").
 func loadDurationRaw(name, def string) (time.Duration, string, error) {
 	raw := os.Getenv(name)
 	if raw == "" {

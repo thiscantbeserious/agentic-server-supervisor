@@ -1,6 +1,6 @@
 // tick.go: Tick() and its step orchestration (R2, R3). Only journalctl,
 // sensors and agy are exec'd (inside collect/analyze); everything here is
-// in-process Go calls (C8) — there is no exit-code round-tripping between
+// in-process Go calls (C8), there is no exit-code round-tripping between
 // components.
 package runtime
 
@@ -72,7 +72,7 @@ func maxCode(a, b int) int {
 }
 
 // nowFor resolves the tick's single clock read: cfg.Now if set (test
-// override, C9), else the live clock — read once here, never a second
+// override, C9), else the live clock, read once here, never a second
 // time.Now() deeper in this package.
 func nowFor(cfg *config.Config) time.Time {
 	if !cfg.Now.IsZero() {
@@ -88,7 +88,7 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	if seq == 0 {
 		// R3.1: "$STATE_DIR/tick-seq ... owned exclusively by tick ...
 		// read, incremented and written atomically before step 1." The
-		// counter is scoped to the sentinel-tick COMMAND, not to --loop —
+		// counter is scoped to the sentinel-tick COMMAND, not to --loop,
 		// R3.1 draws no --once/--loop distinction. Loop() already
 		// allocates its own seq before calling Tick, so it never passes
 		// 0 here; this branch exists for a direct --once invocation.
@@ -124,14 +124,14 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		logger.Warn("tick collector errors", "sections", names)
 	}
 
-	// 1b. raw-alert scan — before analysis, dispatched immediately (design
+	// 1b. raw-alert scan, before analysis, dispatched immediately (design
 	// principle 4): a crashing or quota-blocked agy must never delay or
 	// swallow a critical kernel event.
 	rawRep, n, scanFailed := scanRawAlerts(cfg, f, clock)
 	if scanFailed {
 		// R3.3 (amended 64e57f3): the exit code is NOT suppressed even
 		// when the scan-failure NOTIFICATION is throttled by its marker
-		// (rawRep may be nil below) — "fails loud, never silent" is kept
+		// (rawRep may be nil below), "fails loud, never silent" is kept
 		// where it cannot be muted: the exit code, the log line, and
 		// sentinel health. Only the human channel is throttled.
 		result.ExitCode = maxCode(result.ExitCode, 2)
@@ -153,7 +153,7 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	rep, aerr := d.AnalyzeRun(ctx, analyze.Options{Cfg: cfg, Facts: f, Seq: seq}, d.AnalyzeDeps)
 	if rep == nil {
 		// analyze.Run returns (nil, err) ONLY on a cancelled context
-		// (contracts/analyze.md §1) — a shutdown is not an analyzer
+		// (contracts/analyze.md §1), a shutdown is not an analyzer
 		// failure and must not fabricate an ALERT. Author nothing, send
 		// nothing, and return cleanly: marshaling a nil report here is
 		// exactly the nil-pointer panic this check exists to prevent.
@@ -173,13 +173,13 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	}
 	decision, serr := d.StateProcess(raw)
 	if serr != nil {
-		// S.7 / R3.8: a state failure must never lose an alert — send the
+		// S.7 / R3.8: a state failure must never lose an alert, send the
 		// report unfiltered. "Unfiltered" still excludes resolved[]: on
 		// every other path state.md S.3(e) replaces each entry with the
 		// stored headline before a human ever sees it (the whole point of
 		// the 3c078d7 key migration is that an operator never sees a raw
 		// key). state never ran here, so nothing performs that
-		// substitution — blank resolved[] rather than let the analyzer's
+		// substitution, blank resolved[] rather than let the analyzer's
 		// bare 16-hex keys reach Telegram. A dropped all-clear list on an
 		// already-degraded tick is strictly better than unreadable hex,
 		// and "delivery beats dedup" still holds for findings/status/body.
@@ -213,7 +213,7 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		}
 	}
 
-	// 5. outbox drain — once per tick, last (R3.2).
+	// 5. outbox drain, once per tick, last (R3.2).
 	drainOutbox(ctx, cfg, d, logger, &result)
 
 	return result
@@ -235,16 +235,16 @@ func deliverAndDrain(ctx context.Context, cfg *config.Config, d Deps, logger *sl
 }
 
 // queueOrLog attempts to enqueue raw to the outbox after a failed
-// delivery. R3.8/S.7's invariant is "no alert is lost" via OutboxAdd — but
+// delivery. R3.8/S.7's invariant is "no alert is lost" via OutboxAdd, but
 // that invariant has an unhandled edge: state.Process (S.3d) has already
 // committed LastNotified/NotifyCount to active-alerts/<key>.json by the
 // time this runs, so if NotifySend AND OutboxAdd both fail, the finding
 // sits suppressed for the renotify window with nothing in the outbox and
-// no trace anywhere — worse than an ordinary "queued, will retry"
+// no trace anywhere, worse than an ordinary "queued, will retry"
 // failure, and indistinguishable from one in the exit code before this
 // fix. Neither CONTRACTS.md nor contracts/runtime.md/state.md defines a
 // code for this double failure, so this reuses rc 5 (the "state failed"
-// family — OutboxAdd is a state write) rather than inventing one; it
+// family, OutboxAdd is a state write) rather than inventing one; it
 // still outranks the plain rc 4 a successful queue reports, which is the
 // distinguishing signal an operator needs.
 func queueOrLog(d Deps, logger *slog.Logger, result *TickResult, raw []byte, what string) {
@@ -258,7 +258,7 @@ func queueOrLog(d Deps, logger *slog.Logger, result *TickResult, raw []byte, wha
 }
 
 // drainOutbox is R3.2 step 5. A failed retry is visible in result.ExitCode
-// (rc 4, "notify failed"), not only in the WARN log line — an operator
+// (rc 4, "notify failed"), not only in the WARN log line, an operator
 // running --once must see a stuck outbox in the exit code, the
 // machine-readable signal, not only in logs they may not be tailing.
 func drainOutbox(ctx context.Context, cfg *config.Config, d Deps, logger *slog.Logger, result *TickResult) {
@@ -286,7 +286,7 @@ func drainOutbox(ctx context.Context, cfg *config.Config, d Deps, logger *slog.L
 
 // minimalValidationFailureAlert is R3.2's own safety net: "a document that
 // fails validation is logged at ERROR and replaced by a minimal valid
-// ALERT with the validation error as evidence — the system never drops an
+// ALERT with the validation error as evidence, the system never drops an
 // alert because of its own marshaling bug."
 func minimalValidationFailureAlert(cfg *config.Config, seq int64, verr error) *report.Report {
 	return &report.Report{
@@ -307,7 +307,7 @@ func mustMarshalR(r *report.Report) []byte {
 	b, err := json.Marshal(r)
 	if err != nil {
 		// Marshal only fails on unsupported types; report.Report contains
-		// none. Treat as empty rather than panic — Validate below will
+		// none. Treat as empty rather than panic, Validate below will
 		// then reject it and the caller's safety net takes over.
 		return []byte("{}")
 	}

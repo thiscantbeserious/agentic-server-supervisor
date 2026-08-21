@@ -31,17 +31,57 @@ permissions:
 
 jobs:
   lint:
+    # Everything gates on the secret scan: if a credential is in the tree,
+    # nothing should build, test or publish from it. scan must stay
+    # unconditional, a skipped dependency skips this job too, which would
+    # turn a scan that never ran into a green pipeline that did nothing.
+    needs: scan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - name: actionlint
         run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
 
+  # Secret scanning that deliberately holds nothing. No secrets are exposed
+  # to this job, it performs no registry login, and permissions is set to the
+  # empty set rather than inheriting the workflow default.
+  #
+  # That is the point, not an oversight: third-party scanning is itself a
+  # supply-chain entry point, and compromised scanner steps have been used to
+  # exfiltrate CI credentials. A job holding no token and no secret is worth
+  # nothing to whoever compromises it. Anything that would make this job more
+  # helpful by giving it a credential, commenting on pull requests, pushing
+  # fixes, trades away the only property that makes running it safe.
+  #
+  # The scanner is pinned by image digest for the same reason every action
+  # above is pinned by commit SHA: a tag is a movable pointer, and moving one
+  # is how a trusted step gets replaced without any consumer changing a line.
+  #
+  # --redact matters on a public repository: a scanner that prints the secret
+  # it found into the build log has published it more widely than the commit did.
+  scan:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0  # history, not just the tip, that is where secrets survive
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source=/repo --config=/repo/.gitleaks.toml --no-banner --redact --verbose
+
   test:
+    # Everything gates on the secret scan: if a credential is in the tree,
+    # nothing should build, test or publish from it. scan must stay
+    # unconditional, a skipped dependency skips this job too, which would
+    # turn a scan that never ran into a green pipeline that did nothing.
+    needs: scan
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -66,15 +106,15 @@ jobs:
   # sentinel -> SMTP -> mailrise -> mock for real; the only unexercised
   # link is Telegram's own API, which is not ours to test and which a
   # real token would not meaningfully verify anyway (the mock's own
-  # assertions on the real wire payload — title/message/type, delivery
-  # counts, two fail-on-demand cases — are what actually verify OUR
+  # assertions on the real wire payload, title/message/type, delivery
+  # counts, two fail-on-demand cases, are what actually verify OUR
   # side; see internal/notify/e2e_test.go's own comment for the full
   # list, including the finding that apprise's json:// output never
   # forwards a "format" field at all).
   #
   # Neither `services:` nor `docker compose` fit cleanly, so neither is
-  # used. The mock lives IN the `go test` process, not in a container —
-  # its assertions need direct access to the test's own state — so
+  # used. The mock lives IN the `go test` process, not in a container,
+  # its assertions need direct access to the test's own state, so
   # apprise/mailrise need to reach a plain runner process, not another
   # container. `services:` containers on a job that does not itself run
   # in a container sit on a bridge network with no automatic route back
@@ -92,8 +132,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: go.mod
 
@@ -155,7 +195,7 @@ jobs:
           docker logs e2e-mailrise 2>&1 | tail -100 || true
 
   # The C1-C13 container suite, run once per architecture on a runner
-  # NATIVE to it — never both inside one job, never under emulation.
+  # NATIVE to it, never both inside one job, never under emulation.
   # Architecture is the matrix's job, not this suite's or the runner's:
   # test/container_test.go takes its own arch from runtime.GOARCH, which
   # is exactly the platform this job's runner actually is.
@@ -163,10 +203,10 @@ jobs:
   # C1's coherence assertion is independent of any build arg (it derives
   # its expectation from the process's own arch, not from anything the
   # build produced) and catches the class of defect where TARGETARCH
-  # scoping ships an amd64 image labelled arm64 — a defect this job's
+  # scoping ships an amd64 image labelled arm64, a defect this job's
   # own real BuildKit exposes and podman does not.
   #
-  # needs: test rather than running in parallel — this suite takes
+  # needs: test rather than running in parallel, this suite takes
   # several minutes and downloads real artifacts over the network; no
   # reason to spend that on a push where `go vet` or a unit test is
   # already broken.
@@ -181,15 +221,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: go.mod
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: go test -tags container
         # AGY_URL_*/AGY_SHA512_* from repository variables, never
-        # hardcoded here — same values the build job's build-args use.
+        # hardcoded here, same values the build job's build-args use.
         # Set, they make buildSentinelImage() build this job's test
         # image from the REAL vendor artifact instead of the synthetic
         # fixture, for every case in this run, not only the ones gated
@@ -198,11 +238,11 @@ jobs:
         # SENTINEL_REAL_AGY=1 additionally runs TestContainer_RealAgyBuild,
         # which downloads and builds against the real tarball directly
         # (its own fixture literal for THIS matrix leg's arch, not these
-        # vars — see that test's own comment for why) rather than
+        # vars, see that test's own comment for why) rather than
         # through buildSentinelImage.
         #
         # SENTINEL_E2E is deliberately NOT set here: TestE2E needs
-        # apprise, mailrise, and the Telegram bot token as a secret —
+        # apprise, mailrise, and the Telegram bot token as a secret,
         # a different decision from these public build args, left to
         # whoever owns that secret. It stays gated and uncovered by
         # this job.
@@ -215,12 +255,12 @@ jobs:
         run: go test -tags container -v -timeout 25m ./test/...
 
   # Built per architecture, on a runner native to it, and pushed by
-  # digest rather than by tag — no tag exists yet for a single-arch
+  # digest rather than by tag, no tag exists yet for a single-arch
   # push, only after `merge` below assembles all of them into one
   # manifest list and tags THAT. This is what makes the design
   # genuinely architecture-independent: a third architecture later is
   # one more matrix row here (and in `container` above) and nothing
-  # else — no workflow logic branches on which architectures exist.
+  # else, no workflow logic branches on which architectures exist.
   build:
     needs: test
     strategy:
@@ -237,11 +277,11 @@ jobs:
       group: build-${{ matrix.arch }}-${{ github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
@@ -250,7 +290,7 @@ jobs:
 
       # GHCR requires a lowercase image path. This repository is already
       # all-lowercase so raw ${{ github.repository }} works today, but
-      # it is latent breakage for any repo/org with capitals — lowercase
+      # it is latent breakage for any repo/org with capitals, lowercase
       # it explicitly rather than relying on that. Computed once here so
       # every later step (the build's own tag, the smoke pull, the
       # digest artifact) references the same value.
@@ -259,11 +299,11 @@ jobs:
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: deploy/Dockerfile
-          # Single platform — this job's own, matching the runner it is
+          # Single platform, this job's own, matching the runner it is
           # already executing on. buildx supplies TARGETARCH/TARGETPLATFORM
           # for it; the Dockerfile selects the matching
           # AGY_URL_*/AGY_SHA512_* pair.
@@ -294,7 +334,7 @@ jobs:
 
           # ELF e_machine read FIRST, for BOTH binaries: it reads bytes
           # rather than executing anything, and proves the property
-          # that actually matters — the right architecture binaries are
+          # that actually matters, the right architecture binaries are
           # in the right image. A bare `--version` cannot prove that on
           # its own; a Dockerfile ARG-scoping defect once produced
           # amd64 binaries inside an image labelled and manifested as
@@ -314,7 +354,7 @@ jobs:
 
           # Invoked through a shell rather than as a direct --entrypoint
           # exec: direct exec of agy on a GitHub runner has failed once
-          # (exit 255) where the shell form passed — cause not
+          # (exit 255) where the shell form passed, cause not
           # established, kept as the form known to work.
           docker run --rm --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
 
@@ -327,7 +367,7 @@ jobs:
 
       - name: Upload the digest
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -335,28 +375,28 @@ jobs:
           retention-days: 1
 
   # Assembles every architecture's digest (needs: build waits for the
-  # WHOLE matrix, and fails if any leg failed — fail-fast: false on
+  # WHOLE matrix, and fails if any leg failed, fail-fast: false on
   # `build` means one architecture failing is still visible on its own,
   # but a manifest list is never published missing the architecture
   # that failed) into one manifest list and tags it. A third
   # architecture later needs no change here: it is picked up by
   # downloading its digest artifact along with the others.
   #
-  # Skipped on pull_request BY DESIGN, not by omission — a PR build
+  # Skipped on pull_request BY DESIGN, not by omission, a PR build
   # never pushes (github.event_name != 'pull_request' on `build`'s own
   # outputs), so there is no digest anywhere for `imagetools create` to
   # assemble. `imagetools create` is fundamentally a REGISTRY operation
-  # — it fetches manifests by digest and pushes a combined one — it has
+  #, it fetches manifests by digest and pushes a combined one, it has
   # no local-images-only mode. Making it exercisable on a PR without
   # writing to GHCR would need a registry every matrix leg of `build`
   # AND this job can all reach, and GitHub Actions jobs are separate
   # runner VMs with no shared state between them: a registry container
   # started inside one matrix leg is not visible to the others or to
   # this job. The only way around that is an external registry service
-  # or a scoped, still-real push to GHCR — both real infrastructure,
+  # or a scoped, still-real push to GHCR, both real infrastructure,
   # not a small addition, and both weigh more than what this catches.
   # So: this step's own correctness is proven on every push to `main`,
-  # never on a PR — a green PR does not cover it, and a broken
+  # never on a PR, a green PR does not cover it, and a broken
   # `imagetools create` invocation is only visible after a push, not
   # before. Named here so nobody reads a green PR as having verified
   # manifest assembly.
@@ -365,8 +405,8 @@ jobs:
     # image builds and starts, not that C1-C13 pass or that the live
     # notify path works. container and e2e are build's siblings (both
     # `needs: test` only), so without listing them here a broken
-    # install-host.sh or a broken notify path could fail red while the
-    # digests still publish and this job still tags them — the tag is
+    # install.sh or a broken notify path could fail red while the
+    # digests still publish and this job still tags them, the tag is
     # the thing an operator pulls, so it is the one place that must not
     # move on unverified digests. lint (actionlint) is included for the
     # same reason C13 requires it: a workflow-shape defect must gate
@@ -380,18 +420,18 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
       - name: Download every architecture's digest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: digests-*
           path: /tmp/digests
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -402,7 +442,7 @@ jobs:
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
@@ -417,7 +457,7 @@ jobs:
           # into one malformed argument. This disable is file-scoped (a
           # directive at the top of a `run:` block applies to the whole
           # block, not just the next line) and is correct only because
-          # this block is a single command — keep it that way, or a
+          # this block is a single command, keep it that way, or a
           # later command added below would silently inherit the same
           # suppression.
           docker buildx imagetools create \

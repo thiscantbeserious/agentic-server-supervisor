@@ -1,5 +1,5 @@
 // smtpfallback.go: the mailrise SMTP second path (N.5.1). net/smtp only,
-// no external dependency, no TLS — mailrise.conf runs tls: off on the LAN.
+// no external dependency, no TLS, mailrise.conf runs tls: off on the LAN.
 package notify
 
 import (
@@ -75,7 +75,7 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 }
 
 // buildMIME is N.5.1 step 4: CRLF-terminated headers, Content-Type
-// text/html, then the HTML body (N.3.6) — never payload.Body, which is
+// text/html, then the HTML body (N.3.6), never payload.Body, which is
 // markdown that renders only because the JSON payload carries
 // format: markdown alongside it. mailrise selects the notification
 // format from Content-Type (verified live 2026-08-18), so text/html

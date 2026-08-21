@@ -8,7 +8,7 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// Process must not panic when cfg.Loc is nil — config.Load always resolves
+// Process must not panic when cfg.Loc is nil, config.Load always resolves
 // it, but Process is a public API and must degrade gracefully (UTC),
 // not crash a whole tick, if some future caller skips Load.
 func TestProcess_NilLocDoesNotPanic(t *testing.T) {

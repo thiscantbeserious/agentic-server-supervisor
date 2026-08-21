@@ -6,7 +6,7 @@ package runtime
 // the reviewer but has no test." R3.2/R3.8 describe the wiring
 // (drainOutbox reads OutboxTake's FallbackSMTP and forwards it to
 // NotifySend) but nothing in R8's table drives it through 4 REAL failing
-// ticks — the gap this file closes.
+// ticks, the gap this file closes.
 //
 // The SMTP stub mirrors internal/notify's own (a net.Listen goroutine
 // speaking the real protocol, C9) rather than importing it, since it is
@@ -132,7 +132,7 @@ func (s *smtpStub) handle(conn net.Conn) {
 // apprise is permanently down (503 on every POST), so a report queued to
 // the outbox can only ever be retried via the drain (R3.2 step 5). Per
 // R3.2's own documented consequence ("OutboxTake increments attempts on
-// every take ... a tick that fails advances the counter twice — once for
+// every take ... a tick that fails advances the counter twice, once for
 // the immediate drain of the payload it just queued, once on the next
 // tick"), OUTBOX_SMTP_AFTER=3 (the C3 default) is reached on the THIRD
 // drain (tick 3), at which point drainOutbox must call
@@ -205,7 +205,7 @@ func TestTick_OutboxSMTPEscalation_E2E(t *testing.T) {
 		t.Fatalf("after tick 2: smtp stub received %d deliveries, want 0", d)
 	}
 
-	// Tick 3: attempts -> 3 (>= OutboxSMTPAfter=3) — drainOutbox must call
+	// Tick 3: attempts -> 3 (>= OutboxSMTPAfter=3), drainOutbox must call
 	// notify.Send(..., smtpFallback=true), which delivers via the real
 	// SMTP stub, and OutboxAck the item.
 	cfg.Now = tick0.Add(2 * time.Minute)
@@ -221,7 +221,7 @@ func TestTick_OutboxSMTPEscalation_E2E(t *testing.T) {
 		t.Fatalf("after tick 3: smtp stub received %d deliveries, want exactly 1", deliveries)
 	}
 	if !sawAuth {
-		t.Error("smtp stub never saw AUTH — mailrise requires SMTP AUTH unconditionally (N.5)")
+		t.Error("smtp stub never saw AUTH, mailrise requires SMTP AUTH unconditionally (N.5)")
 	}
 	if !strings.Contains(rcptTo, cfg.SentinelMailTo) {
 		t.Errorf("RCPT TO = %q, want it to contain %q", rcptTo, cfg.SentinelMailTo)
@@ -230,10 +230,10 @@ func TestTick_OutboxSMTPEscalation_E2E(t *testing.T) {
 		t.Errorf("DATA did not carry the queued report's content: %q", dataText)
 	}
 	if apCount := apprise.count(); apCount != 2 {
-		t.Errorf("apprise recorder received %d requests, want exactly 2 (tick 1 + tick 2 drains only — tick 3 must go via SMTP, not apprise)", apCount)
+		t.Errorf("apprise recorder received %d requests, want exactly 2 (tick 1 + tick 2 drains only, tick 3 must go via SMTP, not apprise)", apCount)
 	}
 
-	// Tick 4: outbox is empty — the drain must have nothing left to
+	// Tick 4: outbox is empty, the drain must have nothing left to
 	// retry, and no further SMTP or apprise traffic.
 	cfg.Now = tick0.Add(3 * time.Minute)
 	res4 := Tick(context.Background(), cfg, 4, d)

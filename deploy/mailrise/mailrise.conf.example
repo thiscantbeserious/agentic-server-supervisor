@@ -7,7 +7,12 @@
 # Copy to mailrise.conf and fill in the real values:
 #
 #   cp mailrise/mailrise.conf.example mailrise/mailrise.conf
-#   chmod 600 mailrise/mailrise.conf && $EDITOR mailrise/mailrise.conf
+#   chmod 644 mailrise/mailrise.conf && $EDITOR mailrise/mailrise.conf
+#
+# 644, not 600: mailrise reads this file as a non-root user inside the
+# container, so a root-owned 600 file is unreadable and the container
+# crash-loops on start. The file still holds a real token, so it stays
+# gitignored and off any shared path.
 #
 # mailrise.conf is gitignored. This .example is tracked and must never contain a
 # real token.

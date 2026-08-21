@@ -4,12 +4,12 @@
 the text applied to the package; the files themselves are now authoritative and
 will drift from this document as the code changes. Kept for the rules and the
 reasoning in `refactor-analyze-vocabulary.md` §3, not as a comment source of
-truth — never "restore" a comment from here without checking the code first.
+truth, never "restore" a comment from here without checking the code first.
 
 Only `analyze.go` carries the package doc (godoc permits one); the other seven
 files get a plain comment above their `package` clause.
 
-## analyze.go — package doc
+## analyze.go, package doc
 
 ```go
 // Package analyze turns one tick's collected facts into a human-readable
@@ -32,8 +32,8 @@ files get a plain comment above their `package` clause.
 // forge a fence end it cannot predict, and the prompt instructs the model
 // to treat everything inside the fences as data. The model has no tools and
 // executes nothing; a successful injection is limited to wrong text in a
-// report, and the recommendation field — the one field an operator might
-// paste into a shell — additionally passes a deterministic deny-list guard.
+// report, and the recommendation field, the one field an operator might
+// paste into a shell, additionally passes a deterministic deny-list guard.
 //
 // The binding spec is contracts/analyze.md.
 package analyze
@@ -62,7 +62,7 @@ package analyze
 ```
 
 ```go
-// guard.go: the deterministic deny-list over the recommendation field —
+// guard.go: the deterministic deny-list over the recommendation field,
 // the last check before model output reaches text an operator might paste
 // into a root shell.
 ```
@@ -108,7 +108,7 @@ Each file header ends with `// The binding spec is contracts/analyze.md.`
 
 ```go
 // Deps holds the two operations tests replace: running agy and collecting
-// deep facts. Plain function fields, not interfaces — there is exactly one
+// deep facts. Plain function fields, not interfaces, there is exactly one
 // real implementation of each.
 ```
 
@@ -146,7 +146,7 @@ var (
 	errAgyUnauth = errors.New("agy: not authenticated")
 
 	// errAgyEmptySystemic: the envelope reports a failed call or zero
-	// input tokens — the prompt never reached a model that answered, so a
+	// input tokens, the prompt never reached a model that answered, so a
 	// retry would re-run the identical broken invocation. An empty response
 	// from a call that did spend tokens is the one empty-output case that
 	// is plausibly transient and stays retry-eligible.
@@ -160,7 +160,7 @@ var (
 // produces a hallucinated answer to an empty question. The prompt file is
 // still written for debugging and the retry append, but it is passed by
 // value. The environment is reduced to PATH, HOME, TMPDIR, TZ, LANG and
-// AGY_* — never the full process environment, which carries notification
+// AGY_*, never the full process environment, which carries notification
 // secrets that must not leak into a subprocess.
 //
 // A cancelled context is reported as cancellation, checked before the
@@ -171,8 +171,8 @@ var (
 ```go
 // decodeAgyEnvelope unwraps agy's --output-format json envelope and rejects
 // answers that never happened. agy has an upstream defect where print mode
-// silently drops stdout in non-TTY contexts — exactly how this package
-// spawns it — returning exit 0 with nothing, so a bare read cannot tell
+// silently drops stdout in non-TTY contexts, exactly how this package
+// spawns it, returning exit 0 with nothing, so a bare read cannot tell
 // "no response" from "response lost". The envelope makes it distinguishable:
 // a failed status or zero input tokens means the prompt never reached the
 // model (not retryable); a successful, token-spending call with an empty
@@ -181,7 +181,7 @@ var (
 
 ```go
 // normalizeAgyOutput trims whitespace and strips a single leading ```json
-// (or ```) fence line and trailing fence line — the two decorations models
+// (or ```) fence line and trailing fence line, the two decorations models
 // habitually add around JSON they were told to return bare.
 ```
 
@@ -192,7 +192,7 @@ var (
 
 ```go
 // isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
-// text itself is never logged — log lines must not carry subprocess output —
+// text itself is never logged, log lines must not carry subprocess output,
 // only this in-process check reads it.
 ```
 
@@ -220,7 +220,7 @@ var (
 // operators grep for during an outage.
 ```
 
-`classifyAgyErr` gets no comment — the switch documents itself.
+`classifyAgyErr` gets no comment, the switch documents itself.
 
 ## deepdive.go
 
@@ -230,7 +230,7 @@ var (
 
 ```go
 // isNewFinding reports whether a finding has not been seen as an active
-// alert before. Any stat error counts as "new" — a fresh state directory
+// alert before. Any stat error counts as "new", a fresh state directory
 // makes every finding new, which is the safe direction.
 ```
 
@@ -246,8 +246,8 @@ var (
 // manageDeepQueue keeps the deferred-candidate queue honest: every new
 // deep-dive-capable finding that was not chosen is queued, the consumed
 // candidate's entry is removed, and entries for findings no longer in the
-// report are dropped as stale. Errors here never fail the tick — queue
-// bookkeeping must not gate analysis — but each one leaves a log line
+// report are dropped as stale. Errors here never fail the tick, queue
+// bookkeeping must not gate analysis, but each one leaves a log line
 // rather than vanishing.
 ```
 
@@ -259,7 +259,7 @@ var (
 // The merge trusts only our own pointer to the candidate finding, never a
 // key echoed back by the model. The returned headline, when present,
 // replaces the triage headline: the headline becomes the notification
-// title, and triage wrote it knowing only the shallow tick facts — if the
+// title, and triage wrote it knowing only the shallow tick facts, if the
 // deep collection reveals something worse, a stale headline misleads the
 // operator at exactly the wrong moment.
 ```
@@ -313,13 +313,13 @@ Inline, at the deep-dive log call:
 // patterns there destroyed legitimate reports on day one. A recommendation
 // is different in kind: it is a command proposal a tired operator may paste
 // into a root shell, so the patterns are broad and false positives are
-// accepted — a suppressed suggestion costs one visible meta finding, a
+// accepted, a suppressed suggestion costs one visible meta finding, a
 // missed one can cost the host.
 //
 // Hard-won shape rules, each from a real false-positive class:
 //   - danger tokens are word-bounded ("dd" must not match "add");
 //   - a TLD-shaped suffix is only dangerous when it is not operational
-//     vocabulary — on the target every systemd unit is "<name>.service",
+//     vocabulary, on the target every systemd unit is "<name>.service",
 //     and a guard that cannot say "restart smartd.service" destroys the
 //     output it protects. "sh" is deliberately absent from the safe set:
 //     .sh is a live TLD widely used to host payloads;
@@ -335,7 +335,7 @@ Inline, at the deep-dive log call:
 // and run it with the shell" is not catchable by substring matching. The
 // residual risk is accepted because a human evaluates every recommendation
 // and the supervisor itself executes nothing. Any change here must pass
-// both the attack table and the operational-prose table in the tests —
+// both the attack table and the operational-prose table in the tests,
 // three consecutive false-positive classes came from testing against the
 // attack table alone.
 ```
@@ -344,7 +344,7 @@ Inline, at the deep-dive log call:
 // guardRecommendations blanks any recommendation matching the deny-list and
 // appends one watch finding recording the withholding. The record is never
 // dropped: if the report is at the findings cap, the least important
-// finding is evicted to make room — losing an "all clear" line is better
+// finding is evicted to make room, losing an "all clear" line is better
 // than silently losing the fact that a dangerous proposal was suppressed.
 // Idempotent, and a no-op when no finding carries a recommendation.
 ```
@@ -357,7 +357,7 @@ Inline, at the deep-dive log call:
 
 ## prompt.go
 
-On the embed block — this carries the `prompt/` directory charter:
+On the embed block, this carries the `prompt/` directory charter:
 
 ```go
 // The prompt/ directory holds everything this package says TO the model:
@@ -368,8 +368,8 @@ On the embed block — this carries the `prompt/` directory charter:
 // The payloads are a different matter and some of their bytes are
 // Go-authored: the history projection's field names, the validator message
 // the correction quotes, and text this package itself wrote into an
-// earlier tick's report — a withheld-recommendation note, a fallback
-// placeholder — which returns here as history evidence. Auditing what the
+// earlier tick's report, a withheld-recommendation note, a fallback
+// placeholder, which returns here as history evidence. Auditing what the
 // model is told means reading this directory; auditing everything it sees
 // means following the payloads too.
 //
@@ -396,7 +396,7 @@ On the embed block — this carries the `prompt/` directory charter:
 ```
 
 ```go
-// newNonce returns 16 hex chars from crypto/rand — the per-run fence
+// newNonce returns 16 hex chars from crypto/rand, the per-run fence
 // token. The fences are only a boundary if injected log text cannot
 // predict them; a fresh random nonce per run is what makes a forged
 // "end of fence" line inert.
@@ -419,7 +419,7 @@ On the embed block — this carries the `prompt/` directory charter:
 // returns an empty answer past a measured ~30 KB prompt, an order of
 // magnitude below the facts size cap, so an unbudgeted prompt fails in the
 // worst way: successfully, with nothing. The non-facts shell has a fixed
-// size, so one render yields the exact remaining budget — no iteration.
+// size, so one render yields the exact remaining budget, no iteration.
 // The reduction uses the collector's own truncation on a copy; the
 // original facts are never touched, because the fallback and raw-alert
 // paths read them and must see exactly what the collector emitted.
@@ -429,7 +429,7 @@ On the embed block — this carries the `prompt/` directory charter:
 // buildDeepDivePrompt applies the same budget technique to the deep-dive
 // prompt. Not cosmetic: a deep collection can reach the full facts size
 // cap, a single argv string that large fails exec outright on Linux, and
-// anything past ~30 KB hits agy's silent-empty cliff — unbudgeted, the
+// anything past ~30 KB hits agy's silent-empty cliff, unbudgeted, the
 // deep dive would fail systematically for exactly the large collections it
 // exists to analyze.
 ```
@@ -452,7 +452,7 @@ On the embed block — this carries the `prompt/` directory charter:
 // historyFinding is the compact projection of a past finding carried in the
 // prompt. Evidence, occurrences and first_seen are load-bearing: the dedup
 // key deliberately masks digits, so "cksum_errors=1" and "cksum_errors=7"
-// share a key — the key alone proves recurrence but can never prove
+// share a key, the key alone proves recurrence but can never prove
 // growth. The model is asked to compare counters across ticks; without the
 // evidence text that comparison is impossible and it answers from
 // imagination.
@@ -471,7 +471,7 @@ On the embed block — this carries the `prompt/` directory charter:
 // computeResolved returns which of the previous report's findings are gone
 // this tick, as evidence snippets. Computed in Go, overwriting whatever the
 // model emitted: set arithmetic over data we already hold does not belong
-// in a probabilistic component. Only the newest report is compared —
+// in a probabilistic component. Only the newest report is compared,
 // anything older was already announced resolved. Entries are truncated to
 // the schema's length bound and empty results skipped, since one overlong
 // or empty entry would invalidate the whole report.
@@ -486,7 +486,7 @@ On the embed block — this carries the `prompt/` directory charter:
 // truncRunes keeps at most n leading runes.
 ```
 
-`newestHistory` gets no comment — three obvious lines.
+`newestHistory` gets no comment, three obvious lines.
 
 ## fallback.go
 
@@ -499,7 +499,7 @@ On the embed block — this carries the `prompt/` directory charter:
 
 ```go
 // protectedKernelLines returns this tick's high-priority kernel lines,
-// oldest first, capped — keeping the newest when the cap binds. A forward
+// oldest first, capped, keeping the newest when the cap binds. A forward
 // walk that stops at the limit would keep the oldest lines and drop the
 // incident happening right now.
 ```
@@ -532,7 +532,7 @@ On the embed block — this carries the `prompt/` directory charter:
 
 `newLogger` needs no comment beyond the `logWriter` doc.
 
-## prompt/prompt.tmpl — leading comment, renders nothing
+## prompt/prompt.tmpl, leading comment, renders nothing
 
 ```
 {{/*
@@ -541,7 +541,7 @@ security-boundary paragraphs, shared header, triage task, deep-dive task,
 retry correction. Every substitution point in every prompt is in this file;
 role.md and deepdive.schema.json beside it hold the rest of the fixed text.
 Rendered output is compared byte-for-byte against testdata goldens, and
-whitespace inside a define is load-bearing — text between defines is not,
+whitespace inside a define is load-bearing, text between defines is not,
 since it belongs to the file template and is never rendered.
 */}}
 ```
@@ -551,18 +551,18 @@ so it must stay exactly the role text.
 
 ## Delete outright
 
-- `analyze.go:37` — the comment whose entire content was a citation.
-- `analyze.go:94–103` — the `errAgyEmptySystemic` review-round narrative. The
+- `analyze.go:37`, the comment whose entire content was a citation.
+- `analyze.go:94–103`, the `errAgyEmptySystemic` review-round narrative. The
   reasoning survives above; the process history belongs to git.
-- `analyze.go:106–114 / 127–133 / 169–177 / 205–213` — duplicated cancellation
+- `analyze.go:106–114 / 127–133 / 169–177 / 205–213`, duplicated cancellation
   and retry rationales, now stated once each at `Run` and `runTriage`.
-- `analyze.go:516–517` — a doubled `runAgy` doc comment (merge artifact).
-- `analyze.go:556–560, 570–572` — paragraphs restating the error-class block.
+- `analyze.go:516–517`, a doubled `runAgy` doc comment (merge artifact).
+- `analyze.go:556–560, 570–572`, paragraphs restating the error-class block.
   Keep one line at the branch: `// SIGTERM also surfaces as a non-nil cmd.Run
   error; check cancellation first.`
-- `prompt.go:26–33, 87–97, 193–199, 219–226` — byte-diff archaeology, commit
+- `prompt.go:26–33, 87–97, 193–199, 219–226`, byte-diff archaeology, commit
   references, citation framing. Reasons kept above.
-- `stage2.go:74–105` — the round-by-round changelog, compressed into the guard
+- `stage2.go:74–105`, the round-by-round changelog, compressed into the guard
   block above.
 - `deep.go:12, 17, 23, 101–107, 158–163` and `fallback.go:12–13, 20–21, 80–82`
-  — citations inside otherwise good comments; prose keeps the content.
+ , citations inside otherwise good comments; prose keeps the content.

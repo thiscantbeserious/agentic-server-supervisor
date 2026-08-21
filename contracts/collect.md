@@ -2,7 +2,7 @@
 
 > Conventions C1–C9 in [CONTRACTS.md](../CONTRACTS.md) are binding and win on conflict. Read them first.
 
-`sentinel collect` — deterministic, read-only, no LLM. Implements PLAN §2.1; satisfies A1, A2, A8; feeds ARCHITECTURE §5 rows "facts.json > 256 KB" and "Collector section failed". Wire contract: `internal/facts/facts.schema.json`.
+`sentinel collect`, deterministic, read-only, no LLM. Implements PLAN §2.1; satisfies A1, A2, A8; feeds ARCHITECTURE §5 rows "facts.json > 256 KB" and "Collector section failed". Wire contract: `internal/facts/facts.schema.json`.
 
 ```mermaid
 flowchart LR
@@ -21,7 +21,7 @@ flowchart LR
 
 | # | Bash spec said | Now | Source |
 |---|---|---|---|
-| D1 | one `HOST_JOURNAL_DIR` with children `persistent/`, `volatile/` | two vars, `HOST_JOURNAL_DIR` (host `/var/log/journal`) and `HOST_JOURNAL_VOLATILE_DIR` (host `/run/log/journal`); both queried, results merged and de-duplicated on `(ts, message)` — not a fallback chain | consistency 3+4, gaps 2 |
+| D1 | one `HOST_JOURNAL_DIR` with children `persistent/`, `volatile/` | two vars, `HOST_JOURNAL_DIR` (host `/var/log/journal`) and `HOST_JOURNAL_VOLATILE_DIR` (host `/run/log/journal`); both queried, results merged and de-duplicated on `(ts, message)`, not a fallback chain | consistency 3+4, gaps 2 |
 | D2 | truncation drops the newest entries unconditionally | entries with `priority <= RAW_ALERT_MAX_PRIORITY` are **never** dropped in the normal loop; hard truncation keeps the `RAW_ALERT_MAX_LINES` newest protected kernel entries | gaps 8, consistency 35 |
 | D3 | deep `history[]` `ts` came from the report body | `ts` is derived from the history **filename** (`<unix-seconds,10>-<tick_seq,6>.json`), falling back to the file mtime when the name does not match | consistency 11, gaps 10, minor note on volume restore |
 | D4 | deep `zfs` had no SMART/dmesg context | deep `zfs` additionally emits `smart_entries[]` and `kernel_entries[]` over `DEEP_WINDOW` | gaps 17 (PLAN §2.1) |
@@ -41,7 +41,7 @@ sentinel collect [--deep zfs|smart|kernel|ras]
 ```
 
 - `--deep <component>` takes exactly one of the four values. Any other value, a missing value, an unknown flag, or any positional argument ⇒ **exit 64**, usage on stderr, nothing on stdout.
-- `--help` prints the usage block on **stderr** and exits 0 — stdout stays reserved for machine output (C7).
+- `--help` prints the usage block on **stderr** and exits 0, stdout stays reserved for machine output (C7).
 - Parsed with `flag.NewFlagSet("collect", flag.ContinueOnError)`, `SetOutput(io.Discard)`.
 - Exactly one compact JSON object plus `\n` on stdout on success; stdout is never written on a non-zero exit. stdin is not read.
 
@@ -56,7 +56,7 @@ Environment is read exclusively through `internal/config.Load()`. The variables 
 | Path | Section |
 |---|---|
 | `$HOST_JOURNAL_DIR`, `$HOST_JOURNAL_VOLATILE_DIR` (dirs, passed to `journalctl -D`) | kernel, ras, smart, zfs, services |
-| `$HOST_RASDAEMON` (directory listing only — the SQLite DB is **never opened**, ARCHITECTURE §2.5) | ras |
+| `$HOST_RASDAEMON` (directory listing only, the SQLite DB is **never opened**, ARCHITECTURE §2.5) | ras |
 | `$HOST_PROC/meminfo`, `loadavg`, `uptime`, `mounts` | resources |
 | `$HOST_PROC/net/{tcp,tcp6,udp,udp6}` | network |
 | `$HOST_PROC/spl/kstat/zfs/arcstats`, `$HOST_PROC/spl/kstat/zfs/` (dir listing) | zfs |
@@ -68,29 +68,29 @@ Environment is read exclusively through `internal/config.Load()`. The variables 
 - `journalctl -D <dir> --since -<window> -o json --no-pager <filters...>`
 - `sensors -j`
 
-**Files written — exactly one:** `$STATE_DIR/baseline-ports`, tick mode, only when missing: `proto/port` per line, sorted, `\n`-terminated. Written per C4 (`os.CreateTemp($STATE_DIR, ".tmp-*")` → write → `Sync` → `Close` → `os.Rename`, mode `0o644`). Deep mode writes nothing. `$STATE_DIR` unwritable is **never fatal** for collect: the baseline is not created, `baseline_initialized` stays `false`, both diffs stay empty, and one `collector_errors[]` entry is appended. Exit code 69 belongs to the runtime preflight, not to `collect`.
+**Files written, exactly one:** `$STATE_DIR/baseline-ports`, tick mode, only when missing: `proto/port` per line, sorted, `\n`-terminated. Written per C4 (`os.CreateTemp($STATE_DIR, ".tmp-*")` → write → `Sync` → `Close` → `os.Rename`, mode `0o644`). Deep mode writes nothing. `$STATE_DIR` unwritable is **never fatal** for collect: the baseline is not created, `baseline_initialized` stays `false`, both diffs stay empty, and one `collector_errors[]` entry is appended. Exit code 69 belongs to the runtime preflight, not to `collect`.
 
-### 3. Sections — exact behaviour
+### 3. Sections, exact behaviour
 
 **Journal helper** (`internal/journal`): for each of `$HOST_JOURNAL_DIR`, `$HOST_JOURNAL_VOLATILE_DIR` that exists as a directory, run journalctl and stream-decode stdout with `json.Decoder`.
 
 **Record cap.** Each query is bounded to `$JOURNAL_MAX_RECORDS` records (default 20000) and **keeps the NEWEST**, never the oldest. The decoder holds the kept records in a sliding window which **never exceeds the cap**: once full, decoding a further record evicts one held record and increments `dropped_entries` (`truncated: true`). Only **kept** records count against the cap. Decoding always continues to the end of the stream so the pipe is consumed.
 
-Eviction picks, in order: the **oldest unprotected** record (`priority > RAW_ALERT_MAX_PRIORITY`); if the window holds nothing unprotected, the **oldest protected** one. D2 therefore means *protected entries are evicted last*, not *never* — evicting them is reachable only once the window is 20000 consecutive `emerg`/`crit`/`alert` records, at which point the newest 20000 are still retained and the raw-alert path emits at most `RAW_ALERT_MAX_LINES` (20) of them anyway. The alternative — an unbounded window — hands the OOM killer the whole container, and losing every alert is strictly worse than losing the oldest of twenty thousand critical lines. This is the same trade §5 step 3 already makes when it caps `kernel.entries` at the byte-budget fixed point.
+Eviction picks, in order: the **oldest unprotected** record (`priority > RAW_ALERT_MAX_PRIORITY`); if the window holds nothing unprotected, the **oldest protected** one. D2 therefore means *protected entries are evicted last*, not *never*, evicting them is reachable only once the window is 20000 consecutive `emerg`/`crit`/`alert` records, at which point the newest 20000 are still retained and the raw-alert path emits at most `RAW_ALERT_MAX_LINES` (20) of them anyway. The alternative, an unbounded window, hands the OOM killer the whole container, and losing every alert is strictly worse than losing the oldest of twenty thousand critical lines. This is the same trade §5 step 3 already makes when it caps `kernel.entries` at the byte-budget fixed point.
 
-**The scan must not be O(n) per record.** Once a scan finds nothing unprotected, the window stays all-protected until an unprotected record is inserted, so that state is tracked rather than rediscovered; otherwise an `emerg` storm is quadratic and the section dies of `SECTION_TIMEOUT` at roughly 170k records — losing the whole kernel section at the exact moment it matters, and the raw-alert path reads that section.
+**The scan must not be O(n) per record.** Once a scan finds nothing unprotected, the window stays all-protected until an unprotected record is inserted, so that state is tracked rather than rediscovered; otherwise an `emerg` storm is quadratic and the section dies of `SECTION_TIMEOUT` at roughly 170k records, losing the whole kernel section at the exact moment it matters, and the raw-alert path reads that section.
 
-`journalctl -n <N>` is deliberately **not** used, even though it is less code: journald would then never send the surplus, so the section could not count what it lost. `truncated: true` with `dropped_entries: 0` violates the `facts.schema.json` invariant, and `truncated: false` would be a lie — either way the document loses the ability to tell the analyzer that it is incomplete, which is the one thing this document exists to do. Memory stays bounded at `$JOURNAL_MAX_RECORDS` entries per query, unconditionally — that is what the eviction order above buys. §5 step 3's `RAW_ALERT_MAX_LINES` cap bounds the *emitted document*, not the heap during collection, so it is not a substitute for a real ceiling here.
+`journalctl -n <N>` is deliberately **not** used, even though it is less code: journald would then never send the surplus, so the section could not count what it lost. `truncated: true` with `dropped_entries: 0` violates the `facts.schema.json` invariant, and `truncated: false` would be a lie, either way the document loses the ability to tell the analyzer that it is incomplete, which is the one thing this document exists to do. Memory stays bounded at `$JOURNAL_MAX_RECORDS` entries per query, unconditionally, that is what the eviction order above buys. §5 step 3's `RAW_ALERT_MAX_LINES` cap bounds the *emitted document*, not the heap during collection, so it is not a substitute for a real ceiling here.
 
-Keeping the newest is not interchangeable with §5's drop rule, which deliberately keeps the *oldest* entries. §5 can do that only because it states "the newest critical lines survive because the raw-alert path reads them" — a premise that holds solely while collect still *has* those lines. A read cap that discarded the newest would delete the active incident (the kernel panic happening right now) before either §5 or the raw-alert path ever saw it, and would do so silently. Read cap: newest wins. Byte-budget truncation: oldest wins. Both rules exist to protect the same lines.
+Keeping the newest is not interchangeable with §5's drop rule, which deliberately keeps the *oldest* entries. §5 can do that only because it states "the newest critical lines survive because the raw-alert path reads them", a premise that holds solely while collect still *has* those lines. A read cap that discarded the newest would delete the active incident (the kernel panic happening right now) before either §5 or the raw-alert path ever saw it, and would do so silently. Read cap: newest wins. Byte-budget truncation: oldest wins. Both rules exist to protect the same lines.
 
-Counting **kept** records rather than decoded ones also matters for `services`, which excludes `_TRANSPORT=kernel` records after decoding: counting excluded records against the cap would let a kernel log storm consume the entire budget and empty `failed_units` while reporting a corrupted `dropped_entries`. The decoder must then **drain stdout to EOF** (`io.Copy(io.Discard, stdout)`) before `cmd.Wait()`: journalctl blocks writing into a full 64 KB pipe buffer while the parent waits for it to exit, so abandoning the pipe early deadlocks the section until its timeout kills it. The same drain applies to every early exit from the decode loop, decode errors included. Without the cap, a 24h deep query on a busy host loads the whole journal into the heap and the OOM killer takes the container down — losing every alert, which is strictly worse than losing the oldest records of one query.
+Counting **kept** records rather than decoded ones also matters for `services`, which excludes `_TRANSPORT=kernel` records after decoding: counting excluded records against the cap would let a kernel log storm consume the entire budget and empty `failed_units` while reporting a corrupted `dropped_entries`. The decoder must then **drain stdout to EOF** (`io.Copy(io.Discard, stdout)`) before `cmd.Wait()`: journalctl blocks writing into a full 64 KB pipe buffer while the parent waits for it to exit, so abandoning the pipe early deadlocks the section until its timeout kills it. The same drain applies to every early exit from the decode loop, decode errors included. Without the cap, a 24h deep query on a busy host loads the whole journal into the heap and the OOM killer takes the container down, losing every alert, which is strictly worse than losing the oldest records of one query.
 
 **Test obligation:** the cap's tests must assert **which** entries survived, not merely how many. `len(entries) == N && dropped == M` passes identically whether the oldest or the newest were kept, and that is precisely how the inverted rule survived a review. At minimum: a fixture whose newest record is `priority 0` with a cap far below the record count, asserting that record is present. Concatenate, sort by `ts` ascending (stable, ties broken by original order), de-duplicate on `(ts, message)`. Neither directory present ⇒ `ErrNoJournal` and the calling section records `"<dir> not readable"`.
 
-**One directory failing does not discard the other.** If one of the two queries fails (permission denied, non-zero exit) while the other returned records, the section stays healthy with the records it got and appends a `collector_errors[]` entry naming the failed directory and reason. Only a failure of *every* directory fails the section. The persistent and volatile journals are two views of the same log: aborting the merge because the second one was unreadable would throw away entries — possibly `emerg` ones — that were already in hand.
+**One directory failing does not discard the other.** If one of the two queries fails (permission denied, non-zero exit) while the other returned records, the section stays healthy with the records it got and appends a `collector_errors[]` entry naming the failed directory and reason. Only a failure of *every* directory fails the section. The persistent and volatile journals are two views of the same log: aborting the merge because the second one was unreadable would throw away entries, possibly `emerg` ones, that were already in hand.
 
-**A mid-stream decode error is never silent.** `dec.Decode` returning anything other than `io.EOF` means the stream was corrupt or truncated: the remaining records are unread and must be accounted for. Drain the pipe, then fail the query with that error so the section reports it (§7 "anything else" ⇒ reason `err.Error()`, exit code 1). Treating a syntax error like a clean EOF would return a short slice with `err == nil` and `dropped == 0`, so every record after the corruption — including an `emerg` line — would vanish with no `truncated` flag, no `dropped_entries`, and no `collector_errors` row. Silence is the one failure mode this system may not have.
+**A mid-stream decode error is never silent.** `dec.Decode` returning anything other than `io.EOF` means the stream was corrupt or truncated: the remaining records are unread and must be accounted for. Drain the pipe, then fail the query with that error so the section reports it (§7 "anything else" ⇒ reason `err.Error()`, exit code 1). Treating a syntax error like a clean EOF would return a short slice with `err == nil` and `dropped == 0`, so every record after the corruption, including an `emerg` line, would vanish with no `truncated` flag, no `dropped_entries`, and no `collector_errors` row. Silence is the one failure mode this system may not have.
 
 Normalization of one record into `facts.Entry`:
 
@@ -111,12 +111,12 @@ Normalization of one record into `facts.Entry`:
 | 3 | `smart` | journal `-t smartd` | `count`, `truncated`, `dropped_entries`, `entries[]` |
 | 4 | `sensors` | `sensors -j`, stdout into `map[string]any`; non-JSON stdout ⇒ section error `unparseable sensors output` (65) | `truncated`, `dropped_entries`, `chips` (verbatim document) |
 | 5 | `zfs` | journal `-t zed` ⇒ `events[]`; `arc` = whitespace-split `$HOST_PROC/spl/kstat/zfs/arcstats` (skip the 2 header lines; field 1 = name, field 3 = value), keeping exactly `size, c, c_max, c_min, hits, misses, l2_size, l2_hits, l2_misses` as int64, missing key omitted; `pools[]` = names of directories directly under `$HOST_PROC/spl/kstat/zfs/`, sorted. **No `zpool` binary** (ARCHITECTURE §2.8) | `count`, `truncated`, `dropped_entries`, `events[]`, `arc`, `pools[]` |
-| 6 | `resources` | `$HOST_PROC/mounts` ⇒ candidate mountpoints; skip fstypes in the pseudo-fs set `{proc, sysfs, devtmpfs, devpts, tmpfs, cgroup, cgroup2, mqueue, hugetlbfs, debugfs, tracefs, securityfs, pstore, bpf, configfs, fusectl, autofs, nsfs, ramfs, binfmt_misc, overlay, squashfs, efivarfs, rpc_pipefs, selinuxfs}` **and the remote-fs set `{nfs, nfs4, cifs, smb3, smbfs, ceph, glusterfs, fuse.sshfs, fuse.s3fs, fuse.rclone, afs, 9p}`** (see the note below); for each remaining mountpoint `m` call `syscall.Statfs(filepath.Join(HOST_ROOT, m))` — failure or `Blocks == 0` ⇒ skipped. `size_kb = Blocks*Bsize/1024`, `used_kb = (Blocks-Bfree)*Bsize/1024`, `avail_kb = Bavail*Bsize/1024`, `use_percent = ceil(used_kb*100 / (used_kb+avail_kb))` (0 when the denominator is 0). `mount` is the **host** path, `source` the mounts-file device field. Sorted by `mount`. `$HOST_PROC/meminfo` ⇒ `MemTotal, MemAvailable, MemFree, SwapTotal, SwapFree, Dirty` as kB int64. `$HOST_PROC/loadavg` ⇒ 5 fields. `$HOST_PROC/uptime` ⇒ field 1 truncated to int64 | `truncated`, `dropped_entries`, `filesystems[]`, `memory_kb`, `load`, `uptime_seconds` |
+| 6 | `resources` | `$HOST_PROC/mounts` ⇒ candidate mountpoints; skip fstypes in the pseudo-fs set `{proc, sysfs, devtmpfs, devpts, tmpfs, cgroup, cgroup2, mqueue, hugetlbfs, debugfs, tracefs, securityfs, pstore, bpf, configfs, fusectl, autofs, nsfs, ramfs, binfmt_misc, overlay, squashfs, efivarfs, rpc_pipefs, selinuxfs}` **and the remote-fs set `{nfs, nfs4, cifs, smb3, smbfs, ceph, glusterfs, fuse.sshfs, fuse.s3fs, fuse.rclone, afs, 9p}`** (see the note below); for each remaining mountpoint `m` call `syscall.Statfs(filepath.Join(HOST_ROOT, m))`, failure or `Blocks == 0` ⇒ skipped. `size_kb = Blocks*Bsize/1024`, `used_kb = (Blocks-Bfree)*Bsize/1024`, `avail_kb = Bavail*Bsize/1024`, `use_percent = ceil(used_kb*100 / (used_kb+avail_kb))` (0 when the denominator is 0). `mount` is the **host** path, `source` the mounts-file device field. Sorted by `mount`. `$HOST_PROC/meminfo` ⇒ `MemTotal, MemAvailable, MemFree, SwapTotal, SwapFree, Dirty` as kB int64. `$HOST_PROC/loadavg` ⇒ 5 fields. `$HOST_PROC/uptime` ⇒ field 1 truncated to int64 | `truncated`, `dropped_entries`, `filesystems[]`, `memory_kb`, `load`, `uptime_seconds` |
 | 7 | `services` | journal `-p err`, then drop records with `_TRANSPORT == "kernel"` (covered by §1). `failed_units[]` = unique non-empty `unit` (fallback `identifier`) of entries whose `message` matches the compiled regexp `Failed to start\|entered failed state\|Start request repeated`, sorted. Then apply the `SERVICES_MAX_BYTES` budget to the marshaled `entries` array with the §5 drop rule | `count`, `truncated`, `dropped_entries`, `entries[]`, `failed_units[]` |
 | 8 | `network` | parse `$HOST_PROC/net/{tcp,tcp6,udp,udp6}`, skipping the header line. Listening = TCP state `0A`, UDP state `07`. `addr` = hex local address before the `:`, verbatim; `port` = `strconv.ParseUint(hexAfterColon, 16, 16)`. Unique-sort by `(proto, port, addr)`. Compare `proto/port` strings against `$STATE_DIR/baseline-ports`: `new_listeners[]` = current − baseline, `closed_listeners[]` = baseline − current. Baseline missing ⇒ create it from the current list, `baseline_initialized: true`, both diffs empty | `truncated`, `dropped_entries`, `baseline_initialized`, `listeners[]`, `new_listeners[]`, `closed_listeners[]` |
-| 9 | `meta` | §2 + below | — |
+| 9 | `meta` | §2 + below |, |
 
-**Why remote filesystems are skipped (§3 row 6):** `syscall.Statfs` on a hung NFS/CIFS mount blocks in uninterruptible kernel sleep (D-state). Go cannot cancel a blocking syscall, so `SECTION_TIMEOUT` does **not** save the collector — the goroutine and its OS thread are stuck until the mount responds, which on a partitioned server may be never. The target host is a NAS, so this is a realistic every-tick risk, and disk usage of a remote share is not this supervisor's job anyway.
+**Why remote filesystems are skipped (§3 row 6):** `syscall.Statfs` on a hung NFS/CIFS mount blocks in uninterruptible kernel sleep (D-state). Go cannot cancel a blocking syscall, so `SECTION_TIMEOUT` does **not** save the collector, the goroutine and its OS thread are stuck until the mount responds, which on a partitioned server may be never. The target host is a NAS, so this is a realistic every-tick risk, and disk usage of a remote share is not this supervisor's job anyway.
 
 **Absent optional sources are not section failures.** A source that simply does not exist on this host degrades to an empty result, not an `{"error": …}` section:
 
@@ -126,7 +126,7 @@ Normalization of one record into `facts.Entry`:
 | `$HOST_RASDAEMON` (rasdaemon not installed) | `store: []`; the journal-backed `entries[]` are still collected |
 | `$HOST_PROC/spl/kstat/zfs/**` (no ZFS module) | `arc: {}`, `pools: []`; the `zed` journal `events[]` are still collected |
 
-A section error is reserved for a source that *should* be there and could not be read (permission denied, timeout, unparseable output). Failing a whole section because one optional input is absent would blind the analyzer to the parts that did work — and on a host where the absence is permanent, it would fire that error on every tick forever.
+A section error is reserved for a source that *should* be there and could not be read (permission denied, timeout, unparseable output). Failing a whole section because one optional input is absent would blind the analyzer to the parts that did work, and on a host where the absence is permanent, it would fire that error on every tick forever.
 
 `count` is the number of entries **collected**, before any truncation. Invariant: `len(entries) + dropped_entries == count`.
 
@@ -137,18 +137,18 @@ A section error is reserved for a source that *should* be there and could not be
 
 ### 3b. Deep mode (`Options.DeepComponent != ""`)
 
-Deep mode emits `{"meta": …, "deep": …}` — **no** section objects. `meta.mode = "deep"`, `meta.deep_component = "<component>"`, `meta.window = $DEEP_WINDOW`. `deep` counts as a single section named `deep` for timeouts, errors and truncation, and runs under **`DEEP_TIMEOUT`** (not `SECTION_TIMEOUT`).
+Deep mode emits `{"meta": …, "deep": …}`, **no** section objects. `meta.mode = "deep"`, `meta.deep_component = "<component>"`, `meta.window = $DEEP_WINDOW`. `deep` counts as a single section named `deep` for timeouts, errors and truncation, and runs under **`DEEP_TIMEOUT`** (not `SECTION_TIMEOUT`).
 
 | Component | `deep` contents |
 |---|---|
-| `zfs` | `zed_events[]` = journal `-t zed`, all priorities; `smart_entries[]` = journal `-t smartd` (D4); `kernel_entries[]` = journal `-k`, all priorities (D4 — the ±10 min surroundings of PLAN §2.1 are covered by the wider window; the analyzer slices by `ts`); `pool_kstat` = for each pool, every readable file directly under `$HOST_PROC/spl/kstat/zfs/<pool>/`, parsed as kstat key/value (int64 where the value parses, else string); `arc` as in §3; `history[]` = each `$STATE_DIR/history/*.json` reduced to `{ts, status, headline}` with `ts` from the filename (D3), keeping only reports that contain a finding with `component == "zfs"`, sorted by `ts` ascending |
+| `zfs` | `zed_events[]` = journal `-t zed`, all priorities; `smart_entries[]` = journal `-t smartd` (D4); `kernel_entries[]` = journal `-k`, all priorities (D4, the ±10 min surroundings of PLAN §2.1 are covered by the wider window; the analyzer slices by `ts`); `pool_kstat` = for each pool, every readable file directly under `$HOST_PROC/spl/kstat/zfs/<pool>/`, parsed as kstat key/value (int64 where the value parses, else string); `arc` as in §3; `history[]` = each `$STATE_DIR/history/*.json` reduced to `{ts, status, headline}` with `ts` from the filename (D3), keeping only reports that contain a finding with `component == "zfs"`, sorted by `ts` ascending |
 | `smart` | `entries[]` = journal `-t smartd`, all priorities |
 | `kernel` | `entries[]` = journal `-k`, all priorities |
 | `ras` | `entries[]` = journal `-t rasdaemon`; `store[]` as in §3 |
 
 ### 4. Output shape
 
-Tick mode, realistic example — `sensors` failed, `services` truncated, the real ZFS CKSUM case from ARCHITECTURE §2.7 (pretty-printed here; the emitted document is compact single-line):
+Tick mode, realistic example, `sensors` failed, `services` truncated, the real ZFS CKSUM case from ARCHITECTURE §2.7 (pretty-printed here; the emitted document is compact single-line):
 
 ```json
 {
@@ -265,7 +265,7 @@ Deep mode (abridged):
 
 **Invariants for every section object**
 
-- A section is either healthy (its data fields, `truncated` and `dropped_entries` present — `sensors` included) or failed (`{"error": "<reason>"}` and nothing else). Never both.
+- A section is either healthy (its data fields, `truncated` and `dropped_entries` present, `sensors` included) or failed (`{"error": "<reason>"}` and nothing else). Never both.
 - A failed section always has a matching `meta.collector_errors[]` entry with the identical `reason`.
 - `truncated: true` implies `dropped_entries > 0` and `meta.truncated: true`.
 - `meta.truncated` = OR over all section `truncated` flags.
@@ -278,12 +278,12 @@ Operates on the assembled `*facts.Facts` before it is marshaled for stdout.
 
 1. `b, _ := json.Marshal(f)`; if `len(b) <= FACTS_MAX_BYTES` ⇒ done.
 2. While over budget:
-   a. Candidates (fixed table, dot-path order): `kernel.entries`, `ras.entries`, `smart.entries`, `zfs.events`, `services.entries`, `network.listeners`, `resources.filesystems`, `deep.entries`, `deep.zed_events`, `deep.smart_entries`, `deep.kernel_entries`, `deep.history` — only those present with ≥1 **droppable** element.
+   a. Candidates (fixed table, dot-path order): `kernel.entries`, `ras.entries`, `smart.entries`, `zfs.events`, `services.entries`, `network.listeners`, `resources.filesystems`, `deep.entries`, `deep.zed_events`, `deep.smart_entries`, `deep.kernel_entries`, `deep.history`, only those present with ≥1 **droppable** element.
    b. **Droppable** = every element, except journal entries with `priority <= RAW_ALERT_MAX_PRIORITY` (D2). `network.listeners`, `resources.filesystems` and `deep.history` carry no priority ⇒ all droppable.
    c. Pick the candidate whose own `json.Marshal` output is largest; ties broken by dot-path string ascending.
-   d. Drop `ceil(len * 0.25)` elements scanning **from the end**, skipping protected elements — the **oldest entries are kept** (trends need the earliest occurrence; the newest critical lines survive because the raw-alert path reads them). Add the actual number dropped to that section's `dropped_entries`, set its `truncated: true`.
+   d. Drop `ceil(len * 0.25)` elements scanning **from the end**, skipping protected elements, the **oldest entries are kept** (trends need the earliest occurrence; the newest critical lines survive because the raw-alert path reads them). Add the actual number dropped to that section's `dropped_entries`, set its `truncated: true`.
    e. Re-marshal, re-measure.
-3. Fixed point — no candidate has a droppable element and the document is still over budget: reduce every candidate to its protected subset; additionally cap `kernel.entries` to its `RAW_ALERT_MAX_LINES` **newest** protected entries; set `meta.truncated: true`; append `{"section":"*","reason":"hard truncation, budget exhausted","exit_code":0}`; emit and exit 0. The emitted document may exceed `FACTS_MAX_BYTES` in this case — losing an emerg/crit line is worse than exceeding the budget (ARCHITECTURE design principle 4).
+3. Fixed point, no candidate has a droppable element and the document is still over budget: reduce every candidate to its protected subset; additionally cap `kernel.entries` to its `RAW_ALERT_MAX_LINES` **newest** protected entries; set `meta.truncated: true`; append `{"section":"*","reason":"hard truncation, budget exhausted","exit_code":0}`; emit and exit 0. The emitted document may exceed `FACTS_MAX_BYTES` in this case, losing an emerg/crit line is worse than exceeding the budget (ARCHITECTURE design principle 4).
 
 Termination: every pass of step 2 strictly shrinks a non-empty droppable set; step 3 is the fixed point.
 
@@ -295,10 +295,10 @@ Per C2, restricted to the codes `collect` can produce:
 
 | Code | Meaning |
 |---|---|
-| `0` | JSON document written to stdout. **Includes** every case where sections failed, timed out, or the document was truncated — a partial facts document is a success. |
+| `0` | JSON document written to stdout. **Includes** every case where sections failed, timed out, or the document was truncated, a partial facts document is a success. |
 | `1` | Internal failure: marshaling or the stdout write failed. Diagnostic on stderr, nothing on stdout. `tick` treats this as "collector down" and sends its own collector fallback (exit 2 at tick level). |
 | `64` | Usage error: unknown flag, `--deep` without a value, invalid component, positional argument. |
-| `78` | Configuration error from `config.Load()` — the variable **name** on stderr, never its value. |
+| `78` | Configuration error from `config.Load()`, the variable **name** on stderr, never its value. |
 
 `collect` never exits non-zero because the host is unhealthy.
 
@@ -326,10 +326,10 @@ Error → `(reason, exit_code)` mapping, applied in this order:
 
 | Failure | Behaviour |
 |---|---|
-| Section fails / times out / binary missing / mount absent | section = `{"error": …}`, one `collector_errors[]` entry, collection continues. Section failures are independent — a failing section never aborts the run and never affects another section's data. |
+| Section fails / times out / binary missing / mount absent | section = `{"error": …}`, one `collector_errors[]` entry, collection continues. Section failures are independent, a failing section never aborts the run and never affects another section's data. |
 | `$STATE_DIR` unwritable | never fatal: `baseline-ports` not created (`baseline_initialized: false`, diffs empty), one `collector_errors[]` entry. |
 | Document > `FACTS_MAX_BYTES` | §5 truncation, still exit 0. |
-| **All** sections failed | still a valid document — `meta` plus eight error objects, exit 0. The analyzer sees an explicit "collector blind" state instead of silence. |
+| **All** sections failed | still a valid document, `meta` plus eight error objects, exit 0. The analyzer sees an explicit "collector blind" state instead of silence. |
 | `journalctl` writes to stderr | captured into the error reason (first 200 bytes), never forwarded verbatim to the process stderr. |
 
 Diagnostics use `slog` with component `collect` per C7.
@@ -343,15 +343,15 @@ Diagnostics use `slog` with component `collect` per C7.
 | `/sys/class/hwmon/**` | read | the container's own sysfs = host kernel sysfs, via `sensors` (D5) |
 | `$STATE_DIR/baseline-ports` | write, create-if-missing only | tick mode only |
 | `$STATE_DIR/history/*.json` | read | deep zfs only |
-| everything else | — | never opened for writing; no `/tmp` staging, no in-place edits |
+| everything else |, | never opened for writing; no `/tmp` staging, no in-place edits |
 
-The `$HOST_RASDAEMON` SQLite database is listed (name/size/mtime) but **never opened** — ARCHITECTURE §2.5 rules the backend experimental; reading it from a foreign process risks lock contention with rasdaemon.
+The `$HOST_RASDAEMON` SQLite database is listed (name/size/mtime) but **never opened**, ARCHITECTURE §2.5 rules the backend experimental; reading it from a foreign process risks lock contention with rasdaemon.
 
 ### 9. Package layout & exported types
 
 ```
 cmd/sentinel/collect.go        // flag parsing, calls collect.Run, maps error → exit code
-internal/facts/facts.go        // wire types — imported by collect, analyze, runtime, state
+internal/facts/facts.go        // wire types, imported by collect, analyze, runtime, state
 internal/facts/facts.schema.json
 internal/journal/journal.go    // journalctl exec + normalization + merge/dedup
 internal/collect/collect.go    // Run + section funcs
@@ -566,17 +566,17 @@ type Options struct {
 func Run(ctx context.Context, o Options) (*facts.Facts, error)
 ```
 
-`collect.Run` with `DeepComponent` set is the **only** deep entry point — `analyze.Deps.CollectDeep` calls it in-process (there is no `collect.Deep`).
+`collect.Run` with `DeepComponent` set is the **only** deep entry point, `analyze.Deps.CollectDeep` calls it in-process (there is no `collect.Deep`).
 
-### 10. Schema — `internal/facts/facts.schema.json`
+### 10. Schema, `internal/facts/facts.schema.json`
 
 Draft-07, `definitions` for `journalEntry`, `sectionError`, `listener`, `collectorError`. `dropped_entries` is required alongside `truncated` for **every** section, `sensors` included. `deep` carries `smart_entries` and `kernel_entries` (D4). `collector_errors` items are objects `{section, reason, exit_code}`, never strings. The mode-conditional requirement (tick ⇒ eight sections present + `deep` absent; deep ⇒ the inverse) is not expressible in the subset and is asserted by `TestTickModeSectionSet` instead.
 
-Validation uses `github.com/santhosh-tekuri/jsonschema/v6` — **test-only** dependency, never linked into the runtime path (D7).
+Validation uses `github.com/santhosh-tekuri/jsonschema/v6`, **test-only** dependency, never linked into the runtime path (D7).
 
-### 11. Test contract — `go test ./internal/collect/... ./internal/journal/...`
+### 11. Test contract, `go test ./internal/collect/... ./internal/journal/...`
 
-Table-driven, stdlib `testing` only, hermetic. Fixture trees under `internal/collect/testdata/` (fake `HOST_PROC`, journal dirs, `HOST_ROOT`); `STATE_DIR` is `t.TempDir()` per case; env via `t.Setenv`. `journalctl` and `sensors` are stubbed by prepending `testdata/bin` to `PATH` — the same suite runs unchanged inside the container image, where the real binaries are used for C4/C6.
+Table-driven, stdlib `testing` only, hermetic. Fixture trees under `internal/collect/testdata/` (fake `HOST_PROC`, journal dirs, `HOST_ROOT`); `STATE_DIR` is `t.TempDir()` per case; env via `t.Setenv`. `journalctl` and `sensors` are stubbed by prepending `testdata/bin` to `PATH`, the same suite runs unchanged inside the container image, where the real binaries are used for C4/C6.
 
 RED first: the table exists and compiles against the empty `collect.Run` signature before any section is implemented.
 

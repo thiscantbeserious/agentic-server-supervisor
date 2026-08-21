@@ -44,7 +44,7 @@ func writeFixture(t *testing.T, dir, name, content string) {
 	}
 }
 
-// C16: TestJournalNormalization — PRIORITY as string and number, MESSAGE
+// C16: TestJournalNormalization, PRIORITY as string and number, MESSAGE
 // as string and byte array, missing SYSLOG_IDENTIFIER -> "-", missing
 // _SYSTEMD_UNIT -> null, unparseable __REALTIME_TIMESTAMP -> dropped;
 // both journal dirs merged, (ts,message) duplicates collapsed, ordering
@@ -151,7 +151,7 @@ func TestJournalNormalization(t *testing.T) {
 	}
 
 	if dir2Msg == nil {
-		t.Fatal("dir2-only record missing — both journal dirs must be queried and merged")
+		t.Fatal("dir2-only record missing, both journal dirs must be queried and merged")
 	}
 	if dir2Msg.Unit == nil || *dir2Msg.Unit != "foo.service" {
 		t.Errorf("dir2 record unit = %v, want foo.service", dir2Msg.Unit)
@@ -245,8 +245,8 @@ func TestRunExitErrorCarriesStderr(t *testing.T) {
 }
 
 // Record cap (collect.md §3): decoding always runs to the end of the
-// stream (the sliding window evicts, it never breaks early), and — the
-// actual point of the test — a query producing far more records than fit
+// stream (the sliding window evicts, it never breaks early), and, the
+// actual point of the test, a query producing far more records than fit
 // in one pipe buffer must not hang: if the drain-to-EOF path is broken,
 // this test times out instead of failing cleanly.
 func TestRunRecordCapDrainsPastPipeBuffer(t *testing.T) {
@@ -284,7 +284,7 @@ func TestRunRecordCapDrainsPastPipeBuffer(t *testing.T) {
 }
 
 // The point of the sliding window is WHICH entries survive, not how many
-// — len(entries) == 50 && dropped == 950 would pass identically whether
+// , len(entries) == 50 && dropped == 950 would pass identically whether
 // the oldest or the newest 50 were kept, which is exactly how an inverted
 // rule got through a full review round. The newest record here is an
 // emerg (priority 0); it must be the one still present.
@@ -323,20 +323,20 @@ func TestRunRecordCapKeepsNewest(t *testing.T) {
 		t.Fatalf("len(entries) = %d, want 10", len(entries))
 	}
 	if got := entries[len(entries)-1].Message; got != "line 24" {
-		t.Errorf("newest survivor = %q, want %q — the window must keep the newest, not the oldest", got, "line 24")
+		t.Errorf("newest survivor = %q, want %q, the window must keep the newest, not the oldest", got, "line 24")
 	}
 	if got := entries[0].Message; got != "line 15" {
 		t.Errorf("oldest survivor = %q, want %q", got, "line 15")
 	}
 	for _, e := range entries {
 		if e.Message == "line 00" {
-			t.Error("the oldest record survived the cap — window is keeping the oldest, not the newest")
+			t.Error("the oldest record survived the cap, window is keeping the oldest, not the newest")
 		}
 	}
 }
 
 // D2: entries with priority <= RawAlertMaxPriority are never evicted,
-// exactly as §5's byte-budget truncation exempts them — even when the
+// exactly as §5's byte-budget truncation exempts them, even when the
 // window is otherwise full and would normally evict them for being the
 // oldest kept record.
 // D2 here means "evicted last", not "never" (contract amendment): as
@@ -380,7 +380,7 @@ func TestRunRecordCapEvictsProtectedLastNotNever(t *testing.T) {
 		t.Fatalf("the protected emerg entry was evicted while unprotected noise was still available: %+v", entries)
 	}
 	if dropped == 0 {
-		t.Error("dropped should be > 0 — plenty of unprotected noise should have been evicted")
+		t.Error("dropped should be > 0, plenty of unprotected noise should have been evicted")
 	}
 }
 
@@ -419,7 +419,7 @@ func TestRunRecordCapHasHardCeilingEvenWhenAllProtected(t *testing.T) {
 		t.Errorf("len(entries)+dropped = %d, want %d (the collected-before-truncation invariant)", len(entries)+dropped, total)
 	}
 	if dropped == 0 {
-		t.Fatal("dropped should be > 0 — an all-protected stream past the cap must still evict")
+		t.Fatal("dropped should be > 0, an all-protected stream past the cap must still evict")
 	}
 	if got := entries[len(entries)-1].Message; got != fmt.Sprintf("crit %02d", total-1) {
 		t.Errorf("newest survivor = %q, want the newest planted record", got)
@@ -433,7 +433,7 @@ func TestRunRecordCapHasHardCeilingEvenWhenAllProtected(t *testing.T) {
 // all-emerg storm past the cap must stay linear in the number of
 // records, not quadratic. Asserted against a generous wall-clock bound
 // so this catches a return to O(n^2) without being flaky on a loaded
-// machine — 90k records took ~3s quadratic per the reproduction that
+// machine, 90k records took ~3s quadratic per the reproduction that
 // found this, and well under 1s linear.
 func TestRunRecordCapAllProtectedStaysLinear(t *testing.T) {
 	withStubPath(t)
@@ -478,11 +478,11 @@ func TestRunRecordCapAllProtectedStaysLinear(t *testing.T) {
 	// or -race's instrumentation overhead while still catching a return
 	// to O(n^2), which would blow well past it either way.
 	if elapsed > 20*time.Second {
-		t.Errorf("Run took %v for an all-protected %d-record stream — looks quadratic, want clearly linear", elapsed, total)
+		t.Errorf("Run took %v for an all-protected %d-record stream, looks quadratic, want clearly linear", elapsed, total)
 	}
 }
 
-// §3: only KEPT records (after ExcludeTransport) count against the cap —
+// §3: only KEPT records (after ExcludeTransport) count against the cap,
 // a kernel-transport storm must not consume the budget meant for the
 // services this query actually cares about.
 func TestRunRecordCapCountsOnlyKeptRecords(t *testing.T) {
@@ -514,10 +514,10 @@ func TestRunRecordCapCountsOnlyKeptRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) != 5 {
-		t.Fatalf("entries = %d, want 5 — the excluded kernel noise must not consume the cap: %+v", len(entries), entries)
+		t.Fatalf("entries = %d, want 5, the excluded kernel noise must not consume the cap: %+v", len(entries), entries)
 	}
 	if dropped != 0 {
-		t.Errorf("dropped = %d, want 0 — nothing kept ever exceeded the cap", dropped)
+		t.Errorf("dropped = %d, want 0, nothing kept ever exceeded the cap", dropped)
 	}
 	for _, e := range entries {
 		if e.Identifier == "kernel" {

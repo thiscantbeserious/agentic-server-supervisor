@@ -51,7 +51,7 @@ func newStore(t *testing.T, cfg *config.Config) *Store {
 }
 
 // mustProcess runs Process and fails the test immediately on an
-// unexpected error — every case below has a schema-valid fixture, so a
+// unexpected error, every case below has a schema-valid fixture, so a
 // non-nil error is a bug, not an expected outcome, and must never be
 // discarded (a discarded error here nil-derefs on the returned *Decision).
 func mustProcess(t *testing.T, s *Store, raw []byte) *Decision {
@@ -98,7 +98,7 @@ func readHistoryFiles(t *testing.T, stateDir string) []os.DirEntry {
 	return entries
 }
 
-// --- S1: history annotation — the cross-component assertion (C9) ---
+// --- S1: history annotation, the cross-component assertion (C9) ---
 
 func TestS1_HistoryAnnotatesBothNotifiedAndSuppressed(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -165,7 +165,7 @@ func TestS1_HistoryAnnotatesBothNotifiedAndSuppressed(t *testing.T) {
 // must store status/headline/body/resolved as INPUT, never as whatever
 // step (g) mutates rep into for the outgoing decision.report (main's
 // container repro: a suppressed tick's history showed status:"OK" next to
-// severity:"alert" findings — exactly the corruption analyze's trend
+// severity:"alert" findings, exactly the corruption analyze's trend
 // window must never see).
 func TestS1b_HistoryStoresInputNotMutatedOutput(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -234,7 +234,7 @@ func TestS2_NoStrayFilesInHistoryDir(t *testing.T) {
 
 	for _, e := range readHistoryFiles(t, cfg.StateDir) {
 		if !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".tmp-") {
-			t.Errorf("stray file in history/: %q — a leftover .tmp-* evicts a real report from analyze's window", e.Name())
+			t.Errorf("stray file in history/: %q, a leftover .tmp-* evicts a real report from analyze's window", e.Name())
 		}
 	}
 }
@@ -244,15 +244,15 @@ func TestS2_NoStrayFilesInHistoryDir(t *testing.T) {
 // A supervisor that has never ticked must read as UNHEALTHY, not healthy
 // (main's gate finding, container-reproduced): New() must not seed the
 // heartbeat file just because `sentinel health` happens to construct a
-// Store — the absence of a signal is not good news.
+// Store, the absence of a signal is not good news.
 func TestS3_Health_NeverProcessedIsUnhealthy(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
-	s := newStore(t, cfg) // no Process call — a fresh $STATE_DIR, exactly what New() alone produces
+	s := newStore(t, cfg) // no Process call, a fresh $STATE_DIR, exactly what New() alone produces
 	if err := s.Health(); err == nil {
-		t.Error("Health() on a Store that has never Process'd = nil, want non-nil — this must read as down, not up")
+		t.Error("Health() on a Store that has never Process'd = nil, want non-nil, this must read as down, not up")
 	}
 	if _, err := os.Stat(filepath.Join(cfg.StateDir, "heartbeat")); err == nil {
-		t.Error("New() must not create a heartbeat file — only Process may")
+		t.Error("New() must not create a heartbeat file, only Process may")
 	}
 }
 
@@ -396,7 +396,7 @@ func TestProcess_RenotifyAlert(t *testing.T) {
 // S.3(d): "de-escalation never notifies on its own, but it does lower the
 // stored severity and switch the renotify window." A version that only
 // ever raises severity leaves a dropped-then-persisting finding pinned to
-// the 1h alert window forever — this must fail with the fix reverted.
+// the 1h alert window forever, this must fail with the fix reverted.
 func TestProcess_DeEscalationLowersSeverityAndWindow(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	s := newStore(t, cfg)
@@ -407,7 +407,7 @@ func TestProcess_DeEscalationLowersSeverityAndWindow(t *testing.T) {
 		t.Fatal("initial notify failed")
 	}
 
-	// De-escalate to watch, small delta — must not notify on its own.
+	// De-escalate to watch, small delta, must not notify on its own.
 	cfg.Now = time.Unix(1010, 0)
 	b2 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "H", Body: "b", Findings: []report.Finding{finding("watch", "de-escalating evidence")}})
 	d2 := mustProcess(t, s, b2)
@@ -434,14 +434,14 @@ func TestProcess_DeEscalationLowersSeverityAndWindow(t *testing.T) {
 	cfg.Now = time.Unix(1000+3601, 0)
 	d3 := mustProcess(t, s, b2)
 	if d3.Notify {
-		t.Errorf("at +3601s (past the old alert window, inside the new watch window): notify=%v reason=%s, want suppressed — "+
+		t.Errorf("at +3601s (past the old alert window, inside the new watch window): notify=%v reason=%s, want suppressed, "+
 			"the renotify window did not switch to watch's, de-escalation left severity pinned at alert", d3.Notify, d3.Reason)
 	}
 }
 
 // S.3(g) rule 1: when findings are notified AND an unrelated alert resolves
 // in the same tick, "resolved" on the outgoing report must still be
-// all_clear (S.4's own worked example shows exactly this combination) — an
+// all_clear (S.4's own worked example shows exactly this combination), an
 // implementation that only fills rep.Resolved on rule 2 silently drops the
 // all-clear on the ONE tick it happens to coincide with a notification, and
 // step (e) has already deleted the key file by then, so it is unrecoverable.
@@ -538,7 +538,7 @@ func TestProcess_ResolvedNonHexEntryDropped(t *testing.T) {
 
 // S.3(e): "A key that was never notified is deleted without an all-clear."
 // The normal Process path always notifies on creation (new_finding), so a
-// NotifyCount==0 record can only arise from something outside that path —
+// NotifyCount==0 record can only arise from something outside that path,
 // still a real state the file format allows, and the contract is explicit
 // about it, so seed one directly (same technique as the corrupt-file
 // tests) and prove resolving it stays silent while still cleaning up.
@@ -597,7 +597,7 @@ func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
 		t.Errorf("resolved: %d entries, want exactly 1 (S-D7)", len(d2.Report.Resolved))
 	}
 	if d2.ActiveCount != 1 {
-		t.Errorf("active: %d, want 1 — f1 must survive being 'touched' in step (d)", d2.ActiveCount)
+		t.Errorf("active: %d, want 1, f1 must survive being 'touched' in step (d)", d2.ActiveCount)
 	}
 	entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts"))
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), dedup.Key("kernel", "evidence1")) {
@@ -607,7 +607,7 @@ func TestProcess_TwoFindingsSharedHeadline(t *testing.T) {
 
 // TestProcess_ResolvedByKeyDistinguishesEvidenceCollidingIn80Runes is S.9
 // case 7's addendum: the old evidence-truncated-to-80-runes match could
-// not tell apart two alerts whose evidence agreed in its first 80 runes —
+// not tell apart two alerts whose evidence agreed in its first 80 runes,
 // resolving one would close both. Key-based matching must distinguish
 // them, since dedup.Key hashes the full (masked) evidence, not a prefix.
 func TestProcess_ResolvedByKeyDistinguishesEvidenceCollidingIn80Runes(t *testing.T) {
@@ -644,7 +644,7 @@ func TestProcess_ResolvedByKeyDistinguishesEvidenceCollidingIn80Runes(t *testing
 		t.Error("keyA must be closed")
 	}
 	if _, ok := s.loadAlert(keyB); !ok {
-		t.Error("keyB must survive — resolving keyA must not also close it")
+		t.Error("keyB must survive, resolving keyA must not also close it")
 	}
 }
 
@@ -660,7 +660,7 @@ func TestProcess_AllClearHeadlineTruncate(t *testing.T) {
 	mustProcess(t, s, b1)
 
 	cfg.Now = time.Unix(2000, 0)
-	// All 3 findings absent this tick, resolved by their own keys — output
+	// All 3 findings absent this tick, resolved by their own keys, output
 	// still collapses to the one shared stored headline (dedup, first wins).
 	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "irrelevant", Body: "body", Resolved: []string{
 		dedup.Key("kernel", "e1"), dedup.Key("kernel", "e2"), dedup.Key("kernel", "e3"),
@@ -837,7 +837,7 @@ func TestOutbox(t *testing.T) {
 	}
 }
 
-// S.4/C5: an empty outbox marshals to "[]" on stdout, never "null" — a bare
+// S.4/C5: an empty outbox marshals to "[]" on stdout, never "null", a bare
 // `var items []OutboxItem` marshals to null when it never gets appended to.
 func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -864,8 +864,8 @@ func TestOutboxTake_EmptyMarshalsToEmptyArrayNotNull(t *testing.T) {
 // against the filename it was read from. A body id of "../../pwned"
 // isn't itself a write escape (outboxIDRe still blocks OutboxAck's path
 // join), but tick can never ack an id that never matches outboxIDRe, so
-// the entry retries — and re-sends via SMTP once attempts crosses
-// OUTBOX_SMTP_AFTER — every tick forever. S.7 already specifies the fix:
+// the entry retries, and re-sends via SMTP once attempts crosses
+// OUTBOX_SMTP_AFTER, every tick forever. S.7 already specifies the fix:
 // a body/filename mismatch is corrupt, "skipped by OutboxTake". A
 // well-formed sibling entry in the same directory must still come back,
 // so the guard can't pass by vacuously skipping everything.
@@ -879,7 +879,7 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 		// A door an agreement-only guard misses: filename and body
 		// AGREE, but on a value outboxIDRe (OutboxAck's own standard)
 		// would refuse. Checking only "do the two sides agree with each
-		// other" lets this through — OutboxTake then hands tick a
+		// other" lets this through, OutboxTake then hands tick a
 		// real-looking id that OutboxAck can never ack, so the entry
 		// retries (and re-sends via SMTP past OUTBOX_SMTP_AFTER) forever.
 		{"filename and body agree but non-conforming", "test-alert.json", "test-alert"},
@@ -908,7 +908,7 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// A well-formed sibling must still come back — the guard must
+			// A well-formed sibling must still come back, the guard must
 			// not pass by vacuously skipping the whole directory.
 			goodID, err := s.OutboxAdd([]byte(`{"b":2}`))
 			if err != nil {
@@ -932,14 +932,14 @@ func TestOutboxTake_SkipsBodyIDFilenameMismatch(t *testing.T) {
 
 // TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries is
 // main's second amendment: a corrupt outbox FILENAME (not matching
-// outboxIDRe) is immortal under trimOutbox's plain lexical eviction — a
+// outboxIDRe) is immortal under trimOutbox's plain lexical eviction, a
 // junk name like "test-alert.json" sorts after every numeric
 // "<epoch>-<rand3>.json" name, so it is never the oldest and is never
 // evicted, and OutboxAck can never remove it either (outboxIDRe refuses
 // the id). Left alone it permanently consumes OUTBOX_MAX capacity: at
 // OutboxMax junk files, a genuinely new OutboxAdd returns a fresh id and
 // exit 0 while trimOutbox immediately evicts the entry that was JUST
-// added (real entries sort before nothing, junk sorts last) — the exact
+// added (real entries sort before nothing, junk sorts last), the exact
 // "success code, alert silently lost" class this component already had
 // to fix once (OutboxTake's false-healthy case). trimOutbox must reclaim
 // non-conforming filenames first, unconditionally, before any real entry
@@ -956,11 +956,11 @@ func captureStateLog(t *testing.T) *bytes.Buffer {
 }
 
 // TestStateLogger_HonorsLogLevel asserts outbox.go's stateLogger() wires
-// cfg.LogLevel through rather than hardcoding slog.LevelInfo — otherwise
+// cfg.LogLevel through rather than hardcoding slog.LevelInfo, otherwise
 // LOG_LEVEL=DEBUG would produce no extra output and LOG_LEVEL=ERROR would
 // suppress nothing. Drives the real construction path: s.stateLogger(), the exact method
 // trimOutbox calls, built from a Store whose cfg.LogLevel came through
-// unmodified — not a hand-built slog.Logger, which would pass even if
+// unmodified, not a hand-built slog.Logger, which would pass even if
 // stateLogger() itself never read s.cfg.LogLevel.
 func TestStateLogger_HonorsLogLevel(t *testing.T) {
 	t.Run("DEBUG level logger emits a debug record", func(t *testing.T) {
@@ -996,7 +996,7 @@ func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing
 		t.Fatal(err)
 	}
 	// OUTBOX_MAX junk files, planted directly (OutboxAdd can never
-	// produce these names) — enough on their own to fill the cap under
+	// produce these names), enough on their own to fill the cap under
 	// the old lexical-only eviction.
 	junkNames := []string{"test-alert.json", "test-alert-2.json", "test-alert-3.json"}
 	for _, name := range junkNames {
@@ -1011,7 +1011,7 @@ func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing
 		t.Fatalf("OutboxAdd: %v", err)
 	}
 
-	// The junk must be gone — reclaimed, not merely ignored — and must
+	// The junk must be gone, reclaimed, not merely ignored, and must
 	// never have been counted as capacity.
 	for _, name := range junkNames {
 		if _, err := os.Stat(filepath.Join(outboxDir, name)); !os.IsNotExist(err) {
@@ -1024,7 +1024,7 @@ func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing
 		t.Fatal(err)
 	}
 	if len(items) != 1 || items[0].ID != id {
-		t.Fatalf("OutboxTake() = %+v, want exactly the just-added real alert %q — a success exit with the alert silently evicted is the defect under test", items, id)
+		t.Fatalf("OutboxTake() = %+v, want exactly the just-added real alert %q, a success exit with the alert silently evicted is the defect under test", items, id)
 	}
 
 	if err := s.OutboxAck(id); err != nil {
@@ -1035,7 +1035,7 @@ func TestTrimOutbox_ReclaimsCorruptFilenamesBeforeEvictingRealEntries(t *testing
 // CodeRabbit PR #3, most serious: id is an unvalidated positional CLI
 // argument joined onto $STATE_DIR/outbox/ before the exists-check. Without
 // the outboxIDRe guard, "../history/<file>" resolves outside outbox/
-// entirely and os.Remove deletes whatever it lands on — a history file
+// entirely and os.Remove deletes whatever it lands on, a history file
 // analyze's trend window depends on, in the exploit CodeRabbit named.
 func TestOutboxAck_RejectsPathTraversal(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -1066,7 +1066,7 @@ func TestOutboxAck_RejectsPathTraversal(t *testing.T) {
 
 // CodeRabbit PR #3: <epoch>-<rand3> collides across two same-second adds
 // roughly 1-in-1000 of the time, and writeAtomic's rename silently
-// REPLACES whatever was already at that path — a queued notification
+// REPLACES whatever was already at that path, a queued notification
 // destroyed with no error. randIntn is stubbed to hand out a colliding
 // value first, then a free one, so this is deterministic rather than
 // relying on the real PRNG to happen to collide.
@@ -1126,7 +1126,7 @@ func TestOutboxAdd_RejectsJSONNull(t *testing.T) {
 }
 
 // CodeRabbit PR #3 item 3: OutboxTake and trimOutbox (called from
-// OutboxAdd) discarded os.ReadDir's error — the same "failing /state
+// OutboxAdd) discarded os.ReadDir's error, the same "failing /state
 // reports success" class already fixed for OutboxAdd's own write and
 // saveAlert. Root-proof injection: replace outbox/ with a file (see
 // TestOutboxAdd_PropagatesWriteFailures for why chmod alone is vacuous
@@ -1168,7 +1168,7 @@ func TestTrimOutbox_PropagatesReadDirFailure(t *testing.T) {
 // --- case 11: heartbeat timing ---
 
 // S.3(g) rule 3, amended: when k == 0 (a fresh $STATE_DIR's very first
-// heartbeat — history/ is still empty because the history write happens
+// heartbeat, history/ is still empty because the history write happens
 // after step g), the body's "since" timestamp is `now`: cfg.Now when set,
 // never a second time.Now() read deeper in the code (C9). Pins the exact
 // RFC3339 value so a reintroduced time.Now() call fails this immediately.
@@ -1274,7 +1274,7 @@ func TestLiveness(t *testing.T) {
 		t.Errorf("Health() right after a Process call: got %v, want nil", err)
 	}
 
-	// Backdate the file relative to cfg.Now (not real wall-clock time —
+	// Backdate the file relative to cfg.Now (not real wall-clock time,
 	// cfg.Now is year 2000, so comparing against time.Now() would always
 	// read as stale for the wrong reason).
 	stale := cfg.Now.Add(-3*cfg.TickInterval - time.Minute)
@@ -1324,12 +1324,12 @@ func TestStaleExpiry(t *testing.T) {
 // reports success while nothing was actually persisted.
 //
 // Failure is injected by replacing the destination DIRECTORY with a plain
-// FILE at the same path, not by removing the write permission bit —
+// FILE at the same path, not by removing the write permission bit,
 // os.MkdirAll/CreateTemp then fail with ENOTDIR, a structural conflict the
 // filesystem enforces for every caller including uid 0. A chmod-based
 // version of this test is vacuous as root (permission bits are not
 // consulted for root at all), and the Dockerfile builder stage that runs
-// `go test` runs as root — exactly the environment this test exists for.
+// `go test` runs as root, exactly the environment this test exists for.
 func TestProcess_PropagatesWriteFailures(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
 	s := newStore(t, cfg)
@@ -1437,7 +1437,7 @@ func snapshotFS(t *testing.T, root string) map[string]bool {
 // CodeRabbit: this used to chmod cwdDir 0o555 and lean on that to prove
 // Process "must still succeed" without depending on cwd being writable.
 // Permission bits are not consulted for uid 0 at all, and the Dockerfile
-// builder stage that runs `go test` runs as root — the same ENOTDIR
+// builder stage that runs `go test` runs as root, the same ENOTDIR
 // reasoning documented above TestProcess_PropagatesWriteFailures. Unlike
 // that test, though, this one's REAL containment proof was never the
 // permission bit: it's the snapshot diff below, which inspects what got
@@ -1463,7 +1463,7 @@ func TestWriteContainment(t *testing.T) {
 
 	// Snapshot the shared parent of cfg.StateDir and cwdDir (both are
 	// t.TempDir() calls from this same test, so they are siblings under a
-	// common per-test root) — walking cfg.StateDir alone would make the
+	// common per-test root), walking cfg.StateDir alone would make the
 	// containment check below tautological, since every path found by
 	// walking cfg.StateDir trivially has cfg.StateDir as a prefix.
 	testRoot := filepath.Dir(cfg.StateDir)
@@ -1496,7 +1496,7 @@ func TestWriteContainment(t *testing.T) {
 		}
 	}
 	if len(after) <= len(before) {
-		t.Error("Process produced no new files under StateDir — snapshot comparison is not exercising anything")
+		t.Error("Process produced no new files under StateDir, snapshot comparison is not exercising anything")
 	}
 }
 
@@ -1549,7 +1549,7 @@ func TestHistory(t *testing.T) {
 
 // S.7: "corrupt history/*.json -> skipped by History, still counted for
 // rotation." A corrupt file among the newest n requested must not shrink
-// the result below n while an (n+1)-th valid, older file exists — History
+// the result below n while an (n+1)-th valid, older file exists, History
 // must keep scanning past the corrupt one for a replacement, not just
 // read the first n directory positions and stop. 8 total files, corrupt
 // the single newest, request 5: a version that stops after n POSITIONS
@@ -1588,7 +1588,7 @@ func TestHistory_SkipsCorruptButStillFillsN(t *testing.T) {
 // non-negative integer" rejection (cmd/sentinel/state.go) is not a
 // guarantee every caller gets. Before the fix, make([]json.RawMessage, 0,
 // min(n, len(files))) put a negative n straight into make()'s cap
-// argument, which panics rather than errors — a caller-controlled DoS one
+// argument, which panics rather than errors, a caller-controlled DoS one
 // call removed from a CLI-level input.
 func TestHistory_NegativeNDoesNotPanic(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -1648,7 +1648,7 @@ func TestKeyReuse(t *testing.T) {
 	b2 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Test", Body: "Body", Findings: []report.Finding{f2}})
 	d2 := mustProcess(t, s, b2)
 	// Independently specified expectation (C6's literal algorithm), not a
-	// call through the same helper the production path calls — otherwise
+	// call through the same helper the production path calls, otherwise
 	// the test tracks whatever dedup.Key/EvidenceCore currently compute
 	// instead of catching a drift in either.
 	wantKey := literalDedupKey("kernel", "evidence2")
@@ -1657,8 +1657,8 @@ func TestKeyReuse(t *testing.T) {
 	}
 }
 
-// literalDedupKey reimplements C6's algorithm from CONTRACTS.md directly —
-// deliberately not calling dedup.Key/EvidenceCore — so a break in either is
+// literalDedupKey reimplements C6's algorithm from CONTRACTS.md directly,
+// deliberately not calling dedup.Key/EvidenceCore, so a break in either is
 // caught rather than tracked. "evidence2" has no timestamps, digits, or
 // '=', so C6's masking is a no-op and the core is the lowercased string
 // itself.
@@ -1724,8 +1724,8 @@ func TestCLIExitCodes(t *testing.T) {
 // this test the property had no guardian: mutating Error back to Warn left the
 // whole suite green, which is how the invisibility would have returned.
 //
-// The failure is injected structurally — os.Remove cannot delete a non-empty
-// directory, at any uid — rather than with chmod, which is vacuous as root and
+// The failure is injected structurally, os.Remove cannot delete a non-empty
+// directory, at any uid, rather than with chmod, which is vacuous as root and
 // CI runs the suite as root (C9).
 func TestTrimOutbox_ReclaimFailureVisibleAtErrorLevel(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))

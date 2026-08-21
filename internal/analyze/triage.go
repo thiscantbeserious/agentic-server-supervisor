@@ -68,7 +68,7 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	out, err := d.RunAgy(cctx, o, promptPath, schemaPath)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			// Cancellation propagates as-is — no reason classification, no
+			// Cancellation propagates as-is, no reason classification, no
 			// fallback, no retry (the caller, runTriage/Run, checks
 			// errors.Is(err, context.Canceled) and authors no report).
 			return nil, "", fmt.Errorf("analyze: agy attempt %d: %w", attempt, err)

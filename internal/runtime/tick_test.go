@@ -201,7 +201,7 @@ func TestTick_RawAlertDedup(t *testing.T) {
 	}
 
 	// RAW_ALERT_REPEAT_SECONDS=0 "suppresses nothing" per contracts/
-	// runtime.md R3.3 — but CONTRACTS.md C3's catch-all numeric range
+	// runtime.md R3.3, but CONTRACTS.md C3's catch-all numeric range
 	// ("every other numeric variable > 0") rejects 0 for this variable,
 	// and C3 wins on conflict (CONTRACTS.md preamble). So this can never
 	// be reached through config.Load() in production; it is exercised
@@ -271,16 +271,16 @@ func TestTick_AnalyzeFails(t *testing.T) {
 		t.Errorf("report headline = %v, want the analyzer's own fallback headline %q unchanged", res.Report, fallback.Headline)
 	}
 	if res.Report.Findings[0].Key != fallback.Findings[0].Key {
-		t.Errorf("runtime must not author its own analyzer fallback — key changed")
+		t.Errorf("runtime must not author its own analyzer fallback, key changed")
 	}
 }
 
 // TestTick_StateFailureBlanksResolvedKeys asserts R3.8: on the rc-5
-// (state-failure) path the report is sent UNFILTERED — but "unfiltered"
+// (state-failure) path the report is sent UNFILTERED, but "unfiltered"
 // excludes resolved[]. Every other path relies on state.md S.3(e) to
 // translate each 16-hex key into the stored alert's headline before a
-// human ever sees it — an operator must never see a raw key. state did
-// not run here, so nothing performs that substitution — a bypassed
+// human ever sees it, an operator must never see a raw key. state did
+// not run here, so nothing performs that substitution, a bypassed
 // report must have resolved[] blanked, not forwarded as hex.
 // There was no test at all for the rc-5 path before this one.
 func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
@@ -304,7 +304,7 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 5", res.ExitCode)
 	}
 	if res.Report == nil || len(res.Report.Resolved) != 0 {
-		t.Fatalf("Report.Resolved = %v, want empty — rc-5 must blank resolved[] rather than forward raw keys", res.Report)
+		t.Fatalf("Report.Resolved = %v, want empty, rc-5 must blank resolved[] rather than forward raw keys", res.Report)
 	}
 	reqs := rec.all()
 	if len(reqs) != 1 {
@@ -315,7 +315,7 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 	if strings.Contains(p.Body, "f3dae427610efc88") || strings.Contains(p.Body, "a2044be91cc7d380") {
 		t.Errorf("delivered body still carries a raw resolved key: %q", p.Body)
 	}
-	// "Unfiltered" still means findings/status/body reach the operator —
+	// "Unfiltered" still means findings/status/body reach the operator,
 	// only resolved[] is blanked (delivery beats dedup stays true for
 	// everything except the all-clear list state can no longer substantiate).
 	if !strings.Contains(p.Body, analyzed.Findings[0].Evidence) {
@@ -328,7 +328,7 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 // LastNotified/NotifyCount to active-alerts/<key>.json by the time
 // notify runs, so if NotifySend AND OutboxAdd both fail, the finding
 // sits suppressed for the renotify window with nothing queued and no
-// trace anywhere — worse than an ordinary "queued, will retry" failure,
+// trace anywhere, worse than an ordinary "queued, will retry" failure,
 // and indistinguishable from one if both cases share the same exit code.
 // This drives OutboxAdd itself to fail (a read-only outbox dir) and asserts
 // the distinct rc 5 plus an ERROR log line, and that Queued correctly
@@ -356,7 +356,7 @@ func TestTick_NotifyAndOutboxBothFail(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 5 (distinct from a successfully-queued rc 4)", res.ExitCode)
 	}
 	if res.Queued {
-		t.Error("Queued = true, want false — OutboxAdd itself failed, nothing was actually queued")
+		t.Error("Queued = true, want false, OutboxAdd itself failed, nothing was actually queued")
 	}
 	if !strings.Contains(logBuf.String(), "alert lost") {
 		t.Errorf("stderr does not name the double failure at ERROR: %q", logBuf.String())
@@ -390,11 +390,11 @@ func TestTick_Apprise503(t *testing.T) {
 
 // TestTick_DrainFailureContributesToExitCode asserts that a drain
 // failing every item moves the exit code, not just a WARN log line an
-// operator running --once may never tail — the exit code is the
+// operator running --once may never tail, the exit code is the
 // machine-readable signal, so a stuck outbox must move it.
 //
 // At tick0 the daily heartbeat is due by default, so step 4 would ALSO
-// notify, ALSO hit the 503 recorder, and ALSO queue — setting rc 4 by
+// notify, ALSO hit the 503 recorder, and ALSO queue, setting rc 4 by
 // itself before the drain ever runs, which would make this test pass
 // even with drainOutbox's contribution to the exit code removed. Seeding
 // today's heartbeat makes step (f) not due, so with no findings state
@@ -425,7 +425,7 @@ func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
 
 	res := Tick(context.Background(), cfg, 1, d)
 	if res.Queued || res.Notified {
-		t.Fatalf("setup guard failed: Queued=%v Notified=%v — this tick's own report must send nothing, "+
+		t.Fatalf("setup guard failed: Queued=%v Notified=%v, this tick's own report must send nothing, "+
 			"or rc 4 could come from step 4 again instead of the drain", res.Queued, res.Notified)
 	}
 	if res.ExitCode != 4 {
@@ -436,7 +436,7 @@ func TestTick_DrainFailureContributesToExitCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(entries) == 0 {
-		t.Error("outbox is empty — the seeded item must still be present (retry failed, never acked)")
+		t.Error("outbox is empty, the seeded item must still be present (retry failed, never acked)")
 	}
 }
 
@@ -472,7 +472,7 @@ func TestTick_KernelSectionError(t *testing.T) {
 // amendment at 64e57f3: a persistently broken kernel scan must not spam
 // the human channel (288 Telegram messages/day at the default
 // TICK_INTERVAL), but "fails loud, never silent" must survive for
-// whatever CANNOT be muted by an operator — the exit code. Two
+// whatever CANNOT be muted by an operator, the exit code. Two
 // assertions, and the second is the one that matters: a test covering
 // only the throttle would let someone silence the failure entirely.
 func TestTick_KernelSectionErrorThrottledButExitCodeNever(t *testing.T) {
@@ -496,16 +496,16 @@ func TestTick_KernelSectionErrorThrottledButExitCodeNever(t *testing.T) {
 	}
 
 	// Second consecutive failing tick, well inside RAW_ALERT_REPEAT_SECONDS
-	// (default 3600s) — must NOT notify again...
+	// (default 3600s), must NOT notify again...
 	cfg.Now = tick0.Add(1 * time.Minute)
 	res2 := Tick(context.Background(), cfg, 2, d)
 	if rec.count() != firstCount {
 		t.Errorf("tick 2: apprise received %d requests, want still %d (the human channel must be throttled)", rec.count(), firstCount)
 	}
-	// ...but the exit code must NEVER be suppressed — this is the
+	// ...but the exit code must NEVER be suppressed, this is the
 	// assertion that actually keeps the safety path "loud, never silent".
 	if res2.ExitCode == 0 {
-		t.Error("tick 2: ExitCode = 0, want non-zero — throttling the notification must not throttle the exit code")
+		t.Error("tick 2: ExitCode = 0, want non-zero, throttling the notification must not throttle the exit code")
 	}
 }
 
@@ -556,7 +556,7 @@ func TestTick_RawAlertDeliveryFails(t *testing.T) {
 	}
 	// The resend is byte-identical to what was queued (S-D2): find it among
 	// this tick's successful POSTs by content rather than assuming position
-	// — this tick may ALSO deliver its own (unrelated) report.
+	//, this tick may ALSO deliver its own (unrelated) report.
 	var found bool
 	for _, req := range rec.all()[rec2Count:] {
 		var p struct{ Body string }
@@ -567,7 +567,7 @@ func TestTick_RawAlertDeliveryFails(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("no successful POST after the drain carried the original raw content — resend was not byte-identical")
+		t.Error("no successful POST after the drain carried the original raw content, resend was not byte-identical")
 	}
 	_ = before
 }
@@ -747,7 +747,7 @@ func TestTick_TruncationPreservesCrit(t *testing.T) {
 	Tick(context.Background(), cfg, 1, d)
 	reqs := rec.all()
 	if len(reqs) == 0 {
-		t.Fatal("no raw alert sent — the crit entry must have been dropped by truncation")
+		t.Fatal("no raw alert sent, the crit entry must have been dropped by truncation")
 	}
 	var p struct{ Body string }
 	json.Unmarshal(reqs[0].body, &p)
@@ -781,7 +781,7 @@ func TestTick_RawAlertThroughSanitizer(t *testing.T) {
 		t.Fatalf("payload not valid JSON: %v", err)
 	}
 	// The renderer legitimately adds its OWN backticks/asterisks
-	// (**Findings**, `<evidence>`) after sanitization (N.0.4) — a blanket
+	// (**Findings**, `<evidence>`) after sanitization (N.0.4), a blanket
 	// "no backtick anywhere" check would false-positive on that markup.
 	// What must be gone is the crafted literal run itself, which sanitize
 	// strips character-by-character and the renderer's own template never
@@ -836,7 +836,7 @@ func TestCandidates_NewestFirst(t *testing.T) {
 // untouched.
 func TestSweepMarkers_ExpiresOldOnly(t *testing.T) {
 	cfg := testConfig(t, tick0)
-	// sweepMarkers reads mtime, not content — writeMarker stamps the file
+	// sweepMarkers reads mtime, not content, writeMarker stamps the file
 	// with the real wall clock, so the age comparison must be pinned
 	// explicitly via os.Chtimes (same pattern TestHealth uses for the
 	// heartbeat file, C9: never rely on real wall-clock timing in a test).
@@ -867,7 +867,7 @@ func TestSweepMarkers_ExpiresOldOnly(t *testing.T) {
 
 // TestMinimalValidationFailureAlert asserts R3.2's "never drops an alert
 // because of its own marshaling bug" safety-net replacement is itself
-// schema-valid — the one property that matters, since this is the
+// schema-valid, the one property that matters, since this is the
 // last-resort document when runtime's OWN output failed validation.
 func TestMinimalValidationFailureAlert(t *testing.T) {
 	cfg := testConfig(t, tick0)
@@ -881,9 +881,9 @@ func TestMinimalValidationFailureAlert(t *testing.T) {
 		t.Fatalf("the safety-net document itself must validate: %v", verr)
 	}
 	if rep.Status != "ALERT" {
-		t.Errorf("Status = %q, want ALERT — a marshaling bug must never be reported as OK", rep.Status)
+		t.Errorf("Status = %q, want ALERT, a marshaling bug must never be reported as OK", rep.Status)
 	}
 	if len(rep.Findings) == 0 {
-		t.Fatal("no findings — status ALERT with zero findings fails validation anyway, but assert the shape directly")
+		t.Fatal("no findings, status ALERT with zero findings fails validation anyway, but assert the shape directly")
 	}
 }

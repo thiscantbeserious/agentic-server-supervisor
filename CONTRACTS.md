@@ -10,11 +10,11 @@ Module path: `github.com/thiscantbeserious/agentic-server-supervisor`. Go 1.25, 
 
 ```
 cmd/sentinel/main.go          subcommand dispatch + exit-code mapping (the ONLY os.Exit)
-internal/config/              Config, Load() — the single env loader
+internal/config/              Config, Load(), the single env loader
 internal/logging/             slog handler (C7)
 internal/facts/               Facts wire types + facts.schema.json (embedded)
 internal/report/              Report wire types + report.schema.json (embedded) + Validate
-internal/dedup/               Key, EvidenceCore — the single normalizer
+internal/dedup/               Key, EvidenceCore, the single normalizer
 internal/journal/             journalctl exec + normalization + merge/dedup
 internal/collect/             Run (tick + deep)
 internal/analyze/             Run, prompt assembly, fallback, prompt/role.md (embedded)
@@ -26,7 +26,7 @@ test/container_test.go        build tag `container`
 
 `internal/hostenv` and `internal/schema` do not exist. `go:embed` cannot escape its package directory, so embedded assets live **in** the package that owns them: `internal/facts/facts.schema.json`, `internal/report/report.schema.json`, `internal/analyze/prompt/role.md`. `supervisor/prompts/` and `supervisor/schemas/` are deleted; the image ships no prompt or schema files and `SENTINEL_HOME` is abolished (its preflight check is removed).
 
-Single owners — no second implementation anywhere:
+Single owners, no second implementation anywhere:
 
 | Concern | Owner | Everyone else |
 |---|---|---|
@@ -71,7 +71,7 @@ One exit-code table for the whole binary (sysexits, overriding the per-contract 
 
 ### C3. Environment variables (complete; compose passes every one explicitly)
 
-`internal/config.Load()` reads them once. Malformed, out-of-range, or non-numeric-where-numeric ⇒ **exit 78 naming the variable** — the silent-default policy of the collect/state contracts is dropped. Every duration value is parsed by `time.ParseDuration` with no rewriting of the input; every default in the table below is written in that syntax.
+`internal/config.Load()` reads them once. Malformed, out-of-range, or non-numeric-where-numeric ⇒ **exit 78 naming the variable**, the silent-default policy of the collect/state contracts is dropped. Every duration value is parsed by `time.ParseDuration` with no rewriting of the input; every default in the table below is written in that syntax.
 
 Ranges, binding for every numeric variable (a value outside its range is exit 78, same as a malformed one):
 
@@ -85,13 +85,13 @@ Ranges, binding for every numeric variable (a value outside its range is exit 78
 | every other numeric variable | `> 0`; durations `> 0s` |
 | every value that is **ever** used as a duration | additionally `<= 86400s` (24h), enforced by `Load` |
 
-A variable's own row always wins over the catch-all row. `RAW_ALERT_MAX_PRIORITY=0` and `HEARTBEAT_HOUR=0` are therefore **legal** — priority 0 is `emerg`, the most important value in the raw-alert path, and hour 0 is midnight. Only variables falling under the catch-all row reject zero: a zero timeout, budget, history depth or outbox cap has no defined behaviour anywhere in this document. No numeric variable accepts a negative value.
+A variable's own row always wins over the catch-all row. `RAW_ALERT_MAX_PRIORITY=0` and `HEARTBEAT_HOUR=0` are therefore **legal**, priority 0 is `emerg`, the most important value in the raw-alert path, and hour 0 is midnight. Only variables falling under the catch-all row reject zero: a zero timeout, budget, history depth or outbox cap has no defined behaviour anywhere in this document. No numeric variable accepts a negative value.
 
-These range rules apply to numeric variables only. `DEEP_ENABLED` is the `0`|`1` boolean and is validated as such — `DEEP_ENABLED=0` means disabled, not out of range.
+These range rules apply to numeric variables only. `DEEP_ENABLED` is the `0`|`1` boolean and is validated as such, `DEEP_ENABLED=0` means disabled, not out of range.
 
 The 24h bound exists because a second-valued variable is multiplied by `time.Second`: without an upper bound, a large value overflows `int64` nanoseconds and becomes a **negative** duration, which would make a timeout fire instantly instead of erroring. `STALE_ALERT_SEC` defaults to exactly `86400` (24h), so 24h is the ceiling, not a value below it. `RAW_ALERT_MARKER_TTL_HOURS` is a marker lifetime rather than a timeout and keeps its own row.
 
-**`TICK_WINDOW` and `DEEP_WINDOW` are kept as both.** `Config` exposes the parsed `time.Duration` *and* the raw configured string (`TickWindowRaw`, `DeepWindowRaw`). `facts.meta.window` echoes the **raw** string, so a configured `10m` is reported as `10m` and not as `time.Duration.String()`'s `10m0s`. Re-rendering the value from the parsed duration is the "rewriting of the input" this section forbids, only in the output direction — and `meta.window` is not internal bookkeeping: it travels into the analyzer prompt and from there into text a human reads.
+**`TICK_WINDOW` and `DEEP_WINDOW` are kept as both.** `Config` exposes the parsed `time.Duration` *and* the raw configured string (`TickWindowRaw`, `DeepWindowRaw`). `facts.meta.window` echoes the **raw** string, so a configured `10m` is reported as `10m` and not as `time.Duration.String()`'s `10m0s`. Re-rendering the value from the parsed duration is the "rewriting of the input" this section forbids, only in the output direction, and `meta.window` is not internal bookkeeping: it travels into the analyzer prompt and from there into text a human reads.
 
 **The bound is on the variable, not on the Go type `Config` happens to store it in.** `STALE_ALERT_SEC`, `RENOTIFY_ALERT_SEC`, `RENOTIFY_WATCH_SEC` and `RAW_ALERT_REPEAT_SECONDS` stay `int` seconds in `Config` and only become durations in `state`/`runtime`, but `Load` bounds them at `86400` all the same. `internal/config` is the single loader (C1) and downstream components contain no env parsing and no re-validation: a rule enforced in two places is a rule that will drift out of sync, and the consumer that forgets it is the one that overflows. T5 and T6 therefore inherit already-valid values and add no bounds checks of their own.
 
@@ -112,7 +112,7 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `HOST_RASDAEMON` | `/host/rasdaemon` | collect |
 | `SENTINEL_HOSTNAME` | resolved, see C5 | all |
 | `AGY_BIN` | `agy` | analyze |
-| `AGY_HOME` | `/state/agy-home` (persistent; NEVER tmpfs — a lost token refresh cannot be re-authenticated headlessly) | runtime |
+| `AGY_HOME` | `/state/agy-home` (persistent; NEVER tmpfs, a lost token refresh cannot be re-authenticated headlessly) | runtime |
 | `AGY_SECRET_DIR` | `/run/secrets/agy` | runtime |
 | `AGY_PRINT_TIMEOUT` | `120s` | analyze |
 | `AGY_HARD_TIMEOUT` | `150s` (raised to print+30s if lower) | analyze |
@@ -142,22 +142,22 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `LOG_LEVEL` | `INFO` | all |
 | `TMPDIR` | `/tmp` | analyze |
 | `TZ` | `UTC` | all |
-| `SENTINEL_NOW` | unset — **test-only clock override** | state, runtime |
+| `SENTINEL_NOW` | unset, **test-only clock override** | state, runtime |
 
-Abolished names: `SENTINEL_HOME`, `SENTINEL_STATE`, `FACTS_PROTECT_PRIORITY` (use `RAW_ALERT_MAX_PRIORITY`), `FACTS_KEEP_CRITICAL` (use `RAW_ALERT_MAX_LINES`), `OUTBOX_FALLBACK_ATTEMPTS` (use `OUTBOX_SMTP_AFTER`), `RENOTIFY_*_SECONDS`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (never in the sentinel container — the token stays out of the process that parses attacker-controlled log text; apprise seeds its own config volume, `--seed-config` is an ops one-shot).
+Abolished names: `SENTINEL_HOME`, `SENTINEL_STATE`, `FACTS_PROTECT_PRIORITY` (use `RAW_ALERT_MAX_PRIORITY`), `FACTS_KEEP_CRITICAL` (use `RAW_ALERT_MAX_LINES`), `OUTBOX_FALLBACK_ATTEMPTS` (use `OUTBOX_SMTP_AFTER`), `RENOTIFY_*_SECONDS`, `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` (never in the sentinel container, the token stays out of the process that parses attacker-controlled log text; apprise seeds its own config volume, `--seed-config` is an ops one-shot).
 
 ### C4. Paths
 
 Container mounts (all `:ro` except where noted): `/host/journal`, `/host/journal-volatile`, `/host/proc`, `/host/sys`, `/host/root` (rslave), `/host/rasdaemon`, `/etc/machine-id`, `/etc/os-release`, `/run/secrets/agy`; **rw:** `/state` (named volume) and `/tmp` (tmpfs). There is no `persistent/`/`volatile/` journal sublayout: both directories are queried and the results merged, de-duplicated on `(ts, message)`.
 
-`$STATE_DIR` whitelist — nothing else may be created:
+`$STATE_DIR` whitelist, nothing else may be created:
 
 ```
 tick-seq  heartbeat  baseline-ports
 history/  active-alerts/  outbox/  raw-alerts/  deep-queue/  agy-home/
 ```
 
-`deep-queue/` is in (analyze needs it); `heartbeat-date` and `tmp/` are out. `agy-home/` is in because `$AGY_HOME` lives there: it is the **only** entry not written by sentinel itself — the agy subprocess owns its contents, and sentinel only creates the directory (`0700`) and seeds it from `$AGY_SECRET_DIR`. It must persist, because agy refreshes its OAuth token as it runs and headless mode cannot re-authenticate a lost one. Nothing in sentinel may read, parse or log anything inside it (C7: credentials). `heartbeat` is a single file, content `YYYY-MM-DD\n` (last heartbeat day), rewritten by `state.Process` on every tick so its mtime is the liveness marker; `sentinel health` exits 0 iff its mtime is younger than `3 × TICK_INTERVAL`.
+`deep-queue/` is in (analyze needs it); `heartbeat-date` and `tmp/` are out. `agy-home/` is in because `$AGY_HOME` lives there: it is the **only** entry not written by sentinel itself, the agy subprocess owns its contents, and sentinel only creates the directory (`0700`) and seeds it from `$AGY_SECRET_DIR`. It must persist, because agy refreshes its OAuth token as it runs and headless mode cannot re-authenticate a lost one. Nothing in sentinel may read, parse or log anything inside it (C7: credentials). `heartbeat` is a single file, content `YYYY-MM-DD\n` (last heartbeat day), rewritten by `state.Process` on every tick so its mtime is the liveness marker; `sentinel health` exits 0 iff its mtime is younger than `3 × TICK_INTERVAL`.
 
 Every persistent write is `os.CreateTemp(<destination dir>, ".tmp-*")` → write → `Sync` → `Close` → `os.Rename`. Dirs `0o700`, files `0o600` under `outbox/`, `0o644` elsewhere. No `/tmp` staging for state files. `/tmp` holds only analyze's prompt scratch and the materialised schema, both removed by `defer`; agy's `$HOME` is `$STATE_DIR/agy-home` (see the whitelist above), not `/tmp`.
 
@@ -175,7 +175,7 @@ type Entry struct {
 }
 ```
 
-`facts.Meta.CollectorErrors` is `[]CollectorError{Section, Reason, ExitCode}` — never `[]string`. Every section is a `Section[T]` wrapper marshaling to `{"error": …}` or to its data; consumers must probe `Err` before reading data. Every section carries `truncated` and `dropped_entries`, `sensors` included.
+`facts.Meta.CollectorErrors` is `[]CollectorError{Section, Reason, ExitCode}`, never `[]string`. Every section is a `Section[T]` wrapper marshaling to `{"error": …}` or to its data; consumers must probe `Err` before reading data. Every section carries `truncated` and `dropped_entries`, `sensors` included.
 
 `internal/report`:
 
@@ -184,7 +184,7 @@ type Finding struct {
     Severity, Component, Evidence, Explanation string
     Analysis, Recommendation string `json:",omitempty"`
     Key         string `json:"key,omitempty"`         // analyze injects; nobody recomputes
-    FirstSeen   int64  `json:"first_seen,omitempty"`  // epoch seconds — never RFC3339
+    FirstSeen   int64  `json:"first_seen,omitempty"`  // epoch seconds, never RFC3339
     Occurrences int    `json:"occurrences,omitempty"` // state annotates
 }
 type Meta struct {
@@ -194,17 +194,17 @@ type Meta struct {
 }
 ```
 
-`report.schema.json` is one file with `additionalProperties: false`, permitting optional `meta`, `key`, `first_seen`, `occurrences` and the component value `meta`. It is normative for **every** document the system emits, raw alerts and fallbacks included. `report.Validate([]byte)` is hand-written Go (enums, rune bounds, array caps, status = highest severity) and is the runtime validator; `santhosh-tekuri/jsonschema/v6` is a **test-only** dependency that asserts `Validate` and the schema file agree. `Validate` does not use `DisallowUnknownFields` — the model's "must not emit `key`" rule is enforced by stripping, not by decode failure.
+`report.schema.json` is one file with `additionalProperties: false`, permitting optional `meta`, `key`, `first_seen`, `occurrences` and the component value `meta`. It is normative for **every** document the system emits, raw alerts and fallbacks included. `report.Validate([]byte)` is hand-written Go (enums, rune bounds, array caps, status = highest severity) and is the runtime validator; `santhosh-tekuri/jsonschema/v6` is a **test-only** dependency that asserts `Validate` and the schema file agree. `Validate` does not use `DisallowUnknownFields`, the model's "must not emit `key`" rule is enforced by stripping, not by decode failure.
 
 Marshaling: RFC3339 UTC with `Z` for timestamps, integers for sizes and counts (never strings), `findings`/`resolved`/`entries` never `nil` (`[]`), compact single-line JSON + `\n` on stdout, `MarshalIndent` only for files a human reads. All `maxLength` bounds count runes. `state` never emits a `status` inconsistent with its `findings`: when it suppresses, `status` becomes `OK`.
 
-### C6. Dedup key — one algorithm
+### C6. Dedup key, one algorithm
 
 `dedup.Key(component, evidence string) string` = `hex(sha256(component + "\n" + EvidenceCore(evidence)))[:16]`. `EvidenceCore`: flatten `\n\r\t` to spaces → strip kernel monotonic stamps `[\s*\d+\.\d+]` → strip a leading syslog or ISO stamp → ASCII-only lowercase (not `strings.ToLower`) → `strings.Fields` → **mask each field**: split it on `=`, replace every part matching `^0x[0-9a-f]+$` or `^[0-9]+([.,:][0-9]+)*$` with `#`, rejoin with `=` → join the fields with a space → truncate to 200 runes.
 
 Token-scoped on purpose: `nvme0n1`, `sda`, `zed[2914]:` survive (no `=`, and the digits are not a whole part); a rising counter `1 → 7` keeps one key.
 
-The `=`-scoped masking is normative, not an optimization: zed evidence carries its counters as `key=value` without spaces (`eid=1841`, `cksum_errors=1`), so whole-field matching alone would give every checksum event its own key and defeat trend tracking. It is what makes the ARCHITECTURE §2.7 CKSUM benchmark and `contracts/analyze.md` test 8 (evidence differing only in `eid=` digits ⇒ identical key) reachable. `analyze` computes the key and injects it into `findings[].key`; `state` and the raw-alert path consume it. The raw-alert path uses `dedup.Key("kernel", entry.Message)` — priority is not part of the key. Nobody recomputes a key that is already set.
+The `=`-scoped masking is normative, not an optimization: zed evidence carries its counters as `key=value` without spaces (`eid=1841`, `cksum_errors=1`), so whole-field matching alone would give every checksum event its own key and defeat trend tracking. It is what makes the ARCHITECTURE §2.7 CKSUM benchmark and `contracts/analyze.md` test 8 (evidence differing only in `eid=` digits ⇒ identical key) reachable. `analyze` computes the key and injects it into `findings[].key`; `state` and the raw-alert path consume it. The raw-alert path uses `dedup.Key("kernel", entry.Message)`, priority is not part of the key. Nobody recomputes a key that is already set.
 
 ### C7. Logging
 
@@ -225,20 +225,20 @@ state.Process(raw []byte) (*state.Decision, error)   // history stores the input
 notify.Send(ctx, cfg, r report.Report, smtpFallback bool) error
 ```
 
-`tick` marshals the analyzer's report once and hands the bytes to `state.Process`. `analyze` builds its own fallback report (stable key, `component: "meta"`) and returns it as a valid `*report.Report` with a non-nil error; `tick` sends it through `state` unchanged and exits 3 — `tick` never authors an analyzer fallback. `tick` authors only the collector fallback (`component: "meta"`, headline "Collector unavailable"). Deep context for the deep dive is `collect.Run` with `DeepComponent` set, under `DEEP_TIMEOUT`.
+`tick` marshals the analyzer's report once and hands the bytes to `state.Process`. `analyze` builds its own fallback report (stable key, `component: "meta"`) and returns it as a valid `*report.Report` with a non-nil error; `tick` sends it through `state` unchanged and exits 3, `tick` never authors an analyzer fallback. `tick` authors only the collector fallback (`component: "meta"`, headline "Collector unavailable"). Deep context for the deep dive is `collect.Run` with `DeepComponent` set, under `DEEP_TIMEOUT`.
 
-Outbox flow, once per tick, in this order: `state.OutboxTake()` → `notify.Send(item.Payload, item.FallbackSMTP)` → `state.OutboxAck(id)` on success. On the current report: `notify.Send` error ⇒ `state.OutboxAdd(payload)`. `notify` has no `--retry-outbox`, no envelope of its own, and never writes to `$STATE_DIR`. The queued payload is the `decision.report` document, so a retry is byte-identical. Raw alerts follow the same path — a failed raw-alert POST is queued like any other.
+Outbox flow, once per tick, in this order: `state.OutboxTake()` → `notify.Send(item.Payload, item.FallbackSMTP)` → `state.OutboxAck(id)` on success. On the current report: `notify.Send` error ⇒ `state.OutboxAdd(payload)`. `notify` has no `--retry-outbox`, no envelope of its own, and never writes to `$STATE_DIR`. The queued payload is the `decision.report` document, so a retry is byte-identical. Raw alerts follow the same path, a failed raw-alert POST is queued like any other.
 
-Notification text: `notify` sanitizes every report-derived string (`headline`, `body`, `explanation`, `analysis`, `recommendation`, `resolved[]`, `evidence`, hostname) by **stripping** `` ` `` `_` `*` `[` `]` and control characters, then adds its own markdown structure. Components therefore never put markdown in report text — the raw-alert body is plain lines `<ts> <priority-name> <message>`, no code fences, no brackets.
+Notification text: `notify` sanitizes every report-derived string (`headline`, `body`, `explanation`, `analysis`, `recommendation`, `resolved[]`, `evidence`, hostname) by **stripping** `` ` `` `_` `*` `[` `]` and control characters, then adds its own markdown structure. Components therefore never put markdown in report text, the raw-alert body is plain lines `<ts> <priority-name> <message>`, no code fences, no brackets.
 
 ### C9. Tests
 
-`go test ./...`, table-driven, stdlib `testing` only, hermetic and offline. Fixtures under `<pkg>/testdata/` — **except** where two assertions must provably share one fixture set (the validator↔schema cross-check of `contracts/analyze.md` case 12b): there the fixtures are in-code tables both assertions read, because a `testdata/` copy could drift away from the table that drives the unit test and silently stop cross-checking. `t.TempDir()` for `STATE_DIR` and `TMPDIR`; `t.Setenv` for env; the clock via `SENTINEL_NOW` or a `Config` field, never `time.Now()`. External binaries (`journalctl`, `sensors`, `agy`) are stubbed by prepending `testdata/bin` to `PATH`; HTTP by `httptest.Server`; SMTP by a `net.Listen` goroutine. Cross-package agreement is asserted, not assumed: one test proves `analyze` and `state` derive the identical key from the same evidence, one proves every emitted document validates against `report.schema.json`, one proves `facts.schema.json` **rejects** malformed facts. Tests gated on real infrastructure use `SENTINEL_CONTAINER=1`, `SENTINEL_REAL_AGY=1`, `SENTINEL_E2E=1`, or the `container` build tag, and must `t.Skip` loudly, never pass silently. CI runs `gofmt -l` (empty), `go vet ./...`, `go test -race ./...`; the Dockerfile builder stage re-runs vet and test so a red suite fails the image.
+`go test ./...`, table-driven, stdlib `testing` only, hermetic and offline. Fixtures under `<pkg>/testdata/`, **except** where two assertions must provably share one fixture set (the validator↔schema cross-check of `contracts/analyze.md` case 12b): there the fixtures are in-code tables both assertions read, because a `testdata/` copy could drift away from the table that drives the unit test and silently stop cross-checking. `t.TempDir()` for `STATE_DIR` and `TMPDIR`; `t.Setenv` for env; the clock via `SENTINEL_NOW` or a `Config` field, never `time.Now()`. External binaries (`journalctl`, `sensors`, `agy`) are stubbed by prepending `testdata/bin` to `PATH`; HTTP by `httptest.Server`; SMTP by a `net.Listen` goroutine. Cross-package agreement is asserted, not assumed: one test proves `analyze` and `state` derive the identical key from the same evidence, one proves every emitted document validates against `report.schema.json`, one proves `facts.schema.json` **rejects** malformed facts. Tests gated on real infrastructure use `SENTINEL_CONTAINER=1`, `SENTINEL_REAL_AGY=1`, `SENTINEL_E2E=1`, or the `container` build tag, and must `t.Skip` loudly, never pass silently. CI runs `gofmt -l` (empty), `go vet ./...`, `go test -race ./...`; the Dockerfile builder stage re-runs vet and test so a red suite fails the image.
 
 
 ## Component contracts (split per implementation stage)
 
-The per-component contracts live under [contracts/](contracts/) — an implementer reads **this file plus only the file(s) for its TODO**:
+The per-component contracts live under [contracts/](contracts/), an implementer reads **this file plus only the file(s) for its TODO**:
 
 | TODO | Read |
 |---|---|
@@ -247,6 +247,6 @@ The per-component contracts live under [contracts/](contracts/) — an implement
 | T4 analyze | [contracts/analyze.md](contracts/analyze.md) |
 | T5 state | [contracts/state.md](contracts/state.md) |
 | T6 notify + runtime | [contracts/notify.md](contracts/notify.md), [contracts/runtime.md](contracts/runtime.md) |
-| T7 image/CI/install | [contracts/runtime.md](contracts/runtime.md) (Dockerfile, compose, install-host.sh) |
+| T7 image/CI/install | [contracts/runtime.md](contracts/runtime.md) (Dockerfile, compose, install.sh) |
 
 Where a component contract disagrees with this file, this file wins (see top).

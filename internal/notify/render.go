@@ -24,8 +24,8 @@ type Payload struct {
 
 // stripUnsafe removes what may never appear in the wire body regardless of
 // markup: invalid UTF-8, and control characters other than '\n'. It is the
-// non-markdown half of Sanitize, extracted so every path — markdown
-// (Sanitize, sanitizeEvidence) and HTML (htmlStyle, below) — shares one
+// non-markdown half of Sanitize, extracted so every path, markdown
+// (Sanitize, sanitizeEvidence) and HTML (htmlStyle, below), shares one
 // copy of the rule rather than three that could drift.
 func stripUnsafe(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -44,7 +44,7 @@ func stripUnsafe(s string) string {
 
 // Sanitize drops Telegram markdown metacharacters and control characters so
 // no report text can break the parser at the notification layer.
-// ponytail: strip instead of escape — a mangled log line is acceptable,
+// ponytail: strip instead of escape, a mangled log line is acceptable,
 // a permanently rejected Telegram message is not.
 func Sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -58,7 +58,7 @@ func Sanitize(s string) string {
 
 // sanitizeEvidence is N.3.3's amended evidence rule: evidence is rendered
 // verbatim inside a markdown code span, where every metacharacter except
-// a backtick is already literal — so unlike Sanitize, only the backtick
+// a backtick is already literal, so unlike Sanitize, only the backtick
 // is touched (replaced with a plain quote so it can't close the span
 // early). Control characters and invalid UTF-8 are still removed via
 // stripUnsafe. Stripping `_` here (as Sanitize would) corrupted the one
@@ -85,7 +85,7 @@ func TruncRunes(s string, max int, ellipsis string) string {
 
 var wsRunRe = regexp.MustCompile(`\s+`)
 
-// oneLine collapses newlines and runs of spaces — applied to every field
+// oneLine collapses newlines and runs of spaces, applied to every field
 // except body (N.3.3).
 func oneLine(s string) string {
 	return strings.TrimSpace(wsRunRe.ReplaceAllString(s, " "))
@@ -105,7 +105,7 @@ func typeForStatus(status string) string {
 }
 
 // BuildPayload renders one report into the exact four-field Payload N.3.1
-// defines. Callers must have already run Validate — BuildPayload does not
+// defines. Callers must have already run Validate, BuildPayload does not
 // re-check the enum/required-field shape, only sanitizes and truncates.
 func BuildPayload(r report.Report, cfg *config.Config) Payload {
 	host := cfg.Hostname
@@ -128,12 +128,12 @@ func BuildPayload(r report.Report, cfg *config.Config) Payload {
 
 // gapLine is N.3.3's vertical separator: U+2800 BRAILLE PATTERN BLANK, on
 // a line of its own, between every section. Measured against a real
-// Telegram client on 2026-08-18, not decorative — do not replace it with
+// Telegram client on 2026-08-18, not decorative, do not replace it with
 // an empty line, an ASCII space, a U+00A0 NBSP, or a U+200B zero-width
 // space:
 //   - An empty line collapses to nothing on both delivery paths.
 //   - A space or NBSP collapses on the apprise (markdown) path but
-//     SURVIVES over SMTP — a gap that works on the fallback and vanishes
+//     SURVIVES over SMTP, a gap that works on the fallback and vanishes
 //     on the primary, the worst failure available, because it looks
 //     correct in whichever path you happen to test.
 //   - U+2800 is a printable character, not whitespace, so nothing trims
@@ -164,7 +164,7 @@ var markdownStyle = bodyStyle{
 // htmlEscapeSafe composes stripUnsafe with html.EscapeString: strip what
 // may never appear in the wire body (invalid UTF-8, control chars other
 // than '\n') BEFORE escaping, so the escaped output is always valid UTF-8
-// with no embedded NUL — RFC 5321 §2.3.1 forbids NUL in SMTP DATA, and a
+// with no embedded NUL, RFC 5321 §2.3.1 forbids NUL in SMTP DATA, and a
 // message declaring charset=utf-8 must not carry invalid UTF-8 regardless.
 func htmlEscapeSafe(s string) string {
 	return html.EscapeString(stripUnsafe(s))
@@ -178,7 +178,7 @@ var htmlStyle = bodyStyle{
 }
 
 // buildSkeleton is N.3.3's body assembly, shared verbatim by the markdown
-// path (buildBody) and the HTML path (BuildHTMLBody) — same section
+// path (buildBody) and the HTML path (BuildHTMLBody), same section
 // order, same GAP placement, same alert-only/non-empty-only gating,
 // differing only in style.heading/code/prose/evidence.
 func buildSkeleton(r report.Report, cfg *config.Config, st bodyStyle, truncMarker string) string {
@@ -205,7 +205,7 @@ func buildSkeleton(r report.Report, cfg *config.Config, st bodyStyle, truncMarke
 			lines = append(lines, st.code(ev))
 		}
 
-		// analysis answers "how bad is this" — needed at 3am for an
+		// analysis answers "how bad is this", needed at 3am for an
 		// alert, not for a watch read over coffee. The watch case keeps
 		// evidence and recommendation; the full analysis still lives in
 		// the report, in history, and in the next prompt.
@@ -235,7 +235,7 @@ func buildBody(r report.Report, cfg *config.Config) string {
 }
 
 // BuildHTMLBody is N.3.6: the same skeleton as N.3.3, rendered as HTML for
-// delivery over SMTP with Content-Type: text/html; charset=utf-8 — mailrise
+// delivery over SMTP with Content-Type: text/html; charset=utf-8, mailrise
 // selects the notification format from Content-Type, so this renders bold
 // and monospace on Telegram exactly like the apprise path (verified live
 // 2026-08-18). Every report-derived string is escaped with html.EscapeString

@@ -78,7 +78,7 @@ func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *repor
 }
 
 // protectedKernelLines returns this tick's high-priority kernel lines,
-// oldest first, capped — keeping the newest when the cap binds. A forward
+// oldest first, capped, keeping the newest when the cap binds. A forward
 // walk that stops at the limit would keep the oldest lines and drop the
 // incident happening right now.
 func protectedKernelLines(cfg *config.Config, f *facts.Facts) []string {

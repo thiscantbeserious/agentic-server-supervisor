@@ -1,4 +1,4 @@
-// loop.go: Loop() — startup preflight, agy-home seeding, the tick-seq
+// loop.go: Loop(), startup preflight, agy-home seeding, the tick-seq
 // counter, and the signal-driven interval loop (R2).
 package runtime
 
@@ -28,7 +28,7 @@ func (e *stateDirError) Error() string {
 	return fmt.Sprintf("%s: STATE_DIR missing or unwritable", e.path)
 }
 
-// preflightError maps to exit 78 — "ERROR naming the exact path" (R2 step 2).
+// preflightError maps to exit 78, "ERROR naming the exact path" (R2 step 2).
 type preflightError struct {
 	path   string
 	reason string
@@ -81,26 +81,26 @@ func dirReadableNonEmpty(dir string) bool {
 
 // checkJournalReadable exists because R2's filesystem preflight
 // (dirReadableNonEmpty above) only proves
-// the configured journal directory exists and has files in it — it does
+// the configured journal directory exists and has files in it, it does
 // NOT prove journald will hand the unprivileged sentinel user any journal
 // CONTENT. A stale JOURNAL_GID, an ineffective group_add, or a wrong
 // HOST_JOURNAL_DIR mount all leave that filesystem-level check green while
 // journalctl itself reads nothing, and an empty journal is indistinguishable
-// from a quiet system — the quietest possible failure of a component whose
+// from a quiet system, the quietest possible failure of a component whose
 // job is noticing things.
 //
 // Measured against real journalctl in debian:trixie-slim (the R1 runtime
 // base) before writing this: "journalctl -n1 --no-pager" on an empty or
 // unreadable journal exits 0 and prints "-- No entries --\n" to STDOUT, not
-// stderr — so neither "exit code only" nor "stdout non-empty" discriminates
+// stderr, so neither "exit code only" nor "stdout non-empty" discriminates
 // a real record from that sentinel line. "-o json" does: an empty journal
 // under -o json writes zero bytes. This function therefore queries with
 // "-o json" and treats non-zero exit OR zero-byte stdout as failure.
 //
-// Queries HOST_JOURNAL_DIR first, then HOST_JOURNAL_VOLATILE_DIR — the
+// Queries HOST_JOURNAL_DIR first, then HOST_JOURNAL_VOLATILE_DIR, the
 // same "at least one readable" tolerance the filesystem check above uses
 // (a fresh boot can legitimately have an empty persistent journal with
-// only the volatile one populated) — and fails only if neither yields a
+// only the volatile one populated), and fails only if neither yields a
 // record.
 func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
 	timeout := cfg.SectionTimeout
@@ -128,7 +128,7 @@ func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
 		}
 		// Defense in depth beyond "-o json": if journalctl ever falls back
 		// to its human-readable "-- No entries --" sentinel line (that is
-		// what a real, unreadable/empty journal prints WITHOUT -o json —
+		// what a real, unreadable/empty journal prints WITHOUT -o json,
 		// -o json is what makes that case zero bytes instead), a
 		// non-empty-but-non-JSON line must still be rejected rather than
 		// accepted as a real record.
@@ -140,7 +140,7 @@ func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
 	}
 	return &preflightError{
 		cfg.HostJournalDir,
-		lastReason + " — check JOURNAL_GID, group_add, or the /host/journal mount",
+		lastReason + ", check JOURNAL_GID, group_add, or the /host/journal mount",
 	}
 }
 
@@ -148,7 +148,7 @@ type warner interface{ Warn(string, ...any) }
 
 // seedAgyHome is R2 step 4: MkdirAll($AGY_HOME, 0700), copy
 // $AGY_SECRET_DIR's regular files into it (mode 0600), then point $HOME
-// at it. A missing or empty secret dir is a WARN, not fatal — the
+// at it. A missing or empty secret dir is a WARN, not fatal, the
 // raw-alert path must survive without the LLM.
 func seedAgyHome(cfg *config.Config, logger warner) {
 	if err := os.MkdirAll(cfg.AgyHome, 0o700); err != nil {
@@ -157,7 +157,7 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 	}
 	entries, err := os.ReadDir(cfg.AgySecretDir)
 	if err != nil || len(entries) == 0 {
-		logger.Warn("runtime agy credentials absent — analysis will fall back")
+		logger.Warn("runtime agy credentials absent, analysis will fall back")
 	} else {
 		for _, e := range entries {
 			if e.IsDir() {
@@ -178,7 +178,7 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 func nextTickSeq(cfg *config.Config, logger warner) int64 {
 	path := filepath.Join(cfg.StateDir, "tick-seq")
 	var seq int64 = 1
-	// R3.1: "Missing or unparseable ⇒ start at 1 and WARN" — both cases,
+	// R3.1: "Missing or unparseable ⇒ start at 1 and WARN", both cases,
 	// not only the unparseable one.
 	data, rerr := os.ReadFile(path)
 	if rerr != nil {
@@ -199,12 +199,12 @@ func nextTickSeq(cfg *config.Config, logger warner) int64 {
 }
 
 // assertBinDirReadOnly is R2 step 3: prove read_only:true took effect.
-// Writable ⇒ WARN, continue — never block ticks on a lint.
+// Writable ⇒ WARN, continue, never block ticks on a lint.
 func assertBinDirReadOnly(logger warner) {
 	probe := "/usr/local/bin/.preflight-probe"
 	if err := os.WriteFile(probe, []byte{}, 0o600); err == nil {
 		os.Remove(probe)
-		logger.Warn("runtime /usr/local/bin is writable — read_only:true may not be in effect")
+		logger.Warn("runtime /usr/local/bin is writable, read_only:true may not be in effect")
 	}
 }
 
@@ -212,7 +212,7 @@ func assertBinDirReadOnly(logger warner) {
 // preflight (STATE_DIR, /tmp, a readable journal dir, $HOST_PROC/uptime,
 // and the C4 subdirectory MkdirAlls), the /usr/local/bin read-only lint,
 // and agy-home seeding. R2 requires this "once before --loop starts
-// ticking, and once before the single tick in --once" — step 1
+// ticking, and once before the single tick in --once", step 1
 // (config.Load) and step 6 (signal.NotifyContext, --loop only) are the
 // caller's job. Returns the C2 exit code: 69 for a state-dir failure, 78
 // for any other preflight failure, 0 on success.
@@ -247,7 +247,7 @@ func StartupPreflight(ctx context.Context, cfg *config.Config) (int, error) {
 	// terminates only with 0 (signal), 78 (config/mount preflight) ...").
 	// checkJournalReadable already self-bounds via cfg.SectionTimeout (or
 	// its own 10s default), so the accepted cost of NOT threading shutdown
-	// cancellation through is a startup tail of at most that timeout —
+	// cancellation through is a startup tail of at most that timeout,
 	// comfortably inside the 15s stop_grace_period compose sets. Both
 	// current callers pass context.Background() for exactly this reason;
 	// ctx stays a parameter (rather than being dropped) so a future
@@ -268,7 +268,7 @@ func StartupPreflight(ctx context.Context, cfg *config.Config) (int, error) {
 
 // Loop runs StartupPreflight once, then ticks every TICK_INTERVAL until
 // SIGTERM/SIGINT. It terminates only with 0 (signal), 78 (config/mount
-// preflight) or 69 (state dir) — every other tick failure is logged and
+// preflight) or 69 (state dir), every other tick failure is logged and
 // the loop continues (R2).
 func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 	logger := newLogger(cfg)

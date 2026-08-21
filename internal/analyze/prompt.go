@@ -26,8 +26,8 @@ import (
 // The payloads are a different matter and some of their bytes are
 // Go-authored: the history projection's field names, the validator message
 // the correction quotes, and text this package itself wrote into an
-// earlier tick's report — a withheld-recommendation note, a fallback
-// placeholder — which returns here as history evidence. Auditing what the
+// earlier tick's report, a withheld-recommendation note, a fallback
+// placeholder, which returns here as history evidence. Auditing what the
 // model is told means reading this directory; auditing everything it sees
 // means following the payloads too.
 //
@@ -69,7 +69,7 @@ type promptData struct {
 	ValidationError string
 }
 
-// newNonce returns 16 hex chars from crypto/rand — the per-run fence
+// newNonce returns 16 hex chars from crypto/rand, the per-run fence
 // token. The fences are only a boundary if injected log text cannot
 // predict them; a fresh random nonce per run is what makes a forged
 // "end of fence" line inert.
@@ -119,7 +119,7 @@ func renderTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []strin
 // returns an empty answer past a measured ~30 KB prompt, an order of
 // magnitude below the facts size cap, so an unbudgeted prompt fails in the
 // worst way: successfully, with nothing. The non-facts shell has a fixed
-// size, so one render yields the exact remaining budget — no iteration.
+// size, so one render yields the exact remaining budget, no iteration.
 // The reduction uses the collector's own truncation on a copy; the
 // original facts are never touched, because the fallback and raw-alert
 // paths read them and must see exactly what the collector emitted.
@@ -144,7 +144,7 @@ func buildTriagePrompt(cfg *config.Config, f *facts.Facts, historyLines []string
 
 	reduced, err := deepCopyFacts(f)
 	if err != nil {
-		// Reduction failed — ship the oversized prompt rather than fail the
+		// Reduction failed, ship the oversized prompt rather than fail the
 		// whole tick; agy will most likely return agy_empty and the
 		// fallback path (which reads the UNREDUCED facts) still surfaces
 		// every protected kernel line regardless.
@@ -200,7 +200,7 @@ func renderDeepDivePrompt(cfg *config.Config, findingJSON, deepJSON string, hist
 // buildDeepDivePrompt applies the same budget technique to the deep-dive
 // prompt. Not cosmetic: a deep collection can reach the full facts size
 // cap, a single argv string that large fails exec outright on Linux, and
-// anything past ~30 KB hits agy's silent-empty cliff — unbudgeted, the
+// anything past ~30 KB hits agy's silent-empty cliff, unbudgeted, the
 // deep dive would fail systematically for exactly the large collections it
 // exists to analyze.
 func buildDeepDivePrompt(cfg *config.Config, findingJSON string, deepFacts *facts.Facts, historyLines []string, nonce, component string) (string, error) {

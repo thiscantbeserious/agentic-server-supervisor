@@ -116,7 +116,7 @@ func newStore(t *testing.T, cfg *config.Config) *state.Store {
 }
 
 // baseDeps wires a REAL state.Store and REAL notify.Send (pointed at an
-// httptest recorder via cfg.AppriseURL) — the R8 default for every test:
+// httptest recorder via cfg.AppriseURL), the R8 default for every test:
 // "collect/analyze/state/notify are injected through Deps; apprise is an
 // httptest.Server recorder". Callers overwrite CollectRun/AnalyzeRun per
 // case.

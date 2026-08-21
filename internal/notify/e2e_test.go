@@ -9,17 +9,17 @@
 //
 // Why a mock stands in for Telegram rather than tgram:// itself: apprise
 // supports json://, which POSTs a small JSON envelope to an arbitrary
-// HTTP endpoint — pointing the registered config key (and mailrise.conf's
+// HTTP endpoint, pointing the registered config key (and mailrise.conf's
 // own configs) at this test's own HTTP server exercises the REAL chain,
 // sentinel -> apprise -> <mock> and sentinel -> SMTP -> mailrise -> <mock>,
 // with the only unexercised link being Telegram's own API, which is not
 // ours to test and which a real bot token would not meaningfully verify
 // either (a 200 from api.telegram.org proves delivery to Telegram's
-// servers, not that OUR payload was well-formed — the mock's own
+// servers, not that OUR payload was well-formed, the mock's own
 // assertions on title/message/type prove that directly).
 //
 // A mock that only returns 200 tests almost nothing. This one:
-//   - asserts what it actually received (title, message, type — see the
+//   - asserts what it actually received (title, message, type, see the
 //     comment on notifySink for why NOT format, an empirically corrected
 //     assumption)
 //   - counts deliveries, so dedup and outbox behaviour are provable rather
@@ -47,12 +47,12 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
-// sinkDelivery is apprise's OWN json:// notification envelope — verified
+// sinkDelivery is apprise's OWN json:// notification envelope, verified
 // against a real apprise-api container (POST /notify/{key} with a
 // title/body/type/format payload, watching what it then sent to a local
 // HTTP listener): {"version":"1.0","title":...,"message":...,
 // "attachments":[],"type":...}. Notably absent: "format". apprise's own
-// JSON output plugin does not forward the input format at all — verified
+// JSON output plugin does not forward the input format at all, verified
 // by sending format=markdown and format=text with identical body content
 // and observing byte-identical downstream messages either way. This mock
 // (and this test) assert title, message and type, which are the fields
@@ -71,7 +71,7 @@ type sinkDelivery struct {
 // documented address (SENTINEL_E2E_SINK_ADDR, default 127.0.0.1:8079)
 // rather than a random port, because the config on the apprise/mailrise
 // side (a registered key, a mailrise.conf entry) has to be able to name
-// it before this process starts — there is no way to discover a random
+// it before this process starts, there is no way to discover a random
 // port after the fact and hand it to an already-running container's
 // already-loaded config.
 type notifySink struct {
@@ -127,7 +127,7 @@ func (s *notifySink) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // setStatus controls what THIS sink returns to whoever posts to it next
-// (apprise-api, or mailrise's own embedded apprise client) — never what
+// (apprise-api, or mailrise's own embedded apprise client), never what
 // apprise-api itself returns to sentinel, which is a distinct, separately
 // verified mapping (see the 503/204 cases in TestE2E).
 func (s *notifySink) setStatus(code int) {
@@ -153,7 +153,7 @@ func (s *notifySink) last() sinkDelivery {
 
 func TestE2E(t *testing.T) {
 	if os.Getenv("SENTINEL_E2E") != "1" {
-		t.Skip("SENTINEL_E2E=1 not set — skipping live apprise/mailrise E2E test")
+		t.Skip("SENTINEL_E2E=1 not set, skipping live apprise/mailrise E2E test")
 	}
 	// An intermittent "transport: EOF" surfaced here at roughly 1-in-13
 	// (3/40 baseline runs against a real apprise-api). Disabling keep-alive
@@ -190,8 +190,8 @@ func TestE2E(t *testing.T) {
 	}
 
 	// --- SMTP fallback path: sentinel -> SMTP -> mailrise -> sink ---
-	// The SMTP path sends BuildHTMLBody's rendering, not payload.Body —
-	// a DIFFERENT string (HTML tags, entity-escaped quotes) — and
+	// The SMTP path sends BuildHTMLBody's rendering, not payload.Body,
+	// a DIFFERENT string (HTML tags, entity-escaped quotes), and
 	// mailrise then converts THAT to its own plaintext before handing it
 	// to its embedded apprise client, verified against a real mailrise
 	// container: tags stripped, entities unescaped, multi-line structure
@@ -200,13 +200,13 @@ func TestE2E(t *testing.T) {
 	// assert exact equality the way the direct path does without
 	// asserting something the real chain does not produce. What DOES
 	// survive verbatim, checked against the same real container: the
-	// report's own free-text r.Body, unmangled — that is the signal
+	// report's own free-text r.Body, unmangled, that is the signal
 	// that actually matters (a UTF-8/NUL regression or markdown
 	// rendered literally, both real incidents this project has already
 	// had, would corrupt or truncate exactly this text). Title is
 	// mailrise's own framing ("<Subject> (<From address>)"), asserted
 	// as containment same as before. Type is NOT asserted on this path
-	// at all — verified live that mailrise's downstream message always
+	// at all, verified live that mailrise's downstream message always
 	// carries "info" here, never payload.Type ("warning" for this WATCH
 	// fixture): the apprise "type" field (client-side styling/priority)
 	// is not propagated over SMTP, a real property of this path. Human-
@@ -227,6 +227,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// --- fail-on-demand: 503 (a real transport failure) ---
+	t.Logf("expect 1 delivery failure below: the sink is returning 503 to prove the failure path")
 	sink.setStatus(503)
 	t.Cleanup(func() { sink.setStatus(0) })
 	errSend := Send(ctx, cfg, r, false)
@@ -236,7 +237,7 @@ func TestE2E(t *testing.T) {
 	}
 	// Verified against a real apprise-api: when ITS downstream target
 	// (this sink) returns 503, apprise-api's own /notify/{key} call
-	// returns HTTP 424 to the caller — a real, correctly-detected
+	// returns HTTP 424 to the caller, a real, correctly-detected
 	// failure (postApprise's 200-299 check already covers it).
 	if got := sink.count(); got != 3 {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 503 case, want 3 (the attempt was received even though it failed)", got)
@@ -248,17 +249,17 @@ func TestE2E(t *testing.T) {
 	//
 	// Verified against a real apprise-api: the message DOES reach the
 	// downstream target (the sink's own delivery count below proves
-	// that) — what a 204 changes is apprise-api's REPORT of what
+	// that), what a 204 changes is apprise-api's REPORT of what
 	// happened, not the delivery. When the downstream target returns
 	// 204, apprise-api's OWN /notify/{key} call still returns HTTP 200
 	// to the caller. This is a DIFFERENT 204 than N.3.1's "204 is a
 	// failure" rule, which is about apprise-api's own /notify/{key}
-	// response meaning "the key is not registered" — this is
+	// response meaning "the key is not registered", this is
 	// apprise-api absorbing a downstream 204 into what it reports as
 	// its own success one layer further down. A downstream that
 	// accepted-and-discarded the message would be indistinguishable
 	// from here, from one that genuinely delivered it. Asserted rather
-	// than fixed, because there is nothing on our side to fix — this is
+	// than fixed, because there is nothing on our side to fix, this is
 	// what the real chain does. It is a real, unfixable-at-this-layer
 	// risk, not an uncovered one at the system level: the daily
 	// heartbeat is what catches a channel that has gone quiet, whatever
@@ -267,7 +268,7 @@ func TestE2E(t *testing.T) {
 	errSend = Send(ctx, cfg, r, false)
 	sink.setStatus(0)
 	if errSend != nil {
-		t.Errorf("FAIL E2E: apprise send with the sink returning 204 returned an error (%v) — expected apprise-api to report success here (verified live: it does), which is exactly the report-vs-delivery gap this case documents", errSend)
+		t.Errorf("FAIL E2E: apprise send with the sink returning 204 returned an error (%v), expected apprise-api to report success here (verified live: it does), which is exactly the report-vs-delivery gap this case documents", errSend)
 	}
 	if got := sink.count(); got != 4 {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries after the 204 case, want 4 (received, and apprise still called it a success)", got)
@@ -277,10 +278,10 @@ func TestE2E(t *testing.T) {
 	//
 	// Drives the REAL dedup path (internal/state.Store.Process, not a
 	// mock) against the same live sink: state decides whether to notify,
-	// this test only calls Send when it says so — the same gate
+	// this test only calls Send when it says so, the same gate
 	// internal/runtime.Tick uses. cfg.Now is pinned so three calls at the
 	// same instant fall inside the renotify window and the second/third
-	// are suppressed by the STORE, before Send is ever called for them —
+	// are suppressed by the STORE, before Send is ever called for them,
 	// the transport itself never sees a repeat and does nothing special
 	// with one. What this proves is that the store's suppression is
 	// real (Send is called exactly once) and that the one notification
@@ -315,7 +316,7 @@ func TestE2E(t *testing.T) {
 		t.Errorf("FAIL E2E: state.Process said Notify=true %d times across 3 identical ticks, want exactly 1", notifiedCount)
 	}
 	if got := sink.count() - before; got != 1 {
-		t.Errorf("FAIL E2E: sink recorded %d deliveries across 3 identical ticks, want exactly 1 — the store did not suppress the repeats the way it should have", got)
+		t.Errorf("FAIL E2E: sink recorded %d deliveries across 3 identical ticks, want exactly 1, the store did not suppress the repeats the way it should have", got)
 	}
 
 	// --- outbox: a failed send queues, attempts accumulate across
@@ -328,7 +329,7 @@ func TestE2E(t *testing.T) {
 	// created above). OutboxTake increments Attempts and persists it on
 	// every call (internal/state/outbox.go), so calling it
 	// OutboxSMTPAfter times with the sink still failing in between is
-	// what actually drives item.FallbackSMTP from false to true — the
+	// what actually drives item.FallbackSMTP from false to true, the
 	// same accumulation internal/runtime.Tick's own drainOutbox produces
 	// one real tick at a time. The final attempt flips the sink back to
 	// 200 first, so the escalated send both asks for SMTP AND actually
@@ -344,12 +345,13 @@ func TestE2E(t *testing.T) {
 		t.Fatalf("FAIL E2E: state.Process (outbox fixture): %v", err)
 	}
 	if !decision2.Notify {
-		t.Fatal("FAIL E2E: outbox fixture's first occurrence did not ask to notify — fixture or dedup state is stale")
+		t.Fatal("FAIL E2E: outbox fixture's first occurrence did not ask to notify, fixture or dedup state is stale")
 	}
 	payload2, err := json.Marshal(decision2.Report)
 	if err != nil {
 		t.Fatalf("FAIL E2E: marshal decision report: %v", err)
 	}
+	t.Logf("expect %d delivery failures below: the sink stays at 503 through the outbox setup send and every escalation attempt but the last, to prove OUTBOX_SMTP_AFTER=%d actually escalates to SMTP", dedupCfg.OutboxSMTPAfter, dedupCfg.OutboxSMTPAfter)
 	sink.setStatus(503)
 	sendErr := Send(ctx, &dedupCfg, decision2.Report, false)
 	if sendErr == nil {
@@ -383,7 +385,7 @@ func TestE2E(t *testing.T) {
 		}
 		if attempt == threshold {
 			// Escalating to SMTP without also letting this attempt
-			// succeed would only prove the boolean, not the branch —
+			// succeed would only prove the boolean, not the branch,
 			// recover the sink now so the escalated send actually lands.
 			sink.setStatus(0)
 			escalated = true
@@ -410,13 +412,13 @@ func TestE2E(t *testing.T) {
 		t.Fatal("FAIL E2E: loop completed without ever reaching the SMTP-escalation attempt")
 	}
 	// The sink logs a delivery on every POST it RECEIVES, before it
-	// decides what status to reply with — apprise/mailrise cannot know
+	// decides what status to reply with, apprise/mailrise cannot know
 	// in advance that a request will be told to fail, so every one of
 	// the `threshold` attempts genuinely reaches the sink, not only the
 	// final one. That the first `threshold-1` still ERRORED for the
 	// caller (asserted per-attempt in the loop above) is what proves
 	// exactly one attempt actually succeeded; this count instead proves
-	// none of the retries were silently skipped or short-circuited —
+	// none of the retries were silently skipped or short-circuited,
 	// every one of them really went out over the wire.
 	if got := sink.count() - beforeDrain; got != threshold {
 		t.Errorf("FAIL E2E: sink recorded %d deliveries across the outbox drain, want exactly %d (one per attempt, all the way to the escalated one that finally succeeded)", got, threshold)

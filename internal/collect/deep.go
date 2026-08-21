@@ -112,7 +112,7 @@ func collectDeepZFS(ctx context.Context, cfg *config.Config, meta *facts.Meta) (
 
 // readPoolKstat merges every readable file directly under
 // $HOST_PROC/spl/kstat/zfs/<pool>/ into one flat map, each file parsed as
-// a kstat key/value table (§3b) — the same "name type data" shape (2
+// a kstat key/value table (§3b), the same "name type data" shape (2
 // header lines, then "name type value" rows) readArcStats already parses;
 // a pool's `io`/`txgs` kstat files are themselves multi-row tables, not a
 // single scalar, so the file's content is parsed, not merely captured.

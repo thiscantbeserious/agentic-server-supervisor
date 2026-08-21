@@ -18,8 +18,8 @@
 // forge a fence end it cannot predict, and the prompt instructs the model
 // to treat everything inside the fences as data. The model has no tools and
 // executes nothing; a successful injection is limited to wrong text in a
-// report, and the recommendation field — the one field an operator might
-// paste into a shell — additionally passes a deterministic deny-list guard.
+// report, and the recommendation field, the one field an operator might
+// paste into a shell, additionally passes a deterministic deny-list guard.
 //
 // The binding spec is contracts/analyze.md.
 package analyze
@@ -50,7 +50,7 @@ type Options struct {
 }
 
 // Deps holds the two operations tests replace: running agy and collecting
-// deep facts. Plain function fields, not interfaces — there is exactly one
+// deep facts. Plain function fields, not interfaces, there is exactly one
 // real implementation of each.
 type Deps struct {
 	RunAgy      func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error)
@@ -108,7 +108,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	}()
 
 	// A nil RunAgy (misconstructed Deps) is not a documented failure mode,
-	// but the alternative is a nil-pointer panic on the first call below —
+	// but the alternative is a nil-pointer panic on the first call below,
 	// treat it the same as agy being missing rather than crashing.
 	if d.RunAgy == nil {
 		return buildFallback(cfg, o.Seq, "agy_missing", o.Facts, logger), errors.New("analyze: Deps.RunAgy is nil")
@@ -124,7 +124,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 
 	// The resolved set is output-only: it needs this tick's findings, which
 	// do not exist until after the triage call below, so it is never part
-	// of the prompt — only the newest history report (kept for
+	// of the prompt, only the newest history report (kept for
 	// computeResolved) is needed here.
 	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryN)
 	histLines := historyProjectionLines(hist)
