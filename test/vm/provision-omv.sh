@@ -12,6 +12,19 @@
 set -eu
 set -o pipefail
 
+# OMV's RPC layer answers a backend crash with "Invalid RPC response. Please
+# check the syslog for more information.", which carries nothing to act on.
+# The syslog it names is inside this VM and the VM is destroyed with the job,
+# so anything not printed before the exit is gone. One failed run costs about
+# half an hour, so the journal comes out on every failure rather than after a
+# second run spent adding this.
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then
+  echo "== provision-omv: failed with $rc, engine journal ==" >&2
+  journalctl -u openmediavault-engined -n 120 --no-pager >&2 2>/dev/null || true
+  echo "== provision-omv: system journal ==" >&2
+  journalctl -n 120 --no-pager >&2 2>/dev/null || true
+fi' EXIT
+
 # packages.openmediavault.org/public/install no longer exists (404 direct,
 # 403 through the CDN); the maintained installer lives in the plugin
 # developers' repository. Pinned to a commit rather than master: the URL
