@@ -1817,6 +1817,79 @@ func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
 	logPass(t, "PASS C12 (stack dir candidates none: conventional default, no phantom detection)")
 }
 
+// TestContainer_C12_OmvConfdbadmFailsUgly: confirmed against the real
+// OMV host — omv-confdbadm requires root and, run without it, does not
+// print a clean error; it emits a multi-line Python traceback and
+// exits non-zero. This shims the real binary's real location
+// (/usr/sbin/omv-confdbadm, not /usr/local/bin — proves the absolute-path
+// lookup, not just the command-v fallback the earlier config-fallback
+// test already covers) with exactly that failure shape, in three
+// variants, and asserts the config lookup degrades to "unknown" every
+// time — never treats traceback content as a detected compose root, and
+// never lets a non-JSON stdout past the shape guard even when the exit
+// status alone would not have caught it.
+func TestContainer_C12_OmvConfdbadmFailsUgly(t *testing.T) {
+	name := "sentinel-c12-confdbadm-ugly-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("mkdir -p /usr/sbin")
+
+	traceback := `Traceback (most recent call last):
+  File "/usr/sbin/omv-confdbadm", line 76, in <module>
+    main()
+  File "/usr/lib/python3/dist-packages/openmediavault/config/database.py", line 388, in _load
+    raise SystemExit("Failed to load the configuration database")
+SystemExit: Failed to load the configuration database`
+
+	cases := []struct {
+		name string
+		stub string
+	}{
+		{
+			name: "traceback on stderr, exit 1 (the real shape measured against the host)",
+			stub: "#!/bin/sh\ncat >&2 <<'TB'\n" + traceback + "\nTB\nexit 1\n",
+		},
+		{
+			name: "traceback misdirected to stdout, exit 1",
+			stub: "#!/bin/sh\ncat <<'TB'\n" + traceback + "\nTB\nexit 1\n",
+		},
+		{
+			name: "non-JSON stdout, exit 0 (a hypothetical future failure mode the exit-status check alone would not catch)",
+			stub: "#!/bin/sh\necho 'warning: something unrelated happened'\nexit 0\n",
+		},
+	}
+
+	for _, c := range cases {
+		writeStub := "cat > /usr/sbin/omv-confdbadm <<'STUB'\n" + c.stub + "STUB\nchmod +x /usr/sbin/omv-confdbadm"
+		if out, errOut, code := exec_(writeStub); code != 0 {
+			t.Fatalf("FAIL C12 (omv-confdbadm fails ugly, %s): stub setup failed: %s %s", c.name, out, errOut)
+		}
+
+		// No structural candidate exists anywhere on this host, so the
+		// only way "layout: omv" or a detected default could appear is
+		// the config lookup mistaking the stub's failure output for a
+		// real answer.
+		out, _, code := exec_("/work/install.sh --dry-run 2>&1")
+		if code != 0 {
+			t.Fatalf("FAIL C12 (omv-confdbadm fails ugly, %s): --dry-run exit=%d: %s", c.name, code, out)
+		}
+		if !strings.Contains(out, "stack directory: /opt/sentinel") {
+			t.Errorf("FAIL C12 (omv-confdbadm fails ugly, %s): expected the conventional /opt/sentinel fallback, got: %s", c.name, out)
+		}
+		if strings.Contains(out, "layout: omv") {
+			t.Errorf("FAIL C12 (omv-confdbadm fails ugly, %s): a failing omv-confdbadm must never produce an omv layout: %s", c.name, out)
+		}
+		for _, mustNotAppear := range []string{"Traceback", "database.py", "dist-packages", "detected a possible"} {
+			if strings.Contains(out, mustNotAppear) {
+				t.Errorf("FAIL C12 (omv-confdbadm fails ugly, %s): traceback/failure content leaked into the decision (%q found): %s", c.name, mustNotAppear, out)
+			}
+		}
+	}
+	logPass(t, "PASS C12 (omv-confdbadm fails ugly: traceback on stdout or stderr, or non-JSON success output, all degrade to unknown)")
+}
+
 // TestContainer_C12_DryRunVerbAudit: every "note" line that describes an
 // action this script would take must say "would" under --dry-run, never
 // claim the action already happened. A previous round fixed exactly the

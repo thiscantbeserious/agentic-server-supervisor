@@ -666,6 +666,19 @@ compose_root_looks_omv() {
   return 1
 }
 
+# omv_confdbadm_bin — locates the omv-confdbadm binary without trusting
+# a bare name on PATH: it lives at /usr/sbin/omv-confdbadm, not
+# /usr/bin, and a normal user's PATH does not include /usr/sbin at all.
+# `sudo`'s secure_path usually does (this script always runs as root),
+# so `command -v` alone would usually work — "usually" is exactly the
+# word that means it is not something to rely on. Absolute path first,
+# `command -v` as a fallback for a host where the plugin ships it
+# somewhere else.
+omv_confdbadm_bin() {
+  [ -x /usr/sbin/omv-confdbadm ] && { printf '%s' /usr/sbin/omv-confdbadm; return 0; }
+  command -v omv-confdbadm 2>/dev/null
+}
+
 # omv_confdbadm_compose_root — best-effort SECONDARY signal, authoritative
 # when it works: asks OMV's own config database where the compose
 # plugin's shared folder lives, instead of inferring it from disk
@@ -673,26 +686,60 @@ compose_root_looks_omv() {
 # all — a freshly enabled compose plugin with zero stacks created yet,
 # so there is nothing on disk to pattern-match.
 #
-# NOT verified against a real OMV host as part of this change — CLAUDE.md
-# keeps T8's live validation against bam read-only, and querying
-# omv-confdbadm was out of scope for that pass; only a live call against
-# a real OMV installation could prove this parses what the command
-# actually emits. `conf.service.compose` is documented, across the OMV
-# versions consulted while writing this, to carry the shared folder as a
-# reference (`sharedfolderref`, a UUID) resolved through a second lookup
-# (`conf.system.sharedfolder`) — the parsing below degrades to "unknown"
-# (return 1) on any shape it does not recognise, including the command
-# being entirely absent on a non-OMV host, rather than guessing. No
-# caller ever prefers this over an explicit structural "no" — it only
-# answers the empty-root case compose_root_looks_omv cannot.
+# omv-confdbadm requires root. Confirmed against a real OMV host: run
+# unprivileged it does not print a clean error, it emits a multi-line
+# Python traceback (ending in a config-database load failure) and exits
+# non-zero. This script always runs as root (checked at startup) so
+# that specific failure should not occur in practice, but the parsing
+# below treats it as a live threat rather than an assumption: the exit
+# status is captured explicitly (not folded into `cmd || return 1`, so
+# it is auditable at a glance) and checked before ANY extraction runs,
+# and the captured output must additionally look like the JSON this
+# command is documented to emit (starts with '{' or '[') before the
+# grep/sed pipeline below ever touches it. A traceback goes to stderr
+# (discarded here) so stdout is empty in that case regardless, and the
+# JSON-shape guard is the second, independent reason a traceback could
+# never be scraped for a UUID- or path-shaped substring even if it
+# somehow reached stdout — a loose parser could otherwise hand back a
+# Python library path out of the traceback's own file references as if
+# it were a real compose root.
+#
+# The SUCCESSFUL output shape (the `sharedfolderref` → `conf.system.
+# sharedfolder` UUID resolution below) is still NOT verified against a
+# real OMV host as part of this change — CLAUDE.md keeps T8's live
+# validation against bam read-only, and the read-only probe that did run
+# needs root to see a real answer, which the operator declined to hand
+# over interactively. `conf.service.compose` is documented, across the
+# OMV versions consulted while writing this, to carry the shared folder
+# as a reference (`sharedfolderref`, a UUID) resolved through a second
+# lookup (`conf.system.sharedfolder`) — this remains an assumption until
+# a real successful run confirms it. Any shape this does not recognise
+# degrades to "unknown" (return 1), never a guess. No caller ever
+# prefers this over an explicit structural "no" — it only answers the
+# empty-root case compose_root_looks_omv cannot.
 omv_confdbadm_compose_root() {
-  command -v omv-confdbadm >/dev/null 2>&1 || return 1
-  local cfg ref path
-  cfg="$(omv-confdbadm read conf.service.compose 2>/dev/null)" || return 1
-  [ -n "$cfg" ] || return 1
+  local bin cfg rc ref path
+  bin="$(omv_confdbadm_bin)"
+  [ -n "$bin" ] || return 1
+
+  cfg="$("$bin" read conf.service.compose 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
+  case "$cfg" in
+    '{'*) ;;
+    *) return 1 ;;
+  esac
   ref="$(printf '%s' "$cfg" | grep -o '"sharedfolderref"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
   [ -n "$ref" ] || return 1
-  path="$(omv-confdbadm read conf.system.sharedfolder 2>/dev/null \
+
+  cfg="$("$bin" read conf.system.sharedfolder 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
+  case "$cfg" in
+    '['*|'{'*) ;;
+    *) return 1 ;;
+  esac
+  path="$(printf '%s' "$cfg" \
     | grep -B2 "\"uuid\"[[:space:]]*:[[:space:]]*\"${ref}\"" \
     | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
   [ -n "$path" ] || return 1
