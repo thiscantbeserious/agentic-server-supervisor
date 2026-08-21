@@ -50,7 +50,15 @@ vm_boot() {
   shift 6
   args=(-name vm-e2e -m 2560 -smp 2 -accel "$accel" -cpu max
         -drive "file=$disk,if=virtio,format=qcow2"
-        -nic "user,hostfwd=tcp::${port}-:22"
+        # Named explicitly rather than "-nic user,hostfwd=...": that form
+        # lets qemu pick the NIC model, which depends on the machine type
+        # and qemu version rather than on what the guest actually has a
+        # driver for. genericcloud images are built expecting virtio-net;
+        # the host-side forward was proven listening and accepting
+        # connections while the guest never answered, "no working NIC
+        # driver" fits that exactly. Naming the device removes the guess.
+        -netdev "user,id=net0,hostfwd=tcp::${port}-:22"
+        -device virtio-net-pci,netdev=net0
         -serial "file:$seriallog" -monitor none -display none
         -daemonize -pidfile "$pidfile")
   if [ -n "$seed" ]; then
@@ -95,7 +103,7 @@ vm_dump_boot_diagnosis() {
   seriallog="$1" pidfile="$2" port="$3"
 
   vm_log "cloud-init datasource / network / user-creation lines:"
-  grep -iE 'cloud-init|datasource|ds-identify|useradd|authorized_keys|nocloud|dhcp|dhcp4|link becomes ready|eth0' "$seriallog" >&2 \
+  grep -iE 'cloud-init|datasource|ds-identify|useradd|authorized_keys|nocloud|dhcp|dhcp4|link becomes ready|eth0|console-netinfo' "$seriallog" >&2 \
     || vm_log "(none found, cloud-init may never have run at all)"
   vm_log "last 120 lines of $seriallog:"
   tail -n 120 "$seriallog" >&2 || true

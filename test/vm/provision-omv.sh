@@ -71,6 +71,27 @@ chmod 440 /etc/sudoers.d/90-e2e
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 systemctl restart ssh
 
+echo "== provision-omv: console network self-report on every future boot =="
+# This variant boots the already-provisioned image directly, no cloud-init
+# CD-ROM, so the runcmd equivalent in cloud-init-user-data.tmpl never runs
+# here. Baked in as a real systemd unit instead of leaving this variant
+# quietly less diagnosable: it costs one file and one enable, and runs on
+# every boot of every overlay built from this base, not only this one.
+cat > /etc/systemd/system/console-netinfo.service <<'UNIT'
+[Unit]
+Description=Report guest network state to the console for VM E2E diagnostics
+After=network.target
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+ExecStart=/bin/sh -c 'echo "=== console-netinfo ==="; ip -br addr; ss -ltn; echo "=== console-netinfo end ==="'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl enable console-netinfo.service
+
 echo "== provision-omv: recording expected versions for the cache-content assertion =="
 {
   dpkg-query -W -f='openmediavault ${Version}\n' openmediavault

@@ -15,3 +15,9 @@ growpart:
   devices: ["/"]
 runcmd:
   - [ systemctl, enable, --now, ssh ]
+  # Makes "no working NIC" a positive statement instead of an absence: an
+  # unreachable-VM diagnosis used to grep the console log for DHCP/link
+  # lines and had to treat finding none as merely suggestive, not every
+  # network stack logs to the console. This prints the guest's own view of
+  # its addresses and listening sockets unconditionally.
+  - [ sh, -c, "echo '=== console-netinfo ==='; ip -br addr; ss -ltn; echo '=== console-netinfo end ==='" ]
