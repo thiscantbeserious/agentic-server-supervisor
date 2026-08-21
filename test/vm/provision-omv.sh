@@ -40,12 +40,17 @@ echo "== provision-omv: ZFS =="
 # filesystem is cheapest to create. It also supplies the mounted filesystem
 # OMV needs before it will create a shared folder.
 #
-# The headers are named for the running kernel rather than the usual
-# linux-headers-amd64: genericcloud images run the "cloud" kernel flavour,
-# and the DKMS build silently has nothing to build against if the generic
-# headers are installed instead.
-apt-get install -y "linux-headers-$(uname -r)"
+# The matching headers are installed and booted into before this script
+# runs (build-omv-image.sh does it, and explains why it cannot happen
+# here). Checked rather than assumed: without them the DKMS build produces
+# no module, zpool create fails on a missing module, and the resulting
+# diagnosis points at ZFS rather than at the kernel it was built for.
+if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+  echo "provision-omv: no kernel headers for $(uname -r), ZFS cannot build a module" >&2
+  exit 1
+fi
 apt-get install -y openmediavault-zfs
+modprobe zfs
 
 # The pool sits on a file vdev inside the root filesystem rather than on a
 # second disk, because everything downstream of this script moves the image
