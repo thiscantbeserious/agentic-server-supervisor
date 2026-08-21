@@ -101,15 +101,30 @@ sfref="$(rpc "ShareMgmt" "set" "{\"uuid\":\"$NEW_UUID\",\"name\":\"compose\",\"r
 [ -n "$sfref" ] || { echo "provision-omv: ShareMgmt.set returned no uuid, no shared folder to hand the compose plugin" >&2; exit 1; }
 
 echo "== provision-omv: pointing the compose plugin at it =="
-# Compose.set validates the whole settings object, so the current settings
-# are read back and only sharedfolderref is changed. Writing a hand-built
-# object would either be rejected or silently reset every other setting.
+# Compose.set validates the whole settings object, so the settings are read
+# back and only sharedfolderref is changed. A hand-built object would reset
+# every setting it omitted.
+#
+# Compose.get returns more than Compose.set accepts, computed state like
+# dockerStatus among it, and the write is rejected outright for the first
+# such property rather than ignoring it. The accepted set is read from the
+# plugin's own RPC schema on the box instead of being listed here, so this
+# keeps working when the plugin gains or loses a setting.
 compose_settings="$(rpc "Compose" "get" '{}' | python3 -c '
 import json, sys
-d = json.load(sys.stdin)
-d["sharedfolderref"] = sys.argv[1]
-d.pop("files", None)
-json.dump(d, sys.stdout)
+
+schema = json.load(open("/usr/share/openmediavault/datamodels/rpc.compose.json"))
+for obj in (schema if isinstance(schema, list) else [schema]):
+    if obj.get("id") == "rpc.compose.set":
+        allowed = set(obj["params"]["properties"])
+        break
+else:
+    sys.exit("rpc.compose.set not found in the plugin datamodel")
+
+current = json.load(sys.stdin)
+out = {k: v for k, v in current.items() if k in allowed}
+out["sharedfolderref"] = sys.argv[1]
+json.dump(out, sys.stdout)
 ' "$sfref")"
 rpc "Compose" "set" "$compose_settings" >/dev/null
 
