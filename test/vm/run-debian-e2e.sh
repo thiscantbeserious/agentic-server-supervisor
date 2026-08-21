@@ -39,8 +39,8 @@ vm_boot "$WORKDIR/run.qcow2" "$WORKDIR/seed.iso" 2222 \
 trap 'vm_stop "$WORKDIR/qemu.pid"' EXIT
 
 if ! vm_wait_ssh 2222 "$WORKDIR/ssh/id_ed25519" e2e 240; then
-  vm_log "run-debian-e2e: VM never came up, serial console follows:"
-  tail -n 40 "$WORKDIR/serial.log" >&2 || true
+  vm_log "run-debian-e2e: VM never came up (or came up unreachable)"
+  vm_dump_boot_diagnosis "$WORKDIR/serial.log"
   exit 1
 fi
 

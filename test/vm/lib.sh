@@ -54,7 +54,15 @@ vm_boot() {
         -serial "file:$seriallog" -monitor none -display none
         -daemonize -pidfile "$pidfile")
   if [ -n "$seed" ]; then
-    args+=(-drive "file=$seed,if=virtio,format=raw")
+    # media=cdrom, not if=virtio: a NoCloud seed is conventionally a
+    # CD-ROM, and cloud images are built and tested against exactly that
+    # datasource path. A virtio block device carrying an ISO9660
+    # filesystem is something cloud-init CAN in principle recognise by
+    # volume label, but it is not the path genericcloud images are
+    # verified against, and got this VM a healthy, unreachable boot: no
+    # datasource claimed, no user created, no key installed, login prompt
+    # up, nobody able to answer it.
+    args+=(-drive "file=$seed,media=cdrom")
   fi
   # -daemonize forks to the background AFTER startup, it does not stop the
   # foreground qemu process from inheriting this shell's stdin in the
@@ -66,6 +74,21 @@ vm_boot() {
   # stdio; the stdin redirect below is a second, independent guard so a
   # future flag added here cannot silently reopen the same failure.
   qemu-system-x86_64 "${args[@]}" "$@" < /dev/null
+}
+
+# vm_dump_boot_diagnosis SERIALLOG: prints the part of the console log that
+# actually explains an unreachable-SSH failure. A plain tail of the end of
+# boot shows a healthy login prompt and nothing else, the login prompt is
+# not the failure, it is what a VM cloud-init never claimed still produces:
+# datasource detection happens early, well before the end of a 40-line
+# tail, and is where "seed attached but never recognised" (wrong media
+# type, wrong label) actually shows up.
+vm_dump_boot_diagnosis() {
+  seriallog="$1"
+  vm_log "cloud-init datasource / user-creation lines:"
+  grep -iE 'cloud-init|datasource|ds-identify|useradd|authorized_keys|nocloud' "$seriallog" >&2 || vm_log "(none found, cloud-init may never have run at all)"
+  vm_log "last 120 lines of $seriallog:"
+  tail -n 120 "$seriallog" >&2 || true
 }
 
 vm_stop() {
