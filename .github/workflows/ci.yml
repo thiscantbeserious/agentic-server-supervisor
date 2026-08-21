@@ -679,6 +679,33 @@ jobs:
   # `imagetools create` invocation is only visible after a push, not
   # before. Named here so nobody reads a green PR as having verified
   # manifest assembly.
+  # build-ok exists to give the ruleset one context name that reports in
+  # both directions. A matrix job reports per-combination names while it
+  # runs ("build (linux/amd64, amd64, ubuntu-24.04)"), but a SKIPPED matrix
+  # job reports once, under the bare job name, and never expands. Requiring
+  # the expanded names therefore left a documentation-only pull request
+  # waiting forever on two contexts that could not exist for it, while every
+  # non-matrix job in this file reported "skipped" and satisfied its own
+  # requirement normally.
+  #
+  # `if: always()` is what makes this run at all when build is skipped; the
+  # result is then inspected explicitly rather than inherited, so a real
+  # build failure still fails here and only a deliberate skip passes.
+  build-ok:
+    needs: build
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require build to have succeeded or been deliberately skipped
+        env:
+          RESULT: ${{ needs.build.result }}
+        run: |
+          echo "build result: $RESULT"
+          case "$RESULT" in
+            success|skipped) ;;
+            *) echo "build did not succeed, refusing to report this as a passing gate" >&2; exit 1 ;;
+          esac
+
   merge:
     # build alone is not enough: build only proves each architecture's
     # image builds and starts, not that C1-C13 pass or that the live
