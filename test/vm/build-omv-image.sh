@@ -54,6 +54,18 @@ for _ in $(seq 1 60); do
   kill -0 "$(cat "$WORKDIR/qemu.pid")" 2>/dev/null || break
   sleep 2
 done
+
+# The shutdown above is tolerated for failing, so on its own this loop just
+# ends after two minutes and the image below gets copied out from under a
+# still-running QEMU, with the guest's writes unflushed and its filesystem
+# never quiesced. That publishes as a success and the corruption only
+# surfaces later, in whatever boots the image. Refuse instead.
+if kill -0 "$(cat "$WORKDIR/qemu.pid")" 2>/dev/null; then
+  vm_log "build-omv-image: guest did not power off, refusing to publish an image copied from a live VM"
+  vm_dump_boot_diagnosis "$WORKDIR/serial.log" "$WORKDIR/qemu.pid" 2223 || true
+  exit 1
+fi
+
 trap - EXIT
 
 mv "$WORKDIR/debian-base.qcow2" "$OUT"
