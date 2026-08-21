@@ -252,7 +252,14 @@ jobs:
           AGY_URL_ARM64: ${{ vars.AGY_URL_ARM64 }}
           AGY_SHA512_ARM64: ${{ vars.AGY_SHA512_ARM64 }}
           SENTINEL_REAL_AGY: "1"
-        run: go test -tags container -v -timeout 25m ./test/...
+        # -parallel 4: every TestContainer_* now calls t.Parallel (see
+        # test/container_test.go's package comment). 4 matches this
+        # runner's own vCPU count; most of the wall clock here is
+        # containers waiting on I/O, not host CPU, but the 39 C12 cases
+        # each start a full Debian container with an apt-get install
+        # inside, so going well past the CPU count risks piling up
+        # memory and daemon contention instead of buying real overlap.
+        run: go test -tags container -parallel 4 -v -timeout 25m ./test/...
 
   # Built per architecture, on a runner native to it, and pushed by
   # digest rather than by tag, no tag exists yet for a single-arch

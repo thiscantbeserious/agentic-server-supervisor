@@ -3,7 +3,17 @@
 // Package test holds the container smoke assertions for the sentinel
 // image (contracts/runtime.md R8, table C1-C13). Run with:
 //
-//	go test -tags container ./test/...
+//	go test -tags container -parallel 4 ./test/...
+//
+// Every TestContainer_* calls t.Parallel: most of a case's wall time is
+// spent waiting on a container to start or a package to install, not on
+// host CPU, so running them concurrently is a straight win. -parallel
+// caps how many run at once (default: GOMAXPROCS); pass it explicitly
+// rather than trusting the default, since the heaviest third of this
+// suite (the C12 stack cases) each start a full Debian container with
+// an apt-get install inside, and enough of those running at once will
+// exhaust host memory before it exhausts CPU. CI's container job sets
+// -parallel 4 to match its runner's vCPU count.
 //
 // Every case prints PASS/FAIL/SKIP explicitly (R8: "a SKIP is explicit,
 // never a silent pass"). These tests shell out to `docker` (a Podman shim
@@ -66,9 +76,10 @@ import (
 var arch = runtime.GOARCH
 
 // imageTag is the image this process builds and every test in it reuses
-// (sync.Once via requireImage). Tests in this file are never
-// t.Parallel (grep confirms none are), so this and arch being plain
-// package vars is safe.
+// (sync.Once via requireImage). Every TestContainer_* below calls
+// t.Parallel, but arch and imageTag stay safe as plain package vars:
+// both are written once, before any test body runs, and read-only
+// afterwards, so concurrent tests only ever read them.
 var imageTag = "sentinel:container-test-" + arch
 
 // logPass logs a "PASS ..." line only when nothing in this test has
@@ -202,7 +213,14 @@ func syntheticAgy(t *testing.T) (url, sha string) {
 	// its job; the sidecar file is purely an artifact of building this
 	// FIXTURE on macOS and has nothing to do with the real vendor
 	// tarball, so it belongs suppressed here, not tolerated there.
-	t.Setenv("COPYFILE_DISABLE", "1")
+	//
+	// os.Setenv, not t.Setenv: this runs inside fakeAgyMu's
+	// once-only critical section, but the winning caller could be any
+	// one of many parallel tests, and t.Setenv panics on a test that
+	// has called t.Parallel. The value is harmless left set for the
+	// rest of the process (it only affects tar on macOS), so a plain,
+	// permanent os.Setenv sidesteps the restriction entirely.
+	os.Setenv("COPYFILE_DISABLE", "1")
 	if out, errOut, code := runCmd(t, 30*time.Second, "tar", "-czf", tarPath, "-C", dir, "not-agy"); code != 0 {
 		t.Fatalf("tar: %s %s", out, errOut)
 	}
@@ -421,6 +439,7 @@ var realAgyValues = map[string]struct{ url, sha512, version string }{
 }
 
 func TestContainer_RealAgyBuild(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("SENTINEL_REAL_AGY") != "1" {
 		t.Skip("SKIP: SENTINEL_REAL_AGY != 1, set it to build the image against the REAL agy tarballs over the network (~53-56MB download each, ~200MB extracted each)")
 	}
@@ -518,6 +537,7 @@ func TestContainer_RealAgyBuild(t *testing.T) {
 // --- C1: container starts unprivileged ---
 
 func TestContainer_C1_StartsUnprivileged(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "--entrypoint", "id", imageTag, "-u")
 	if code != 0 || strings.TrimSpace(out) != "10001" {
@@ -596,6 +616,7 @@ func hostPathExists(t *testing.T, hostPath string) bool {
 // read-only) so a bind that lost its `:ro` in compose is actually
 // caught here.
 func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	selinux := selinuxEnforcingOnDockerHost(t)
 
@@ -696,6 +717,7 @@ func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 // exercised even without real journal content. SKIPs loudly, never
 // silently, when neither path is set up on this host (C9).
 func TestContainer_C2_JournalViaGroupAdd(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	if gid, ok := hostSystemdJournalGID(t); ok {
 		selinux := selinuxEnforcingOnDockerHost(t)
@@ -792,6 +814,7 @@ func selinuxEnforcingOnDockerHost(t *testing.T) bool {
 
 // --- C4: sensors -j ---
 func TestContainer_C4_SensorsJSON(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	// sensors reads the container's OWN /sys (there is no CLI flag to
 	// point it at an arbitrary root), which under Docker/Podman is
@@ -850,6 +873,7 @@ func keysOf(m map[string]any) []string {
 
 // --- C5: rasdaemon path listable ---
 func TestContainer_C5_RasdaemonListable(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	if _, err := os.Stat("/var/lib/rasdaemon"); err != nil {
 		t.Skip("SKIP C5: rasdaemon not present on this test host")
@@ -865,6 +889,7 @@ func TestContainer_C5_RasdaemonListable(t *testing.T) {
 
 // --- C7: ZED events under -t zed (0 hits is a pass) ---
 func TestContainer_C7_ZedUnderJournalctl(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	dir := t.TempDir()
 	_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
@@ -878,6 +903,7 @@ func TestContainer_C7_ZedUnderJournalctl(t *testing.T) {
 
 // --- C8: smartd decode (no NVMe -> SKIP) ---
 func TestContainer_C8_SmartdDecode(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	dir := t.TempDir()
 	_, errOut, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
@@ -892,6 +918,7 @@ func TestContainer_C8_SmartdDecode(t *testing.T) {
 // --- C6: tmpfs/DNS ok under read_only ---
 
 func TestContainer_C6_TmpfsAndTZ(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	out, _, code := runCmd(t, 15*time.Second, dockerBin(), "run", "--rm",
 		"--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
@@ -909,6 +936,7 @@ func TestContainer_C6_TmpfsAndTZ(t *testing.T) {
 // --- C9: sentinel tick exit codes ---
 
 func TestContainer_C9_TickExitCodes(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	stateDir := t.TempDir()
 	// state.New(cfg) creates active-alerts/history/outbox under
@@ -1006,6 +1034,7 @@ func sentinelServiceBlock(t *testing.T, text string) string {
 }
 
 func TestContainer_C10_ComposeConfig(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	deployDir := filepath.Join(root, "deploy")
 
@@ -1154,6 +1183,7 @@ func reclaimHostDir(t *testing.T, hostDir string) {
 }
 
 func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
+	t.Parallel()
 	requireImage(t)
 	stateDir := t.TempDir()
 	reclaimHostDir(t, stateDir)
@@ -1233,6 +1263,7 @@ func TestContainer_C11_SIGTERMShutdown(t *testing.T) {
 // --- C12: install.sh idempotency ---
 
 func TestContainer_C12_InstallHostIdempotent(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	// A throwaway Debian container with apt-get + systemd, network access
 	// for real package installs, is what "throwaway rootfs" means here,
@@ -1506,6 +1537,7 @@ func startC12ContainerFrom(t *testing.T, name, base string) {
 // writing to it, so the assertion is as blunt as the requirement: exit
 // 78, and nothing anywhere on the host changes.
 func TestContainer_C12_StackNoTTYRefusesToGuess(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-notty-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -1536,6 +1568,7 @@ func TestContainer_C12_StackNoTTYRefusesToGuess(t *testing.T) {
 // treat it as already set. A second run must not re-do the work it
 // already completed, and must still refuse for the same reason.
 func TestContainer_C12_StackNoTTYPartialProgress(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-partial-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -1593,6 +1626,7 @@ func TestContainer_C12_StackNoTTYPartialProgress(t *testing.T) {
 // structural, not a hardcoded string. --dry-run is used throughout:
 // this asserts the DECISION, not the write, and needs no secrets.
 func TestContainer_C12_StackLayoutDetection(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-layout-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -1727,6 +1761,7 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 // and a same-basename target that resolves to a DIFFERENT directory,
 // which the check exists to reject.
 func TestContainer_C12_StackLayoutDetectionSymlinkTargetShapes(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-layout-symlink-shapes-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -1802,6 +1837,7 @@ func TestContainer_C12_StackLayoutDetectionSymlinkTargetShapes(t *testing.T) {
 // the wiring, not the real command's output shape, which was not
 // available to verify against a live host for this change.
 func TestContainer_C12_StackLayoutConfigFallback(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-layout-cfgfallback-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -1872,6 +1908,7 @@ chmod +x /usr/local/bin/omv-confdbadm`
 // bare substring match, so a differently-named directory cannot satisfy
 // them by accident either.
 func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-candidates-ambiguous-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2000,6 +2037,7 @@ func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
 // before OMV detection existed at all, with no ambiguity language and
 // no candidate list (there is nothing to list).
 func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-candidates-none-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2061,6 +2099,7 @@ chmod +x /usr/local/bin/docker`, lsBody, lsExit)
 // what gets proposed, and the proposal names WHY: how many compose projects
 // docker already found there.
 func TestContainer_C12_DockerSignalPrimaryDetectsRunningProjects(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-signal-primary-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2095,6 +2134,7 @@ func TestContainer_C12_DockerSignalPrimaryDetectsRunningProjects(t *testing.T) {
 // None of these may block the run or introduce a new failure mode, each
 // must fall through exactly as if docker were entirely absent.
 func TestContainer_C12_DockerSignalDegradesQuietly(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-signal-degrade-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2135,6 +2175,7 @@ func TestContainer_C12_DockerSignalDegradesQuietly(t *testing.T) {
 // there, "a project whose working directory no longer exists" is named
 // explicitly in R5 as a normal case, not an error.
 func TestContainer_C12_DockerSignalIgnoresGoneWorkingDir(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-signal-gone-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2168,6 +2209,7 @@ func TestContainer_C12_DockerSignalIgnoresGoneWorkingDir(t *testing.T) {
 // provenance is what the operator should see, not the structural
 // scan's stack count.
 func TestContainer_C12_DockerSignalDedupAndOutranksStructural(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-signal-dedup-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2210,6 +2252,7 @@ func TestContainer_C12_DockerSignalDedupAndOutranksStructural(t *testing.T) {
 // so the choice between them means something rather than being a quiz
 // of bare paths.
 func TestContainer_C12_ProvenanceShownInAmbiguousMenu(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-provenance-menu-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2252,6 +2295,7 @@ func TestContainer_C12_ProvenanceShownInAmbiguousMenu(t *testing.T) {
 // never lets a non-JSON stdout past the shape guard even when the exit
 // status alone would not have caught it.
 func TestContainer_C12_OmvConfdbadmFailsUgly(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-confdbadm-ugly-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2345,6 +2389,7 @@ SystemExit: Failed to load the configuration database` +
 // test covers. Both calls' exit status must be checked independently;
 // reviewer flagged this as unverified after 61e6eba.
 func TestContainer_C12_OmvConfdbadmSecondCallFailureChecked(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-confdbadm-secondcall-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2393,6 +2438,7 @@ fi
 // exists to handle, and the shape the original line-adjacency grep
 // could not have matched at all.
 func TestContainer_C12_OmvConfdbadmRealisticPrettyPrintedJSON(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-confdbadm-prettyprint-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2450,6 +2496,7 @@ fi
 // rather than leaving the fresh-install zero-stacks case permanently
 // broken by a formatting detail this script never actually depends on.
 func TestContainer_C12_OmvConfdbadmLeadingWhitespace(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-confdbadm-leadingws-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2489,6 +2536,7 @@ fi
 // wording, which is reachable via render_managed_block returning
 // "changed" identically for --dry-run and a real write.
 func TestContainer_C12_DryRunVerbAudit(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-verbaudit-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2583,6 +2631,7 @@ EOF`)
 // ..."; the summary lines that roll those up must say the same, not
 // reuse the same wording a real run uses for something it actually did.
 func TestContainer_C12_StackDryRunSummaryHonest(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-dryrun-summary-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2621,6 +2670,7 @@ func TestContainer_C12_StackDryRunSummaryHonest(t *testing.T) {
 // stack directory resolved, no compose file fetched, no prompting.
 // Every prior caller of this script keeps working unmodified.
 func TestContainer_C12_StackEnvFileBackCompat(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-backcompat-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2646,6 +2696,7 @@ func TestContainer_C12_StackEnvFileBackCompat(t *testing.T) {
 // silently picking one over the other would surprise whichever caller
 // lost.
 func TestContainer_C12_StackMutualExclusion(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -2685,6 +2736,7 @@ func TestContainer_C12_StackMutualExclusion(t *testing.T) {
 // original bug depended on plus the ones most likely to reveal a
 // sibling bug in the same substitution mechanism.
 func TestContainer_C12_MailriseConfHostileSecrets(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-hostile-secrets-test"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -2778,6 +2830,7 @@ ENVEOF`, stackDir, stackDir, token, chat, c.pass)
 // the file's sha256 stops changing, the R5 idempotency contract's
 // "second run reports changed=0" half is exactly what that masks.
 func TestContainer_C12_MsmtprcHostileSecrets(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -2874,6 +2927,7 @@ chmod +x /root/repo/install.sh`
 // switch to the hostile password and install again, the block now
 // exists AND differs, which is the only way to reach the rewrite.
 func TestContainer_C12_MsmtprcHostileSecretsBlockRewrite(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -2970,6 +3024,7 @@ chmod +x /root/repo/install.sh`
 // child's stdin exactly as `curl | bash` would, decoupled from the
 // terminal `read -rs`/`read -r` reads from at /dev/tty.
 func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-interactive-test"
 	// This test's subject is step0b_secrets' prompting, not package
 	// installation, starting from the package-bearing base keeps
@@ -3055,6 +3110,7 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 // notification and, once mailrise.conf's bind-mount target is missing,
 // crash-loops mailrise outright.
 func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-emptytoken-test"
 	// Same reasoning as TestContainer_C12_StackInteractiveSecrets: this
 	// test's subject is the empty-answer fail-closed behavior, not
@@ -3120,6 +3176,7 @@ func shellQuote(s string) string {
 // an identical sha256, collapsing is a one-time fixup, not a repeated
 // rewrite.
 func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-dup-test"
 	// This test's subject is the collapse-on-duplicate-blocks logic,
 	// not package installation: starting from the package-bearing base
@@ -3222,6 +3279,7 @@ DEFAULT -a -o on -S on -T permissive -R 5! -R 197! -U 198+ -W 0,0,0 -n standby,q
 // line: a test that only checked the note text would not catch a write
 // that happened anyway alongside a note claiming it didn't.
 func TestContainer_C12_SmartdOMVManagedSkipsWrite(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-omv-smartd"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -3259,6 +3317,7 @@ cat > /etc/smartd.conf <<'SMARTD_EOF'
 // not currently generate that file -- the check is cheap insurance
 // against the day it does.
 func TestContainer_C12_ZedOMVManagedSkipsWrite(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-omv-zed"
 	startC12Container(t, name)
 	exec_ := func(script string) (string, string, int) {
@@ -3299,6 +3358,7 @@ cat > /etc/zfs/zed.d/zed.rc <<'ZED_EOF'
 // only reads the note text cannot tell "correctly declined" apart from
 // "wrote the file anyway and declined to say so".
 func TestContainer_C12_MonitoringPromptDeclineLeavesFileUntouched(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-prompt-no"
 	// This test's subject is the prompt, not package installation: starting
 	// from the package-bearing base keeps a step1 apt-get out of its budget.
@@ -3338,6 +3398,7 @@ printf '# pre-existing operator file, not ours\n' > /etc/smartd.conf`
 // block and restart smartd, proving the gate does not just always say
 // no.
 func TestContainer_C12_MonitoringPromptConfirmWritesFile(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-prompt-yes"
 	// This test's subject is the prompt, not package installation: starting
 	// from the package-bearing base keeps a step1 apt-get out of its budget.
@@ -3381,6 +3442,7 @@ printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test
 // from --env-file, permanent until a human edits .env, never 75's
 // "safe to re-run").
 func TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -3591,6 +3653,7 @@ func TestContainer_C12_NoExistingMTAInstallsMsmtpMta(t *testing.T) {
 // nowhere in a fresh debian:trixie-slim's /etc/passwd) and asserts
 // JOURNAL_GID still lands.
 func TestContainer_C12_EnvOwnerUnmappedUID(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -3644,6 +3707,7 @@ chmod +x /root/repo/install.sh
 // file the script writes, asserting the stub actually received an
 // authenticated delivery, not that install.sh exited 0.
 func TestContainer_C12_MsmtpDelivery(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
 	if code != 0 {
@@ -3777,6 +3841,7 @@ func c12AppriseExec(t *testing.T, name, script string) (string, string, int) {
 // visibly refuse to claim success, so the run summary can never read as
 // "the stack is ready" when it cannot start.
 func TestContainer_C12_DockerPreflightMissingIsWarningNotFatal(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-missing"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
@@ -3802,6 +3867,7 @@ func TestContainer_C12_DockerPreflightMissingIsWarningNotFatal(t *testing.T) {
 // this be distinguished from "docker not found" rather than folded into
 // one generic message.
 func TestContainer_C12_DockerPreflightLegacyComposeOnly(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-docker-legacy"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass")
 
@@ -3867,6 +3933,7 @@ chmod +x /usr/local/bin/systemctl`
 // never appear anywhere in the run's combined output, the same secret
 // discipline the mailrise.conf/msmtprc paths already carry.
 func TestContainer_C12_AppriseSeedRegistersAndRedactsToken(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-apprise-ok"
 	const token = "SECRETTOK1REDACTME"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN="+token+"\nTELEGRAM_CHAT_ID=555")
@@ -3912,6 +3979,7 @@ chmod +x /usr/local/bin/curl`
 // install.sh must report this as a failure, never as success, or the
 // operator is told notifications work when they silently do not.
 func TestContainer_C12_AppriseSeed204IsFailure(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-apprise-204"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
@@ -3965,6 +4033,7 @@ chmod +x /usr/local/bin/curl`
 // guard correctly declined to run", the exact failure shape this
 // project's tests have produced before.
 func TestContainer_C12_AppriseSeedDryRunNoNetworkCall(t *testing.T) {
+	t.Parallel()
 	name := "sentinel-c12-apprise-dryrun"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
@@ -4093,6 +4162,7 @@ func (s *smtpAuthStub) handle(conn net.Conn) {
 // --- C13: workflow lint + metadata shape ---
 
 func TestContainer_C13_WorkflowShape(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	wf := filepath.Join(root, ".github", "workflows", "ci.yml")
 	data, err := os.ReadFile(wf)
