@@ -131,6 +131,37 @@ vm_stop() {
   kill -9 "$pid" 2>/dev/null || true
 }
 
+# vm_on_exit_keyauth WORKDIR PORT KEY USER: the EXIT trap body shared by the
+# two key-authenticated callers (run-debian-e2e.sh, build-omv-image.sh).
+# Diagnostics used to run only on the explicit "VM never came up" branch,
+# so a failure anywhere later (install.sh itself, an assertion after SSH
+# was already up) left every diagnostic silent, exactly the case that hid
+# both this bug and, before it, the exit-64 usage error. An EXIT trap
+# covers every path out of the script, not one branch of it, code $?
+# must be read as this function's first statement, it is the exit status
+# that triggered the trap and is gone the instant anything else runs.
+vm_on_exit_keyauth() {
+  code=$?
+  workdir="$1" port="$2" key="$3" user="$4"
+  if [ "$code" -ne 0 ]; then
+    vm_log "run failed (exit $code), dumping diagnostics"
+    vm_dump_boot_diagnosis "$workdir/serial.log" "$workdir/qemu.pid" "$port"
+    vm_log "host side: one real ssh attempt, verbose, stderr not swallowed"
+    ssh -v -i "$key" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes "$user@127.0.0.1" true 2>&1 | tail -n 30 >&2 || true
+  fi
+  vm_stop "$workdir/qemu.pid"
+}
+
+# vm_install_exit_trap WORKDIR PORT KEY USER: registers vm_on_exit_keyauth
+# for the whole rest of the script. Values are expanded now, not deferred
+# to when the trap fires, since this function's own locals ($workdir etc.)
+# do not exist any more by then.
+vm_install_exit_trap() {
+  # shellcheck disable=SC2064
+  trap "vm_on_exit_keyauth '$1' '$2' '$3' '$4'" EXIT
+}
+
 # vm_wait_ssh PORT KEY USER TIMEOUT_S
 vm_wait_ssh() {
   port="$1" key="$2" user="$3" timeout="${4:-240}"
@@ -224,8 +255,20 @@ vm_run_install_checks() {
   vm_dpkg_snapshot "$port" "$key" "$user" > "$before"
 
   vm_log "install.sh run 1: sudo bash ./install.sh $install_args"
-  out1="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"
-  code1=$?
+  # `out1="$(cmd)"; code1=$?` looks right but is not, under `set -e` (every
+  # caller of this function has it) the assignment itself is the simple
+  # command `-e` checks: a nonzero exit from the substitution ends the
+  # script on that line, before `code1=$?` or the printf below it ever
+  # run. install.sh's exit-64 usage error was captured correctly (2>&1 is
+  # inside the remote command, ssh's own stdout has it) and then never
+  # printed, look identical to output being lost. `if var=$(cmd); then...`
+  # is exempt from -e (a command tested by `if` never triggers it), so the
+  # exit code and the captured text both survive to be reported.
+  if out1="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"; then
+    code1=0
+  else
+    code1=$?
+  fi
   printf '%s\n' "$out1"
   if [ "$code1" -ne 0 ]; then
     vm_log "FAIL: install.sh run 1 exit $code1, want 0 (this is the headline assertion these jobs exist for)"
@@ -236,8 +279,11 @@ vm_run_install_checks() {
   vm_assert_no_removed "$before" "$after" || return 1
 
   vm_log "install.sh run 2 (idempotency): expect changed=0"
-  out2="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"
-  code2=$?
+  if out2="$(vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' 2>&1")"; then
+    code2=0
+  else
+    code2=$?
+  fi
   printf '%s\n' "$out2"
   if [ "$code2" -ne 0 ]; then
     vm_log "FAIL: install.sh run 2 exit $code2, want 0"
@@ -249,8 +295,11 @@ vm_run_install_checks() {
   fi
 
   vm_log "install.sh --check after convergence: expect exit 0"
-  vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' --check"
-  code3=$?
+  if vm_ssh "$port" "$key" "$user" "cd '$repo' && sudo bash ./install.sh $install_args --env-file '$repo/.env' --check"; then
+    code3=0
+  else
+    code3=$?
+  fi
   if [ "$code3" -ne 0 ]; then
     vm_log "FAIL: install.sh --check exit $code3, want 0"
     return 1

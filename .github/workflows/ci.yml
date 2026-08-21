@@ -383,8 +383,20 @@ jobs:
           docker build -t "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}" /tmp/omv-image-ctx
           docker push "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"
 
+  # push-only, same as vm-omv-image, and for a cost reason rather than a
+  # permissions one: this job pulls read-only and is safe to run on a
+  # pull_request, but a pull_request never has a warm image to pull (that
+  # job never runs there), so every PR would build the entire OMV image
+  # locally, the single most expensive path either variant has, on every
+  # push to the PR branch. Letting it run and silently skip when nothing
+  # is published was the other option and was rejected: a job that
+  # quietly does nothing on missing input is the exact failure shape this
+  # whole pair of jobs exists to rule out (see the top of this file's
+  # comment on that). Push-only is a fixed, visible trigger scope, not a
+  # runtime skip, so it stays honest about what does and does not run.
   vm-e2e-omv:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -422,7 +434,7 @@ jobs:
             docker cp omv-base-extract:/base.qcow2 /tmp/omv-base.qcow2
             docker rm omv-base-extract
           else
-            echo "vm-e2e-omv: cache MISS, ${{ steps.tag.outputs.tag }} not published yet (first run on this content, or a pull_request that changed the provisioning script). Building locally for THIS run only; this job holds no publish permission, so the shared cache is warmed by the next push to main via vm-omv-image, not by this job."
+            echo "vm-e2e-omv: cache MISS, ${{ steps.tag.outputs.tag }} not published yet (first push on this content). Building locally for THIS run only; this job holds no publish permission, so the shared cache is warmed by vm-omv-image running alongside it on this same push, not by this job."
             sudo apt-get install -y --no-install-recommends qemu-system-x86
             bash test/vm/build-omv-image.sh /tmp/omv-base.qcow2 /tmp/vm-work-omv-build
           fi

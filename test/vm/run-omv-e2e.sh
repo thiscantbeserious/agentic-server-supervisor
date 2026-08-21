@@ -28,7 +28,25 @@ vm_gen_ssh_key "$WORKDIR/ssh"
 qemu-img create -f qcow2 -b "$BASE_QCOW2" -F qcow2 "$WORKDIR/run.qcow2"
 
 vm_boot "$WORKDIR/run.qcow2" "" 2224 "$WORKDIR/qemu.pid" "$WORKDIR/serial.log" "$accel"
-trap 'vm_stop "$WORKDIR/qemu.pid"' EXIT
+
+# Covers every exit path, not just the wait-for-ssh timeout below: an
+# install.sh (or assertion) failure discovered well after SSH came up
+# used to leave every diagnostic silent, only the wait-timeout branch
+# ever called one. Not lib.sh's vm_on_exit_keyauth: this variant
+# authenticates with sshpass against a throwaway password account, no
+# key, see the comment below for why.
+vm_on_exit_omv() {
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    vm_log "run failed (exit $code), dumping diagnostics"
+    vm_dump_boot_diagnosis "$WORKDIR/serial.log" "$WORKDIR/qemu.pid" 2224
+    vm_log "host side: one real ssh attempt, verbose, stderr not swallowed"
+    sshpass -p e2e ssh -v -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 e2e@127.0.0.1 true 2>&1 | tail -n 30 >&2 || true
+  fi
+  vm_stop "$WORKDIR/qemu.pid"
+}
+trap vm_on_exit_omv EXIT
 
 # No cloud-init CD-ROM here: the SSH key is already the one baked into the
 # base image at build time (build-omv-image.sh provisions with the SAME
@@ -52,10 +70,6 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 if [ "$up" != 1 ]; then
   vm_log "run-omv-e2e: VM never came up (or came up unreachable)"
-  vm_dump_boot_diagnosis "$WORKDIR/serial.log" "$WORKDIR/qemu.pid" 2224
-  vm_log "host side: one real ssh attempt, verbose, stderr not swallowed"
-  sshpass -p e2e ssh -v -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=10 e2e@127.0.0.1 true 2>&1 | tail -n 30 >&2 || true
   exit 1
 fi
 ssh_pw() { sshpass -p e2e ssh -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 e2e@127.0.0.1 "$@"; }
@@ -79,7 +93,13 @@ scp_pw_repo
 ssh_pw "chmod +x /home/e2e/repo/install.sh"
 
 vm_log "run-omv-e2e: compose-root auto-detection against the real OMV layout"
-detect_out="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --dry-run 2>&1")"
+# `--dry-run` is expected to exit 0, but "expected" is not "guaranteed",
+# and under `set -e` an `out="$(cmd)"` assignment that fails aborts the
+# script on that line, before printf ever runs, exactly the bug that hid
+# install.sh's own exit-64 usage output earlier. `|| true` keeps the
+# captured text regardless of exit status; the grep right below is the
+# actual assertion, not this command's exit code.
+detect_out="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --dry-run 2>&1")" || true
 printf '%s\n' "$detect_out"
 if ! printf '%s\n' "$detect_out" | grep -q 'layout: omv'; then
   vm_log "FAIL: install.sh did not detect the real OMV compose layout (absolute compose.yml symlink from openmediavault-compose), this is the sharpest defect this job exists to catch"
@@ -98,22 +118,37 @@ vm_run_install_checks_over_pw() {
   before="$(mktemp)"; after="$(mktemp)"
   ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$before"
 
-  out1="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"
-  code1=$?
+  # Same `set -e` trap as lib.sh's vm_run_install_checks (this function
+  # exists only because that one needs key-based ssh, not because the
+  # bug is different): `out="$(cmd)"; code=$?` under `set -e` never
+  # reaches the `code=$?` line on a nonzero exit, the assignment itself
+  # is what -e checks. `if out=$(cmd); then code=0; else code=$?; fi` is
+  # exempt.
+  if out1="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"; then
+    code1=0
+  else
+    code1=$?
+  fi
   printf '%s\n' "$out1"
   [ "$code1" -eq 0 ] || { vm_log "FAIL: install.sh run 1 exit $code1, want 0"; return 1; }
 
   ssh_pw "dpkg-query -W -f='\${Package} \${Version}\n'" | sort > "$after"
   vm_assert_no_removed "$before" "$after" || return 1
 
-  out2="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"
-  code2=$?
+  if out2="$(ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env 2>&1")"; then
+    code2=0
+  else
+    code2=$?
+  fi
   printf '%s\n' "$out2"
   [ "$code2" -eq 0 ] || { vm_log "FAIL: install.sh run 2 exit $code2, want 0"; return 1; }
   printf '%s\n' "$out2" | grep -q 'changed=0' || { vm_log "FAIL: run 2 did not converge to changed=0"; return 1; }
 
-  ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env --check"
-  code3=$?
+  if ssh_pw "cd /home/e2e/repo && sudo bash ./install.sh --env-file /home/e2e/repo/.env --check"; then
+    code3=0
+  else
+    code3=$?
+  fi
   [ "$code3" -eq 0 ] || { vm_log "FAIL: install.sh --check exit $code3, want 0"; return 1; }
 }
 vm_write_env_file_pw() {
