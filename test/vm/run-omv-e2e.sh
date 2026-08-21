@@ -52,7 +52,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 if [ "$up" != 1 ]; then
   vm_log "run-omv-e2e: VM never came up (or came up unreachable)"
-  vm_dump_boot_diagnosis "$WORKDIR/serial.log"
+  vm_dump_boot_diagnosis "$WORKDIR/serial.log" "$WORKDIR/qemu.pid" 2224
+  vm_log "host side: one real ssh attempt, verbose, stderr not swallowed"
+  sshpass -p e2e ssh -v -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 e2e@127.0.0.1 true 2>&1 | tail -n 30 >&2 || true
   exit 1
 fi
 ssh_pw() { sshpass -p e2e ssh -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 e2e@127.0.0.1 "$@"; }

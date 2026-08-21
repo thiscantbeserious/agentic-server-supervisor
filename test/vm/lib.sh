@@ -76,19 +76,39 @@ vm_boot() {
   qemu-system-x86_64 "${args[@]}" "$@" < /dev/null
 }
 
-# vm_dump_boot_diagnosis SERIALLOG: prints the part of the console log that
-# actually explains an unreachable-SSH failure. A plain tail of the end of
-# boot shows a healthy login prompt and nothing else, the login prompt is
-# not the failure, it is what a VM cloud-init never claimed still produces:
-# datasource detection happens early, well before the end of a 40-line
-# tail, and is where "seed attached but never recognised" (wrong media
-# type, wrong label) actually shows up.
+# vm_dump_boot_diagnosis SERIALLOG PIDFILE PORT: prints the host+guest
+# state of an unreachable-SSH failure, everything that does NOT depend on
+# which auth method the caller uses (the actual ssh attempt is the
+# caller's own one line, key-based for most callers, sshpass for the OMV
+# variant's password account, see run-omv-e2e.sh).
+#
+# The guest half: a plain tail of the end of boot shows a healthy login
+# prompt and nothing else, the login prompt is not the failure, datasource
+# detection and DHCP happen early, well before the end of a short tail.
+# The host half (added after a run where the guest side was already
+# proven healthy, cloud-init claimed the datasource, created the user,
+# started sshd, yet SSH still never connected): whether qemu is even
+# still running, and whether the forwarded port is listening on the host
+# at all, "nothing listening" and "listening but refusing" are different
+# bugs the caller's own ssh attempt distinguishes right after this.
 vm_dump_boot_diagnosis() {
-  seriallog="$1"
-  vm_log "cloud-init datasource / user-creation lines:"
-  grep -iE 'cloud-init|datasource|ds-identify|useradd|authorized_keys|nocloud' "$seriallog" >&2 || vm_log "(none found, cloud-init may never have run at all)"
+  seriallog="$1" pidfile="$2" port="$3"
+
+  vm_log "cloud-init datasource / network / user-creation lines:"
+  grep -iE 'cloud-init|datasource|ds-identify|useradd|authorized_keys|nocloud|dhcp|dhcp4|link becomes ready|eth0' "$seriallog" >&2 \
+    || vm_log "(none found, cloud-init may never have run at all)"
   vm_log "last 120 lines of $seriallog:"
   tail -n 120 "$seriallog" >&2 || true
+
+  vm_log "host side: qemu process"
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    vm_log "qemu (pid $(cat "$pidfile")) is still running"
+  else
+    vm_log "qemu is NOT running, it exited before the wait gave up"
+  fi
+
+  vm_log "host side: is anything listening on 127.0.0.1:$port"
+  ss -ltnp 2>/dev/null | grep -E "[:.]$port\b" >&2 || vm_log "(nothing listening on port $port)"
 }
 
 vm_stop() {

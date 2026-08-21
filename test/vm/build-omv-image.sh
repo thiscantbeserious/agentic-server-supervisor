@@ -38,7 +38,10 @@ trap 'vm_stop "$WORKDIR/qemu.pid"' EXIT
 
 if ! vm_wait_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e 240; then
   vm_log "build-omv-image: VM never came up (or came up unreachable)"
-  vm_dump_boot_diagnosis "$WORKDIR/serial.log"
+  vm_dump_boot_diagnosis "$WORKDIR/serial.log" "$WORKDIR/qemu.pid" 2223
+  vm_log "host side: one real ssh attempt, verbose, stderr not swallowed"
+  ssh -v -i "$WORKDIR/ssh/id_ed25519" -p 2223 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 -o BatchMode=yes e2e@127.0.0.1 true 2>&1 | tail -n 30 >&2 || true
   exit 1
 fi
 
