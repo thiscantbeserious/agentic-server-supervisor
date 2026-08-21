@@ -1713,6 +1713,87 @@ func TestContainer_C12_StackLayoutDetection(t *testing.T) {
 	logPass(t, "PASS C12 (stack layout: omv detected structurally, not by hardcoded path, symlinks resolved, detected root itself refused)")
 }
 
+// TestContainer_C12_StackLayoutDetectionSymlinkTargetShapes: a real
+// OpenMediaVault host writes compose.yml as an ABSOLUTE symlink, not
+// the relative one every other fixture in this file uses:
+//
+//	lrwxrwxrwx 1 root root 57 compose.yml -> /docker-compose/restic-rest-server/restic-rest-server.yml
+//
+// compose_root_looks_omv's original equality check
+// (readlink(compose.yml) == "name.yml") only ever matched a bare
+// relative target, so it silently found nothing on a real host and
+// fell back to the plain default. Covers the four shapes the fix must
+// tell apart: plain relative, absolute (the real one), dotted relative,
+// and a same-basename target that resolves to a DIFFERENT directory,
+// which the check exists to reject.
+func TestContainer_C12_StackLayoutDetectionSymlinkTargetShapes(t *testing.T) {
+	name := "sentinel-c12-layout-symlink-shapes-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	checkOMV := func(label, root, linkCmd string) {
+		exec_("mkdir -p " + root + "/existingstack && " +
+			"printf 'services: {}\\n' > " + root + "/existingstack/existingstack.yml && " +
+			linkCmd)
+		out, _, code := exec_("/work/install.sh --dry-run --stack-dir " + root + "/sentinel 2>&1")
+		if code != 0 {
+			t.Fatalf("FAIL C12 (symlink shapes, %s): --dry-run exit=%d: %s", label, code, out)
+		}
+		if !strings.Contains(out, "layout: omv") {
+			t.Errorf("FAIL C12 (symlink shapes, %s): expected omv layout, got: %s", label, out)
+		}
+	}
+
+	// Plain relative target, "name.yml": the shape every other fixture
+	// in this file already uses, kept here so all four shapes are
+	// asserted in one place.
+	checkOMV("relative",
+		"/srv/dev-disk-by-uuid-relative/docker-compose",
+		"ln -sfn existingstack.yml /srv/dev-disk-by-uuid-relative/docker-compose/existingstack/compose.yml")
+
+	// Absolute target, matching a real OMV host's own output exactly.
+	// This is the shape that was broken: readlink returns the full
+	// path, which never equals the bare "name.yml" the old check
+	// compared against.
+	checkOMV("absolute",
+		"/srv/dev-disk-by-uuid-absolute/docker-compose",
+		"ln -sfn /srv/dev-disk-by-uuid-absolute/docker-compose/existingstack/existingstack.yml "+
+			"/srv/dev-disk-by-uuid-absolute/docker-compose/existingstack/compose.yml")
+
+	// Dotted relative target, "./name.yml": still relative, but not
+	// byte-identical to the bare "name.yml" the old check compared
+	// against either.
+	checkOMV("dotted relative",
+		"/srv/dev-disk-by-uuid-dotted/docker-compose",
+		"ln -sfn ./existingstack.yml /srv/dev-disk-by-uuid-dotted/docker-compose/existingstack/compose.yml")
+
+	// Same basename, wrong directory: compose.yml points at a file
+	// named existingstack.yml, but in an entirely different directory
+	// than the one it lives in. A real existingstack.yml also exists
+	// right next to it, so only the resolved-directory comparison can
+	// catch this, not the "does <base>.yml exist here" check alone.
+	// This is the case the whole detector exists to exclude, and the
+	// fix must not accept it just because it now compares basenames.
+	const wrongDirRoot = "/srv/dev-disk-by-uuid-wrongdir/docker-compose"
+	const elsewhere = "/srv/dev-disk-by-uuid-wrongdir/elsewhere"
+	exec_("mkdir -p " + wrongDirRoot + "/existingstack && " +
+		"printf 'services: {}\\n' > " + wrongDirRoot + "/existingstack/existingstack.yml && " +
+		"mkdir -p " + elsewhere + " && " +
+		"printf 'services: {}\\n' > " + elsewhere + "/existingstack.yml && " +
+		"ln -sfn " + elsewhere + "/existingstack.yml " + wrongDirRoot + "/existingstack/compose.yml")
+	outWrong, _, codeWrong := exec_("/work/install.sh --dry-run --stack-dir " + wrongDirRoot + "/sentinel 2>&1")
+	if codeWrong != 0 {
+		t.Fatalf("FAIL C12 (symlink shapes, wrong directory): --dry-run exit=%d: %s", codeWrong, outWrong)
+	}
+	if !strings.Contains(outWrong, "layout: plain") {
+		t.Errorf("FAIL C12 (symlink shapes, wrong directory): a compose.yml pointing at a same-named file in a different directory must not be treated as an OMV stack, got: %s", outWrong)
+	}
+
+	logPass(t, "PASS C12 (symlink shapes: relative, absolute and dotted targets all detected, cross-directory target rejected)")
+}
+
 // TestContainer_C12_StackLayoutConfigFallback: a freshly enabled OMV
 // compose plugin with zero stacks created yet has nothing on disk for
 // structural detection to pattern-match — the empty-root case R5 calls
@@ -1931,6 +2012,13 @@ func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
 	}
 	if !strings.Contains(out, "stack directory: /opt/sentinel") {
 		t.Errorf("FAIL C12 (stack dir candidates none): expected the conventional /opt/sentinel default with nothing OMV-shaped present, got: %s", out)
+	}
+	// Zero candidates must say so, not fall to the plain default
+	// silently: that reads as a deliberate choice instead of "the
+	// scan searched and found nothing", the exact ambiguity the
+	// 1-candidate and 2+-candidate branches already report on stderr.
+	if !strings.Contains(out, "no OpenMediaVault compose root detected") {
+		t.Errorf("FAIL C12 (stack dir candidates none): zero detected candidates must be reported, not silently defaulted: %s", out)
 	}
 	for _, mustNotAppear := range []string{"ambiguous", "multiple possible", "detected a possible"} {
 		if strings.Contains(out, mustNotAppear) {

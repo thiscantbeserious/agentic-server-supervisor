@@ -693,44 +693,59 @@ invoking_home() {
   printf '%s' "$HOME"
 }
 
-# compose_root_looks_omv DIR — true if DIR is laid out the way OMV's
-# compose plugin lays a shared-folder root out: at least one
+# compose_root_looks_omv DIR: true if DIR is laid out the way OMV's
+# compose plugin lays a shared-folder root out, at least one
 # subdirectory holding "<name>.yml" with a "compose.yml" symlink
 # pointing at it, the shape every OMV-created stack has regardless of
 # which shared folder the operator picked for the plugin. This is the
 # PRIMARY signal (over asking OMV itself, below): it tests the property
-# that actually matters — "is this directory laid out the way OMV lays a
-# compose root out" — rather than a path OMV happens to default to on
-# this one host, and it still works when --stack-dir names a compose
+# that actually matters, whether this directory is laid out the way OMV
+# lays a compose root out, rather than a path OMV happens to default to
+# on this one host, and it still works when --stack-dir names a compose
 # root this script would never have guessed. The trade-off it accepts:
 # a root with zero stacks created yet has nothing to pattern-match, so
-# this returns false for it — omv_confdbadm_compose_root below is what
+# this returns false for it; omv_confdbadm_compose_root below is what
 # that specific case falls back to.
+#
+# The symlink check compares RESOLVED paths (readlink -f on both the
+# link and its own directory), never the raw readlink() target: a real
+# OMV host writes compose.yml as an ABSOLUTE symlink
+# ("compose.yml -> /docker-compose/name/name.yml"), confirmed against a
+# real host, not the bare relative name ("compose.yml -> name.yml") an
+# earlier version of this check assumed and every test fixture up to
+# that point happened to use. Comparing basename(target) to "<name>.yml"
+# alone would accept a same-named file in a different directory, which
+# is exactly what this check exists to rule out, so the target's
+# resolved directory must also match DIR's own resolved path.
 compose_root_looks_omv() {
-  local root="$1" d base
+  local root="$1" d base target target_dir canon_d
   [ -d "$root" ] || return 1
   # Capped at 200 entries via `find ... | head`, which stops reading the
   # directory (SIGPIPE, once head has its 200 lines) rather than
   # scanning it in full. A bash glob ("$root"/*/) cannot do this: glob
   # expansion enumerates and sorts EVERY entry before the loop below
   # could even start, so a `break` inside the loop body only bounds the
-  # cheap part — the expensive part (stat'ing every child of a wide
+  # cheap part, the expensive part (stat'ing every child of a wide
   # share) would already be done. Measured: 255ms warm/overlayfs for a
   # 23,019-entry directory with the unbounded glob; on a large,
   # cold-cache pool this is what turns the FIRST thing an operator ever
   # runs into a multi-second stall on an ordinary wide share
   # (Downloads, Backup) that was never an OMV compose root to begin
   # with. A real OMV compose root is recognisable from a handful of
-  # children, so 200 is generous headroom, not a tight fit — not
+  # children, so 200 is generous headroom, not a tight fit, not
   # exhaustive (a root whose first 200 entries are all non-stack
   # clutter would be missed), the same "not exhaustive" trade-off the
   # whole candidate scan already documents, one level deeper.
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     base="$(basename "$d")"
-    if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ] \
-       && [ "$(readlink "${d}/compose.yml")" = "${base}.yml" ]; then
-      return 0
+    if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ]; then
+      target="$(readlink -f "${d}/compose.yml" 2>/dev/null)"
+      canon_d="$(readlink -f "$d" 2>/dev/null)"
+      if [ -n "$target" ] && [ "$(basename "$target")" = "${base}.yml" ]; then
+        target_dir="$(dirname "$target")"
+        [ "$target_dir" = "$canon_d" ] && return 0
+      fi
     fi
   done < <(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 200)
   return 1
@@ -1010,6 +1025,13 @@ resolve_stack_dir() {
   fi
 
   if [ "$count" -eq 0 ]; then
+    # The 1-candidate and 2+-candidate branches below both say so on
+    # stderr before proposing anything; this branch used to fall
+    # through to the plain default silently, which reads exactly like
+    # a deliberate choice instead of "the scan found nothing". Reported
+    # unconditionally, same as those branches, not only under
+    # --check/--dry-run: a real run benefits from the same visibility.
+    echo "$PROG: no OpenMediaVault compose root detected, using the conventional default" >&2
     resolve_stack_dir_prompt "/opt/sentinel" ""
     return
   fi
