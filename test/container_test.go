@@ -1908,7 +1908,7 @@ func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
 	if !strings.Contains(outDry, "  1) "+rootUUID) || !strings.Contains(outDry, "  2) "+rootOpt) {
 		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run menu numbering not as expected (1=%s, 2=%s): %s", rootUUID, rootOpt, outDry)
 	}
-	if !strings.Contains(outDry, "2 possible OMV compose roots") {
+	if !strings.Contains(outDry, "2 possible compose roots") {
 		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run does not report the candidate count: %s", outDry)
 	}
 	if !strings.Contains(outDry, "ambiguous") && !strings.Contains(outDry, "multiple possible") {
@@ -2017,7 +2017,7 @@ func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
 	// silently: that reads as a deliberate choice instead of "the
 	// scan searched and found nothing", the exact ambiguity the
 	// 1-candidate and 2+-candidate branches already report on stderr.
-	if !strings.Contains(out, "no OpenMediaVault compose root detected") {
+	if !strings.Contains(out, "no compose root detected") {
 		t.Errorf("FAIL C12 (stack dir candidates none): zero detected candidates must be reported, not silently defaulted: %s", out)
 	}
 	for _, mustNotAppear := range []string{"ambiguous", "multiple possible", "detected a possible"} {
@@ -2026,6 +2026,218 @@ func TestContainer_C12_StackDirCandidatesNone(t *testing.T) {
 		}
 	}
 	logPass(t, "PASS C12 (stack dir candidates none: conventional default, no phantom detection)")
+}
+
+// dockerComposeLsStub installs a fake /usr/local/bin/docker that reports
+// `docker info` and `docker compose version` as ready (so docker_preflight's
+// own DOCKER_OK/COMPOSE_OK never confound what these tests are actually
+// checking — the separate `docker compose ls --all --format json` primary
+// detection signal) and answers `docker compose ls --all --format json` with
+// exactly `lsBody`, exiting `lsExit`. Letting each test control the ls output
+// verbatim is what lets the "malformed"/"empty"/"daemon rejects the command"
+// cases below be expressed as plain fixture data instead of new stub logic
+// each time.
+func dockerComposeLsStub(lsBody string, lsExit int) string {
+	return fmt.Sprintf(`cat > /usr/local/bin/docker <<'DOCKEREOF'
+#!/bin/sh
+if [ "$1" = "info" ]; then exit 0; fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi
+if [ "$1" = "compose" ] && [ "$2" = "ls" ]; then
+  cat <<'JSONEOF'
+%s
+JSONEOF
+  exit %d
+fi
+exit 1
+DOCKEREOF
+chmod +x /usr/local/bin/docker`, lsBody, lsExit)
+}
+
+// TestContainer_C12_DockerSignalPrimaryDetectsRunningProjects: the PRIMARY
+// signal (R5) — `docker compose ls --all --format json` reporting existing
+// projects — must be enough on its own to detect a compose root, with no
+// OMV-style structural shape and no omv-confdbadm anywhere in the picture.
+// The candidate's PARENT directory (not either project's own directory) is
+// what gets proposed, and the proposal names WHY: how many compose projects
+// docker already found there.
+func TestContainer_C12_DockerSignalPrimaryDetectsRunningProjects(t *testing.T) {
+	name := "sentinel-c12-docker-signal-primary-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	exec_("mkdir -p /opt/dockerstacks/proj1 /opt/dockerstacks/proj2")
+	lsBody := `[{"Name":"proj1","Status":"running(1)","ConfigFiles":"/opt/dockerstacks/proj1/proj1.yml"},` +
+		`{"Name":"proj2","Status":"running(1)","ConfigFiles":"/opt/dockerstacks/proj2/proj2.yml"}]`
+	if out, errOut, code := exec_(dockerComposeLsStub(lsBody, 0)); code != 0 {
+		t.Fatalf("FAIL C12 (docker signal primary): could not install docker stub: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (docker signal primary): --dry-run exit=%d: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "stack directory: /opt/dockerstacks/sentinel") {
+		t.Errorf("FAIL C12 (docker signal primary): expected the projects' PARENT directory to be proposed as the stack root, got: %s", out)
+	}
+	if !strings.Contains(out, "detected a possible compose root at /opt/dockerstacks (2 compose projects already here)") {
+		t.Errorf("FAIL C12 (docker signal primary): expected the docker-count provenance in the proposal, got: %s", out)
+	}
+	logPass(t, "PASS C12 (docker signal primary: two running projects propose their shared parent, with provenance)")
+}
+
+// TestContainer_C12_DockerSignalDegradesQuietly covers every shape R5
+// requires the docker signal to treat as normal, not as an error: output
+// that is not the documented JSON shape at all, a syntactically valid but
+// empty project list, and the command itself failing (an unreachable
+// daemon or an unsupported `compose ls` both look like this from here).
+// None of these may block the run or introduce a new failure mode — each
+// must fall through exactly as if docker were entirely absent.
+func TestContainer_C12_DockerSignalDegradesQuietly(t *testing.T) {
+	name := "sentinel-c12-docker-signal-degrade-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	cases := []struct {
+		name   string
+		lsBody string
+		lsExit int
+	}{
+		{"not JSON at all", "Cannot connect to the Docker daemon", 0},
+		{"empty project list", "[]", 0},
+		{"compose ls itself fails", `[{"Name":"x"}]`, 1},
+	}
+	for _, c := range cases {
+		if out, errOut, code := exec_(dockerComposeLsStub(c.lsBody, c.lsExit)); code != 0 {
+			t.Fatalf("FAIL C12 (docker signal degrades quietly, %s): could not install docker stub: %s %s", c.name, out, errOut)
+		}
+		out, errOut, code := exec_("/work/install.sh --dry-run 2>&1")
+		if code != 0 {
+			t.Fatalf("FAIL C12 (docker signal degrades quietly, %s): --dry-run exit=%d, want 0 (must degrade, never fail): %s %s", c.name, code, out, errOut)
+		}
+		if !strings.Contains(out, "no compose root detected, using the conventional default") {
+			t.Errorf("FAIL C12 (docker signal degrades quietly, %s): expected the zero-candidate fallback with nothing else on the host to detect, got: %s", c.name, out)
+		}
+		if !strings.Contains(out, "stack directory: /opt/sentinel") {
+			t.Errorf("FAIL C12 (docker signal degrades quietly, %s): expected the conventional default, got: %s", c.name, out)
+		}
+	}
+	logPass(t, "PASS C12 (docker signal degrades quietly: malformed output, empty list, and a failing command are all normal, never errors)")
+}
+
+// TestContainer_C12_DockerSignalIgnoresGoneWorkingDir: a project docker
+// still lists whose compose-file directory no longer exists on disk (the
+// project was removed by hand, or lives on an unmounted volume) must be
+// skipped, not surfaced as a candidate pointing at a directory that isn't
+// there — "a project whose working directory no longer exists" is named
+// explicitly in R5 as a normal case, not an error.
+func TestContainer_C12_DockerSignalIgnoresGoneWorkingDir(t *testing.T) {
+	name := "sentinel-c12-docker-signal-gone-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// /opt/ghostproj is deliberately never created.
+	lsBody := `[{"Name":"ghost","Status":"running(1)","ConfigFiles":"/opt/ghostproj/ghost.yml"}]`
+	if out, errOut, code := exec_(dockerComposeLsStub(lsBody, 0)); code != 0 {
+		t.Fatalf("FAIL C12 (docker signal gone working dir): could not install docker stub: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (docker signal gone working dir): --dry-run exit=%d: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "no compose root detected, using the conventional default") {
+		t.Errorf("FAIL C12 (docker signal gone working dir): a project pointing at a nonexistent directory must not produce a candidate: %s", out)
+	}
+	if strings.Contains(out, "ghostproj") {
+		t.Errorf("FAIL C12 (docker signal gone working dir): the nonexistent project directory leaked into the output: %s", out)
+	}
+	logPass(t, "PASS C12 (docker signal ignores a project whose working directory is gone)")
+}
+
+// TestContainer_C12_DockerSignalDedupAndOutranksStructural: when the SAME
+// resolved root is found by both the docker signal and the structural
+// scan, R5 requires ONE candidate, not two, and the higher-priority
+// signal's reason — docker is primary precisely because it is a fact
+// about the host rather than an inference from directory shape, so its
+// provenance is what the operator should see, not the structural
+// scan's stack count.
+func TestContainer_C12_DockerSignalDedupAndOutranksStructural(t *testing.T) {
+	name := "sentinel-c12-docker-signal-dedup-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	const root = "/opt/manualroot"
+	exec_("mkdir -p " + root + "/existingstack && " +
+		"printf 'services: {}\\n' > " + root + "/existingstack/existingstack.yml && " +
+		"ln -sfn existingstack.yml " + root + "/existingstack/compose.yml && " +
+		"mkdir -p " + root + "/dockerproj")
+	lsBody := `[{"Name":"dockerproj","Status":"running(1)","ConfigFiles":"` + root + `/dockerproj/dockerproj.yml"}]`
+	if out, errOut, code := exec_(dockerComposeLsStub(lsBody, 0)); code != 0 {
+		t.Fatalf("FAIL C12 (docker signal dedup): could not install docker stub: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (docker signal dedup): --dry-run exit=%d: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "detected a possible compose root at "+root+" (1 compose project already here)") {
+		t.Errorf("FAIL C12 (docker signal dedup): expected the single deduped candidate with docker's provenance, got: %s", out)
+	}
+	if strings.Contains(out, "existing OMV-style stack") {
+		t.Errorf("FAIL C12 (docker signal dedup): the lower-priority structural reason must not appear once docker already found this root: %s", out)
+	}
+	if strings.Contains(out, "ambiguous") || strings.Contains(out, "multiple possible") {
+		t.Errorf("FAIL C12 (docker signal dedup): the same root found by two signals must collapse to ONE candidate, not read as ambiguous: %s", out)
+	}
+	if !strings.Contains(out, "stack directory: "+root+"/sentinel") {
+		t.Errorf("FAIL C12 (docker signal dedup): expected %s/sentinel to be proposed, got: %s", root, out)
+	}
+	logPass(t, "PASS C12 (docker signal dedup: one candidate, docker's provenance wins over the structural scan's)")
+}
+
+// TestContainer_C12_ProvenanceShownInAmbiguousMenu: with two DISTINCT
+// roots — one found only by docker, one found only by the structural
+// scan — the ambiguous-choice menu must show both, numbered in signal
+// priority order (docker first), each with the reason that produced it
+// so the choice between them means something rather than being a quiz
+// of bare paths.
+func TestContainer_C12_ProvenanceShownInAmbiguousMenu(t *testing.T) {
+	name := "sentinel-c12-provenance-menu-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	const dockerRoot = "/opt/dockeronly"
+	const structuralRoot = "/srv/dev-disk-by-uuid-provtest/docker-compose"
+	exec_("mkdir -p " + dockerRoot + "/proj")
+	exec_("mkdir -p " + structuralRoot + "/existingstack && " +
+		"printf 'services: {}\\n' > " + structuralRoot + "/existingstack/existingstack.yml && " +
+		"ln -sfn existingstack.yml " + structuralRoot + "/existingstack/compose.yml")
+	lsBody := `[{"Name":"proj","Status":"running(1)","ConfigFiles":"` + dockerRoot + `/proj/proj.yml"}]`
+	if out, errOut, code := exec_(dockerComposeLsStub(lsBody, 0)); code != 0 {
+		t.Fatalf("FAIL C12 (provenance in ambiguous menu): could not install docker stub: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (provenance in ambiguous menu): --dry-run exit=%d: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "  1) "+dockerRoot+" (1 compose project already here)") {
+		t.Errorf("FAIL C12 (provenance in ambiguous menu): expected the docker-found root listed first with its reason, got: %s", out)
+	}
+	if !strings.Contains(out, "  2) "+structuralRoot+" (1 existing OMV-style stack found here)") {
+		t.Errorf("FAIL C12 (provenance in ambiguous menu): expected the structurally-found root listed second with its reason, got: %s", out)
+	}
+	logPass(t, "PASS C12 (provenance in ambiguous menu: both candidates shown, docker first, each with why it was proposed)")
 }
 
 // TestContainer_C12_OmvConfdbadmFailsUgly: confirmed against the real

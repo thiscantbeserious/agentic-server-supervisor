@@ -54,7 +54,7 @@ usage: $PROG [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT]
   --stack-dir PATH        create/use the compose stack here — fetches docker-compose.yml
                           and mailrise.conf from this script's own repo, prompts for the
                           bot token/chat id/mailrise password if missing (default:
-                          detected — an OpenMediaVault compose root's own "<name>/sentinel"
+                          detected — a detected compose root's own "<name>/sentinel"
                           if exactly one is found on this host, /opt/sentinel if none are;
                           several candidates are never picked silently — a numbered menu
                           asks which one, or type a path of your own; offered
@@ -922,19 +922,129 @@ count_existing_stacks() {
   printf '%d' "$n"
 }
 
-# detect_omv_compose_root_candidates — every directory that plausibly IS
-# an OMV compose root, one per line, deduplicated by resolved path.
-# Deliberately a LIST rather than a single "best" answer: a host can
-# have more than one directory matching the shape (a leftover from a
-# migrated install, a second data disk with its own shared folder), and
-# picking one silently is the same guess-on-the-operator's-behalf this
-# whole detection redesign exists to eliminate. Combines both signals —
-# structural matches among candidate_compose_roots, PLUS
-# omv_confdbadm_compose_root's answer even when it names a root with
-# zero stacks in it yet (the one case structural detection cannot see
-# at all) — rather than preferring one signal over the other.
-detect_omv_compose_root_candidates() {
-  local d resolved cfg seen=""
+# docker_compose_project_roots — PRIMARY signal: asks Docker itself
+# where compose-managed stacks actually live, rather than inferring it
+# from directory shape. `docker compose ls --all --format json` reports
+# every known project together with the compose file(s) that back it,
+# a fact about this host that holds regardless of naming convention,
+# symlink spelling, or platform — it works on any Docker host, not only
+# an OpenMediaVault one, which is why it outranks the two signals below.
+# It is also the only signal that finds a stack created by hand outside
+# OMV's own compose plugin.
+#
+# Returns "<root>\t<reason>" lines, one per distinct PARENT directory of
+# a project's compose-file directory — the parent is the candidate
+# compose ROOT, the same granularity the structural and omv-confdbadm
+# signals already return, since a root holds one subdirectory per
+# project.
+#
+# The exact JSON shape below (a flat array of objects with a
+# "ConfigFiles" field, comma-joined when a project uses more than one
+# compose file) is what `docker compose ls --format json` is documented
+# to emit, but it has NOT been confirmed against a real daemon — the
+# account on the target host is not in the docker group and interactive
+# sudo access was declined (CLAUDE.md keeps that host read-only). Every
+# step below treats a shape it does not recognise as "no candidates
+# from this signal", never as an error: a missing docker CLI, an
+# unreachable daemon, an unsupported `compose ls`, a project whose
+# working directory no longer exists, and a host with zero compose
+# projects are all ordinary, not failures, and none of them may block
+# the omv-confdbadm/structural signals that run after this one.
+docker_compose_project_roots() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local raw rc
+  raw="$(docker compose ls --all --format json 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$raw" ] || return 0
+  # $() strips only trailing newlines; leading whitespace is trimmed
+  # explicitly before the shape guard, same defensive reasoning as
+  # omv_confdbadm_compose_root's identical trim above.
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  case "$raw" in
+    '['*) ;;
+    *) return 0 ;;
+  esac
+
+  local flat obj cfg first dir resolved root roots=""
+  flat="$(printf '%s' "$raw" | tr '\n' ' ')"
+  while IFS= read -r obj; do
+    [ -n "$obj" ] || continue
+    cfg="$(printf '%s' "$obj" | grep -o '"ConfigFiles"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
+    [ -n "$cfg" ] || continue
+    first="${cfg%%,*}"
+    [ -n "$first" ] || continue
+    dir="$(dirname "$first")"
+    [ -d "$dir" ] || continue
+    resolved="$(readlink -f "$dir" 2>/dev/null)"
+    [ -n "$resolved" ] || continue
+    root="$(dirname "$resolved")"
+    [ -d "$root" ] || continue
+    root="$(readlink -f "$root" 2>/dev/null)"
+    [ -n "$root" ] || continue
+    roots="${roots}${root}
+"
+  done < <(printf '%s' "$flat" | grep -o "{[^{}]*}")
+  [ -n "$roots" ] || return 0
+
+  local seen="" n
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case " $seen " in
+      *" $root "*) continue ;;
+    esac
+    seen="$seen $root"
+    n="$(printf '%s\n' "$roots" | grep -Fxc "$root")"
+    if [ "$n" -eq 1 ]; then
+      printf '%s\t1 compose project already here\n' "$root"
+    else
+      printf '%s\t%s compose projects already here\n' "$root" "$n"
+    fi
+  done <<ROOTS
+$roots
+ROOTS
+}
+
+# detect_compose_root_candidates — every directory that plausibly holds
+# (or should hold) the sentinel compose stack, one "<root>\t<reason>"
+# line per distinct resolved path. Deliberately a LIST rather than a
+# single "best" answer: a host can have more than one directory
+# matching some signal (a leftover from a migrated install, a second
+# shared folder), and picking one silently is the same
+# guess-on-the-operator's-behalf this detection design exists to
+# eliminate. Combines three signals, in priority order — a candidate
+# found by more than one signal keeps the highest-priority signal's
+# reason, since that is the most concrete thing known about it:
+#
+#   1. docker_compose_project_roots (above) — a fact about the running
+#      host, independent of platform.
+#   2. omv_confdbadm_compose_root — the one signal that can see an
+#      OpenMediaVault compose root with zero stacks in it yet.
+#   3. compose_root_looks_omv over candidate_compose_roots — the bounded
+#      structural scan, which also only ever finds a root with at least
+#      one stack already in it.
+detect_compose_root_candidates() {
+  local root reason resolved cfg d n seen=""
+
+  while IFS=$'\t' read -r root reason; do
+    [ -n "$root" ] || continue
+    case " $seen " in
+      *" $root "*) continue ;;
+    esac
+    seen="$seen $root"
+    printf '%s\t%s\n' "$root" "$reason"
+  done < <(docker_compose_project_roots)
+
+  if cfg="$(omv_confdbadm_compose_root)" && [ -n "$cfg" ] && [ -d "$cfg" ]; then
+    resolved="$(readlink -f "$cfg")"
+    case " $seen " in
+      *" $resolved "*) ;;
+      *)
+        seen="$seen $resolved"
+        printf '%s\tOpenMediaVault reports this as its compose folder\n' "$resolved"
+        ;;
+    esac
+  fi
+
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     if compose_root_looks_omv "$d"; then
@@ -943,20 +1053,18 @@ detect_omv_compose_root_candidates() {
         *" $resolved "*) ;;
         *)
           seen="$seen $resolved"
-          printf '%s\n' "$resolved"
+          n="$(count_existing_stacks "$resolved")"
+          if [ "$n" -eq 1 ]; then
+            printf '%s\t1 existing OMV-style stack found here\n' "$resolved"
+          else
+            printf '%s\t%s existing OMV-style stacks found here\n' "$resolved" "$n"
+          fi
           ;;
       esac
     fi
   done <<CANDIDATES
 $(candidate_compose_roots)
 CANDIDATES
-  if cfg="$(omv_confdbadm_compose_root)" && [ -n "$cfg" ] && [ -d "$cfg" ]; then
-    resolved="$(readlink -f "$cfg")"
-    case " $seen " in
-      *" $resolved "*) ;;
-      *) printf '%s\n' "$resolved" ;;
-    esac
-  fi
 }
 
 # detect_layout inspects STACK_DIR's PARENT itself, never how STACK_DIR
@@ -1018,8 +1126,8 @@ resolve_stack_dir() {
   if [ -n "$STACK_DIR" ]; then
     return
   fi
-  local candidates count=0 c
-  candidates="$(detect_omv_compose_root_candidates)"
+  local candidates count=0 path reason
+  candidates="$(detect_compose_root_candidates)"
   if [ -n "$candidates" ]; then
     count="$(printf '%s\n' "$candidates" | grep -c .)"
   fi
@@ -1031,26 +1139,30 @@ resolve_stack_dir() {
     # a deliberate choice instead of "the scan found nothing". Reported
     # unconditionally, same as those branches, not only under
     # --check/--dry-run: a real run benefits from the same visibility.
-    echo "$PROG: no OpenMediaVault compose root detected, using the conventional default" >&2
+    echo "$PROG: no compose root detected, using the conventional default" >&2
     resolve_stack_dir_prompt "/opt/sentinel" ""
     return
   fi
 
   if [ "$count" -eq 1 ]; then
-    echo "$PROG: detected a possible OpenMediaVault compose root at $candidates" >&2
-    resolve_stack_dir_prompt "${candidates}/sentinel" ""
+    path="$(printf '%s' "$candidates" | cut -f1)"
+    reason="$(printf '%s' "$candidates" | cut -f2-)"
+    echo "$PROG: detected a possible compose root at $path ($reason)" >&2
+    resolve_stack_dir_prompt "${path}/sentinel" ""
     return
   fi
 
-  # 2+ candidates: never guessed. Listed with enough context (path, how
-  # many existing stacks) that a choice between them means something,
-  # and flagged as possibly incomplete — the scan is bounded (see
-  # candidate_compose_roots) and a custom location can still be missed.
-  echo "$PROG: multiple possible OpenMediaVault compose roots found — refusing to guess which one you meant:" >&2
+  # 2+ candidates: never guessed. Listed with enough context (path, and
+  # WHY it was proposed — which signal found it, not just how many
+  # existing stacks it holds) that a choice between them means
+  # something, and flagged as possibly incomplete — the scan is bounded
+  # (see candidate_compose_roots) and a custom location can still be
+  # missed.
+  echo "$PROG: multiple possible compose roots found — refusing to guess which one you meant:" >&2
   local i=1 selected=""
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    echo "  $i) $c ($(count_existing_stacks "$c") existing stack(s))" >&2
+  while IFS=$'\t' read -r path reason; do
+    [ -n "$path" ] || continue
+    echo "  $i) $path ($reason)" >&2
     i=$((i+1))
   done <<CANDS
 $candidates
@@ -1058,7 +1170,7 @@ CANDS
   echo "  (this list is not guaranteed exhaustive — pass --stack-dir directly if yours is not shown)" >&2
 
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    note "stack directory: ambiguous — $count possible OMV compose roots found (see stderr for the list); pass --stack-dir to choose"
+    note "stack directory: ambiguous — $count possible compose roots found (see stderr for the list); pass --stack-dir to choose"
     changed=$((changed+1))
     STACK_UNRESOLVED=1
     return
@@ -1074,7 +1186,7 @@ CANDS
         ;;
       *)
         if [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
-          selected="$(printf '%s\n' "$candidates" | sed -n "${choice}p")/sentinel"
+          selected="$(printf '%s\n' "$candidates" | sed -n "${choice}p" | cut -f1)/sentinel"
         fi
         ;;
     esac
