@@ -42,24 +42,30 @@ echo "== provision-omv: OMV compose plugin =="
 apt-get install -y openmediavault-compose
 
 echo "== provision-omv: materialising a real compose stack =="
-# omv-confdbadm writes the compose service into OMV's config database;
-# omv-salt deploy is what OMV itself runs on every config change (the same
-# path the web UI triggers) and is what actually creates the on-disk
-# directory, the "<name>.yml" file and the "compose.yml" symlink pointing
-# at it with an ABSOLUTE target. Command shape taken from OMV's own salt
-# state files for the compose plugin; UNVERIFIED against a real install,
-# flagged the same as the install URL above.
-mkdir -p /sharedfolders/compose-e2e
-cat > /sharedfolders/compose-e2e/e2e-probe.yml <<'YAML'
-services:
-  probe:
-    image: busybox
-    command: ["true"]
-YAML
-omv-confdbadm create --uuid conf.service.compose.file \
-  --data "{\"name\":\"e2e-probe\",\"path\":\"/sharedfolders/compose-e2e/e2e-probe.yml\",\"enable\":true}" \
-  || echo "provision-omv: WARN, omv-confdbadm compose registration failed, compose-root assertion may find no stack" >&2
-omv-salt deploy run compose 2>&1 || echo "provision-omv: WARN, omv-salt deploy failed" >&2
+# The plugin has no "path" property and omv-confdbadm create takes an id and
+# nothing else, so the previous invocation here could never have worked. The
+# real model, from the plugin's datamodel and its 10compose.sls: a file is a
+# named body in the config database, and salt derives the on-disk layout as
+#   <shared folder>/<name>/<name>.yml
+#   <shared folder>/<name>/compose.yml -> <shared folder>/<name>/<name>.yml
+# with an ABSOLUTE target, which is the layout this whole VM variant exists
+# to reproduce. createsymlinks defaults to 1, so the symlink needs no setting.
+#
+# Every one of those states is wrapped in "if sharedfolderref is set", so
+# without a shared folder the deploy runs, reports success and creates no
+# stack at all. That prerequisite needs a filesystem registered in OMV's
+# database, which this single-disk VM does not have, so the registration is
+# attempted and its absence reported precisely rather than as a vague warning.
+compose_sfref="$(omv-rpc -u admin "Compose" "get" '{}' 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sharedfolderref",""))' 2>/dev/null || true)"
+
+if [ -z "$compose_sfref" ]; then
+  echo "provision-omv: WARN, the compose plugin has no shared folder, so OMV creates no stack directory and no compose.yml symlink. The compose-root assertion has nothing real to find in this image." >&2
+else
+  omv-rpc -u admin "Compose" "setFile" '{"name":"e2e-probe","description":"compose-root detection probe","body":"services:\n  probe:\n    image: busybox\n    command: [\"true\"]\n","showenv":false,"env":"","showoverride":false,"override":""}' \
+    || echo "provision-omv: WARN, Compose.setFile failed, no stack registered" >&2
+  omv-salt deploy run compose 2>&1 || echo "provision-omv: WARN, omv-salt deploy failed" >&2
+fi
 
 echo "== provision-omv: throwaway login for the test-time job =="
 # The base image is built once (this script) and reused, key-based, by
@@ -73,6 +79,17 @@ echo "== provision-omv: throwaway login for the test-time job =="
 useradd -m -s /bin/bash e2e || true
 echo 'e2e:e2e' | chpasswd
 usermod -aG sudo e2e
+# OpenMediaVault replaces /etc/ssh/sshd_config with its own template, which
+# carries an unconditional "AllowGroups root _ssh". Membership in sudo is
+# irrelevant to that list, so every new login for this account is refused
+# before any key or password is examined, reported as the misleading
+# "Permission denied (publickey,password)". It goes unnoticed during
+# provisioning because this whole script runs inside one session opened
+# before OMV was installed; the first connection to meet the new config is
+# the shutdown that ends the build, which then hangs until the job timeout.
+# A drop-in cannot fix this: OMV places its Include of sshd_config.d last,
+# where the already-set value wins.
+usermod -aG _ssh e2e
 echo 'e2e ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-e2e
 chmod 440 /etc/sudoers.d/90-e2e
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
