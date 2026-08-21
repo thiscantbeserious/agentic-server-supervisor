@@ -1848,10 +1848,13 @@ func TestContainer_C12_StackLayoutConfigFallback(t *testing.T) {
 	exec_("mkdir -p " + emptyRoot)
 	stub := `cat > /usr/local/bin/omv-confdbadm <<'STUB'
 #!/bin/sh
-if [ "$2" = "conf.service.compose" ]; then
+for a in "$@"; do id="$a"; done
+if [ "$id" = "conf.service.compose" ]; then
   printf '{"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
-elif [ "$2" = "conf.system.sharedfolder" ]; then
-  printf '[{"uuid":"11111111-1111-1111-1111-111111111111","path":"` + emptyRoot + `"}]\n'
+elif [ "$id" = "conf.system.sharedfolder" ]; then
+  printf '{"uuid":"11111111-1111-1111-1111-111111111111","mntentref":"22222222-2222-2222-2222-222222222222","reldirpath":"docker-compose/","privileges":{"privilege":[]}}\n'
+elif [ "$id" = "conf.system.filesystem.mountpoint" ]; then
+  printf '{"uuid":"22222222-2222-2222-2222-222222222222","dir":"/srv/dev-disk-by-uuid-fresh","type":"ext4"}\n'
 fi
 STUB
 chmod +x /usr/local/bin/omv-confdbadm`
@@ -2398,10 +2401,11 @@ func TestContainer_C12_OmvConfdbadmSecondCallFailureChecked(t *testing.T) {
 	exec_("mkdir -p /usr/sbin")
 
 	stub := `#!/bin/sh
-if [ "$2" = "conf.service.compose" ]; then
+for a in "$@"; do id="$a"; done
+if [ "$id" = "conf.service.compose" ]; then
   printf '{"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
   exit 0
-elif [ "$2" = "conf.system.sharedfolder" ]; then
+elif [ "$id" = "conf.system.sharedfolder" ]; then
   echo "Traceback (most recent call last): second call failed" >&2
   exit 1
 fi
@@ -2448,23 +2452,35 @@ func TestContainer_C12_OmvConfdbadmRealisticPrettyPrintedJSON(t *testing.T) {
 
 	const realRoot = "/srv/dev-disk-by-uuid-realprettyprint/docker-compose"
 	stub := `#!/bin/sh
-if [ "$2" = "conf.service.compose" ]; then
+for a in "$@"; do id="$a"; done
+if [ "$id" = "conf.service.compose" ]; then
   cat <<'JSON'
 {
     "enabled": true,
     "sharedfolderref": "11111111-1111-1111-1111-111111111111"
 }
 JSON
-elif [ "$2" = "conf.system.sharedfolder" ]; then
+elif [ "$id" = "conf.system.sharedfolder" ]; then
   cat <<'JSON'
-[
-    {
-        "enabled": true,
-        "path": "` + realRoot + `",
+{
+        "comment": "",
+        "mntentref": "22222222-2222-2222-2222-222222222222",
+        "name": "docker-compose",
+        "privileges": {
+            "privilege": []
+        },
         "reldirpath": "docker-compose/",
-        "uuid": "11111111-1111-1111-1111-111111111111"
-    }
-]
+    "uuid": "11111111-1111-1111-1111-111111111111"
+}
+JSON
+elif [ "$id" = "conf.system.filesystem.mountpoint" ]; then
+  cat <<'JSON'
+{
+    "dir": "/srv/dev-disk-by-uuid-realprettyprint",
+    "fsname": "/dev/disk/by-uuid/realprettyprint",
+    "type": "ext4",
+    "uuid": "22222222-2222-2222-2222-222222222222"
+}
 JSON
 fi
 `
@@ -2473,13 +2489,18 @@ fi
 	}
 
 	// realRoot has no siblings (structural detection is inconclusive),
-	// so only a correctly parsed config answer can produce omv here.
+	// so only a correctly parsed config answer can produce omv here. The
+	// shape is OMV's real one: a shared folder has no "path", it carries
+	// "mntentref" and "reldirpath" and the absolute path is the referenced
+	// mountpoint's "dir" with the relative part joined on. It also carries a
+	// nested "privileges" value, so the record is not a flat brace-delimited
+	// object, which is what a non-greedy "{[^{}]*}" match would settle on.
 	out, _, code := exec_("/work/install.sh --dry-run 2>&1")
 	if code != 0 {
 		t.Fatalf("FAIL C12 (omv-confdbadm pretty-printed): --dry-run exit=%d: %s", code, out)
 	}
 	if !strings.Contains(out, "stack directory: "+realRoot+"/sentinel") || !strings.Contains(out, "layout: omv") {
-		t.Errorf("FAIL C12 (omv-confdbadm pretty-printed): pretty-printed, path-before-uuid JSON was not parsed correctly: %s", out)
+		t.Errorf("FAIL C12 (omv-confdbadm pretty-printed): pretty-printed, alphabetically-ordered JSON with a nested privileges value was not resolved to a path: %s", out)
 	}
 	logPass(t, "PASS C12 (omv-confdbadm pretty-printed: order- and distance-independent parsing confirmed against a harder, still-plausible shape)")
 }
@@ -2506,10 +2527,13 @@ func TestContainer_C12_OmvConfdbadmLeadingWhitespace(t *testing.T) {
 
 	const emptyRoot = "/srv/dev-disk-by-uuid-leadingws/docker-compose"
 	stub := `#!/bin/sh
-if [ "$2" = "conf.service.compose" ]; then
+for a in "$@"; do id="$a"; done
+if [ "$id" = "conf.service.compose" ]; then
   printf '\n  {"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
-elif [ "$2" = "conf.system.sharedfolder" ]; then
-  printf '\n  [{"uuid":"11111111-1111-1111-1111-111111111111","path":"` + emptyRoot + `"}]\n'
+elif [ "$id" = "conf.system.sharedfolder" ]; then
+  printf '\n  {"uuid":"11111111-1111-1111-1111-111111111111","mntentref":"22222222-2222-2222-2222-222222222222","reldirpath":"docker-compose/","privileges":{"privilege":[]}}\n'
+elif [ "$id" = "conf.system.filesystem.mountpoint" ]; then
+  printf '\n  {"uuid":"22222222-2222-2222-2222-222222222222","dir":"/srv/dev-disk-by-uuid-leadingws","type":"ext4"}\n'
 fi
 `
 	if out, errOut, code := exec_("mkdir -p " + emptyRoot + " && cat > /usr/sbin/omv-confdbadm <<'STUB'\n" + stub + "STUB\nchmod +x /usr/sbin/omv-confdbadm"); code != 0 {

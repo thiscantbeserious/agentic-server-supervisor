@@ -12,6 +12,19 @@
 set -eu
 set -o pipefail
 
+# OMV's RPC layer answers a backend crash with "Invalid RPC response. Please
+# check the syslog for more information.", which carries nothing to act on.
+# The syslog it names is inside this VM and the VM is destroyed with the job,
+# so anything not printed before the exit is gone. One failed run costs about
+# half an hour, so the journal comes out on every failure rather than after a
+# second run spent adding this.
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then
+  echo "== provision-omv: failed with $rc, engine journal ==" >&2
+  journalctl -u openmediavault-engined -n 120 --no-pager >&2 2>/dev/null || true
+  echo "== provision-omv: system journal ==" >&2
+  journalctl -n 120 --no-pager >&2 2>/dev/null || true
+fi' EXIT
+
 # packages.openmediavault.org/public/install no longer exists (404 direct,
 # 403 through the CDN); the maintained installer lives in the plugin
 # developers' repository. Pinned to a commit rather than master: the URL
@@ -34,6 +47,44 @@ echo "== provision-omv: running OMV's own installer =="
 # skips, and this keeps that true if a later revision adds another one.
 curl -fsSL "$OMV_INSTALL_URL" | bash -s -- -n -r
 
+echo "== provision-omv: ZFS =="
+# The target host stores its stacks on ZFS and sentinel reads zpool status,
+# so the image that stands in for it gets a real pool rather than whichever
+# filesystem is cheapest to create. It also supplies the mounted filesystem
+# OMV needs before it will create a shared folder.
+#
+# The matching headers are installed and booted into before this script
+# runs (build-omv-image.sh does it, and explains why it cannot happen
+# here). Checked rather than assumed: without them the DKMS build produces
+# no module, zpool create fails on a missing module, and the resulting
+# diagnosis points at ZFS rather than at the kernel it was built for.
+if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+  echo "provision-omv: no kernel headers for $(uname -r), ZFS cannot build a module" >&2
+  exit 1
+fi
+apt-get install -y openmediavault-zfs
+modprobe zfs
+
+# The pool sits on a file vdev inside the root filesystem rather than on a
+# second disk, because everything downstream of this script moves the image
+# as a single qcow2: the publish step copies one file into a scratch layer
+# and the test-time job extracts one file back out. A second disk would be
+# created, provisioned, and then silently dropped at publish, leaving an
+# image whose pool exists only in the build log.
+#
+# It is a real pool either way, which is what the assertions and the
+# collected fixtures need. The vdev is sparse, so the published image grows
+# by what the pool actually holds, not by its nominal size.
+mkdir -p /var/lib/vm-e2e
+truncate -s 2G /var/lib/vm-e2e/tank.img
+zpool create -f -m /tank tank /var/lib/vm-e2e/tank.img
+# Without an explicit cachefile the pool is not imported when an overlay of
+# this image boots later, and every test-time assertion below would look at
+# an empty mountpoint.
+zpool set cachefile=/etc/zfs/zpool.cache tank
+systemctl enable zfs-import-cache.service zfs-mount.service
+zpool status
+
 echo "== provision-omv: OMV compose plugin =="
 # The plugin that actually writes the compose.yml symlinks this job exists
 # to check, contracts/runtime.md's compose-root detection bug was invisible
@@ -41,31 +92,114 @@ echo "== provision-omv: OMV compose plugin =="
 # OMV host ever produces; only the plugin's own code path can reproduce it.
 apt-get install -y openmediavault-compose
 
+echo "== provision-omv: registering the pool with OMV =="
+# Creating the pool does not tell OMV about it. Until a mountpoint exists in
+# OMV's configuration database there is nothing a shared folder can point
+# at, and the compose plugin's states all sit behind that shared folder.
+# FsTab.set is what the zfs plugin itself calls for exactly this, with these
+# fields. The magic uuid is OMV's "this object is new" marker, read from the
+# package's own defaults rather than pasted in.
+# shellcheck disable=SC1091
+. /etc/default/openmediavault
+NEW_UUID="${OMV_CONFIGOBJECT_NEW_UUID:?OMV_CONFIGOBJECT_NEW_UUID missing from /etc/default/openmediavault}"
+
+rpc() { omv-rpc -u admin "$@"; }
+jget() { python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$1"; }
+
+mntentref="$(rpc "FsTab" "set" "{\"uuid\":\"$NEW_UUID\",\"fsname\":\"tank\",\"dir\":\"/tank\",\"type\":\"zfs\",\"opts\":\"\",\"freq\":0,\"passno\":0}" | jget uuid)"
+[ -n "$mntentref" ] || { echo "provision-omv: FsTab.set returned no uuid, the pool is not registered with OMV" >&2; exit 1; }
+
+echo "== provision-omv: shared folder on the pool =="
+sfref="$(rpc "ShareMgmt" "set" "{\"uuid\":\"$NEW_UUID\",\"name\":\"compose\",\"reldirpath\":\"compose/\",\"comment\":\"\",\"mntentref\":\"$mntentref\"}" | jget uuid)"
+[ -n "$sfref" ] || { echo "provision-omv: ShareMgmt.set returned no uuid, no shared folder to hand the compose plugin" >&2; exit 1; }
+
+echo "== provision-omv: pointing the compose plugin at it =="
+# Compose.set validates the whole settings object, so the settings are read
+# back and only sharedfolderref is changed. A hand-built object would reset
+# every setting it omitted.
+#
+# Compose.get returns more than Compose.set accepts, computed state like
+# dockerStatus among it, and the write is rejected outright for the first
+# such property rather than ignoring it. The accepted set is read from the
+# plugin's own RPC schema on the box instead of being listed here, so this
+# keeps working when the plugin gains or loses a setting.
+compose_settings="$(rpc "Compose" "get" '{}' | python3 -c '
+import json, sys
+
+schema = json.load(open("/usr/share/openmediavault/datamodels/rpc.compose.json"))
+for obj in (schema if isinstance(schema, list) else [schema]):
+    if obj.get("id") == "rpc.compose.set":
+        allowed = set(obj["params"]["properties"])
+        break
+else:
+    sys.exit("rpc.compose.set not found in the plugin datamodel")
+
+current = json.load(sys.stdin)
+out = {k: v for k, v in current.items() if k in allowed}
+out["sharedfolderref"] = sys.argv[1]
+json.dump(out, sys.stdout)
+' "$sfref")"
+rpc "Compose" "set" "$compose_settings" >/dev/null
+
 echo "== provision-omv: materialising a real compose stack =="
 # The plugin has no "path" property and omv-confdbadm create takes an id and
-# nothing else, so the previous invocation here could never have worked. The
+# nothing else, so the shape used here before could never have worked. The
 # real model, from the plugin's datamodel and its 10compose.sls: a file is a
-# named body in the config database, and salt derives the on-disk layout as
+# named body in the configuration database, and salt derives the layout
 #   <shared folder>/<name>/<name>.yml
 #   <shared folder>/<name>/compose.yml -> <shared folder>/<name>/<name>.yml
-# with an ABSOLUTE target, which is the layout this whole VM variant exists
-# to reproduce. createsymlinks defaults to 1, so the symlink needs no setting.
+# with an ABSOLUTE target. That absolute symlink is the entire reason this
+# variant exists: every hand-written fixture used a relative one, which is
+# why the compose-root defect survived them all. createsymlinks defaults to
+# 1, so the symlink needs no further setting.
 #
-# Every one of those states is wrapped in "if sharedfolderref is set", so
-# without a shared folder the deploy runs, reports success and creates no
-# stack at all. That prerequisite needs a filesystem registered in OMV's
-# database, which this single-disk VM does not have, so the registration is
-# attempted and its absence reported precisely rather than as a vague warning.
-compose_sfref="$(omv-rpc -u admin "Compose" "get" '{}' 2>/dev/null \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sharedfolderref",""))' 2>/dev/null || true)"
+# setFile is allowed to fail. It saves the object and then deploys, and that
+# deploy restarts the engine daemon the call is running inside, so the call
+# dies with its own connection and OMV reports the contentless "Invalid RPC
+# response. Please check the syslog". The journal shows the engine being
+# stopped mid-call with omv-salt still running under it. The plugin's own
+# test harness expects this too and recovers the uuid from the list instead.
+#
+# So: save, then confirm from the database that it really is saved, then
+# deploy from here, where no restart can pull the ground out.
+rpc "Compose" "setFile" '{"name":"e2e-probe","description":"compose-root detection probe","body":"services:\n  probe:\n    image: busybox\n    command: [\"true\"]\n","showenv":false,"env":"","showoverride":false,"override":""}' >/dev/null \
+  || echo "provision-omv: setFile reported a failure, checking whether the object was stored regardless" >&2
 
-if [ -z "$compose_sfref" ]; then
-  echo "provision-omv: WARN, the compose plugin has no shared folder, so OMV creates no stack directory and no compose.yml symlink. The compose-root assertion has nothing real to find in this image." >&2
-else
-  omv-rpc -u admin "Compose" "setFile" '{"name":"e2e-probe","description":"compose-root detection probe","body":"services:\n  probe:\n    image: busybox\n    command: [\"true\"]\n","showenv":false,"env":"","showoverride":false,"override":""}' \
-    || echo "provision-omv: WARN, Compose.setFile failed, no stack registered" >&2
-  omv-salt deploy run compose 2>&1 || echo "provision-omv: WARN, omv-salt deploy failed" >&2
-fi
+file_uuid="$(rpc "Compose" "getFileList" '{"start":0,"limit":100,"sortfield":"name","sortdir":"ASC"}' 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = d.get("data", d) if isinstance(d, dict) else d
+print(next((r["uuid"] for r in rows if r.get("name") == "e2e-probe"), ""))
+' 2>/dev/null || true)"
+[ -n "$file_uuid" ] || { echo "provision-omv: no e2e-probe in the compose file list, setFile stored nothing" >&2; exit 1; }
+echo "provision-omv: compose file stored as $file_uuid"
+
+omv-salt deploy run compose
+
+echo "== provision-omv: proving the layout is what the test expects =="
+# Asserted here, at image-build time, rather than trusting the deploy's exit
+# code: every state above can report success and still produce no stack,
+# which is precisely how the previous image passed while containing nothing.
+# A base image that silently lacks the one artifact it exists to carry would
+# send every later run hunting the wrong bug.
+link="/tank/compose/e2e-probe/compose.yml"
+target="$(readlink "$link" 2>/dev/null || true)"
+case "$target" in
+  /*) echo "provision-omv: compose.yml -> $target" ;;
+  "") echo "provision-omv: $link does not exist, OMV created no stack" >&2; exit 1 ;;
+  *)  echo "provision-omv: $link points at a relative target ($target), which is not the shape this image exists to reproduce" >&2; exit 1 ;;
+esac
+
+echo "== provision-omv: letting OMV generate the configs it owns =="
+# The target host's /etc/smartd.conf carries OMV's "auto-generated by
+# openmediavault" header, and install.sh refusing to touch a file carrying
+# it is the behaviour that stops this installer from fighting the platform
+# for control of monitoring. A stock Debian smartd.conf has no such header,
+# so an image without this deploy cannot demonstrate the refusal: the check
+# would pass on a file nothing was ever tempted to write.
+omv-salt deploy run smartmontools 2>&1 || echo "provision-omv: WARN, smartmontools deploy failed, /etc/smartd.conf will not carry OMV's marker" >&2
+grep -q 'auto-generated by openmediavault' /etc/smartd.conf \
+  || { echo "provision-omv: /etc/smartd.conf carries no OMV marker after the deploy, this image cannot stand in for a real OMV host" >&2; exit 1; }
 
 echo "== provision-omv: throwaway login for the test-time job =="
 # The base image is built once (this script) and reused, key-based, by

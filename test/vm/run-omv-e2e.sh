@@ -84,7 +84,12 @@ vm_log "run-omv-e2e: verifying the pulled image is what its tag claims"
 # if a cached image were ever wrong (built from a different provisioning
 # script than the tag implies, or corrupted in transit), this fails loudly
 # here rather than the run silently exercising the wrong OMV version.
-if ! ssh_pw "diff <(dpkg-query -W -f='openmediavault \${Version}\npostfix \${Version}\n' openmediavault postfix) /etc/vm-e2e-expected-versions"; then
+# ${Package} rather than the names written into the format: dpkg-query
+# applies its format once per package, so a two-line format queried for two
+# packages emits four lines, each package's version once under every label.
+# That compared as a mismatch against a correct image and reported it as
+# cache corruption, which is a far more alarming thing than it was.
+if ! ssh_pw "diff <(dpkg-query -W -f='\${Package} \${Version}\n' openmediavault postfix) /etc/vm-e2e-expected-versions"; then
   vm_log "FAIL: pulled/built OMV base image does not match its own recorded provisioning versions, cache content mismatch"
   exit 1
 fi

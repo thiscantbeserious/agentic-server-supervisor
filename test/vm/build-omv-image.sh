@@ -44,6 +44,31 @@ if ! vm_wait_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e 240; then
   exit 1
 fi
 
+# The cloud image is pinned to a dated snapshot, so the kernel it boots is
+# whatever was current then, and Debian's archive carries versioned headers
+# only for the kernel that is current now. That combination cannot be
+# resolved from inside the guest: the running kernel's headers are simply
+# gone, so ZFS has nothing to build its module against. Moving to the
+# archive's kernel first, and rebooting into it, is what makes the two agree.
+#
+# Deliberately before OpenMediaVault rather than inside the provisioning
+# script: a reboot ends the session the script runs in, and once OMV is
+# installed reconnecting depends on group membership the script has not
+# granted yet, so the same reboot placed later reconnects to a refusal.
+vm_log "build-omv-image: aligning the kernel with the archive, then rebooting into it"
+vm_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e \
+  "sudo apt-get update && sudo apt-get install -y linux-image-cloud-amd64 linux-headers-cloud-amd64"
+vm_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e "sudo systemctl reboot" || true
+
+# Without this the next command races the shutdown and runs against the
+# kernel being replaced, which is the state this reboot exists to leave.
+sleep 5
+if ! vm_wait_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e 240; then
+  vm_log "build-omv-image: VM did not come back after the kernel reboot"
+  exit 1
+fi
+vm_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e "uname -r"
+
 tar -C "$here" -cf - provision-omv.sh | \
   vm_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e "tar -xf - && chmod +x provision-omv.sh"
 vm_ssh 2223 "$WORKDIR/ssh/id_ed25519" e2e "sudo bash ./provision-omv.sh"
