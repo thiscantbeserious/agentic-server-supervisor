@@ -330,11 +330,17 @@ vm_run_install_checks() {
 
   check_cmd="cd '$repo' && sudo bash ./install.sh $* --check"
   vm_log "install.sh --check after convergence: $check_cmd"
-  if vm_ssh "$port" "$key" "$user" "$check_cmd"; then
+  # Captured with 2>&1, same as run 1/run 2 above and for the same reason:
+  # a bare exit code plus the serial console says nothing about what
+  # --check actually objected to. --check's own stdout/stderr names the
+  # drift it found, that is the evidence a real diagnosis needs, not a
+  # guess from the console log of an entirely different failure surface.
+  if out3="$(vm_ssh "$port" "$key" "$user" "$check_cmd 2>&1")"; then
     code3=0
   else
     code3=$?
   fi
+  printf '%s\n' "$out3"
   if [ "$code3" -ne 0 ]; then
     vm_log "FAIL: install.sh --check exit $code3, want 0"
     return 1

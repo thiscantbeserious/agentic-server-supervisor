@@ -167,11 +167,15 @@ vm_run_install_checks_over_pw() {
   [ "$code2" -eq 0 ] || { vm_log "FAIL: install.sh run 2 exit $code2, want 0"; return 1; }
   printf '%s\n' "$out2" | grep -q 'changed=0' || { vm_log "FAIL: run 2 did not converge to changed=0"; return 1; }
 
-  if ssh_pw "$install_cmd --check"; then
+  # Captured with 2>&1, same as run 1/run 2 above: a bare exit code says
+  # nothing about what --check actually objected to, its own
+  # stdout/stderr names the drift it found.
+  if out3="$(ssh_pw "$install_cmd --check 2>&1")"; then
     code3=0
   else
     code3=$?
   fi
+  printf '%s\n' "$out3"
   [ "$code3" -eq 0 ] || { vm_log "FAIL: install.sh --check exit $code3, want 0"; return 1; }
 }
 vm_run_install_checks_over_pw
