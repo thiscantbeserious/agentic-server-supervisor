@@ -3445,6 +3445,142 @@ mkdir -p /etc/zfs/zed.d`
 	logPass(t, "PASS C12 (mail credentials missing skips steps 3, 4 and 5, and exits 78)")
 }
 
+// TestContainer_C12_ExistingMTANeverDisplaced reproduces, at fixture
+// scale, the actual production incident: a host that already has a mail
+// transport agent (postfix here, standing in for whatever OpenMediaVault
+// itself depends on) must never have it removed by this script.
+// msmtp-mta and postfix both provide the virtual package
+// mail-transport-agent, so `apt-get install msmtp-mta` on a host that
+// already has postfix is exactly the request that made apt resolve the
+// conflict by removing postfix (and, on the real host, everything that
+// in turn depended on it: openmediavault core and ten of its plugins).
+// step1 must detect the existing provider and skip msmtp-mta
+// specifically, never touch postfix, while still installing the plain
+// msmtp client so step3 can write /etc/msmtprc as usual, since msmtp
+// itself does not provide mail-transport-agent and cannot conflict.
+func TestContainer_C12_ExistingMTANeverDisplaced(t *testing.T) {
+	name := "sentinel-c12-existing-mta"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	prep := `set -e
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postfix >/dev/null 2>&1
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+		skipUnlessCI(t, "C12 (existing MTA): prep failed (postfix install needs network): %s %s", out, errOut)
+	}
+	if out, _, code := exec_("dpkg-query -W -f='${Status}' postfix 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
+		skipUnlessCI(t, "C12 (existing MTA): postfix did not actually install in this environment: %s", out)
+	}
+
+	out, errOut, code := exec_("bash /work/install.sh --env-file /root/test.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL C12 (existing MTA): install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	}
+
+	if pkgOut, _, _ := exec_("dpkg-query -W -f='${Status}' postfix 2>/dev/null"); !strings.Contains(pkgOut, "install ok installed") {
+		t.Errorf("FAIL C12 (existing MTA): postfix was removed by install.sh, this is the exact production incident: %s (install.sh output: %s)", pkgOut, out)
+	}
+	if pkgOut, _, code := exec_("dpkg-query -W -f='${Status}' msmtp-mta 2>/dev/null"); code == 0 && strings.Contains(pkgOut, "install ok installed") {
+		t.Errorf("FAIL C12 (existing MTA): msmtp-mta was installed despite postfix already providing mail-transport-agent, apt would have had to remove postfix to satisfy this: %s", pkgOut)
+	}
+	if !strings.Contains(out, "postfix") {
+		t.Errorf("FAIL C12 (existing MTA): summary does not name the existing MTA it deferred to: %s", out)
+	}
+	if pkgOut, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code != 0 || !strings.Contains(pkgOut, "install ok installed") {
+		t.Errorf("FAIL C12 (existing MTA): plain msmtp (the client, not msmtp-mta) should still be installed for step3's own use, it does not provide mail-transport-agent and cannot conflict: %s", pkgOut)
+	}
+	if out2, _, _ := exec_("test -e /etc/msmtprc && echo exists || echo absent"); strings.TrimSpace(out2) != "exists" {
+		t.Errorf("FAIL C12 (existing MTA): /etc/msmtprc should still be written via the msmtp client, mail wiring must not silently go dark just because msmtp-mta was correctly skipped: %s", out2)
+	}
+	logPass(t, "PASS C12 (existing MTA is never displaced, msmtp client installs alongside it)")
+}
+
+// TestContainer_C12_PackagesNarrowWhenMailStepsWontRun: a fresh host
+// with no --env-file credentials yet is exactly the shape of the real
+// incident's first run, nothing downstream of msmtp (step3's own only
+// gate is mail credentials, steps 4/5 gate on the same MAIL_OK) can use
+// it, so step1 must not install msmtp or msmtp-mta at all. Installing a
+// mail transport for wiring the rest of the script is about to skip
+// anyway is exactly the shape of the incident even before any MTA
+// conflict enters into it: nothing on the host needed step1 to touch
+// mail packages in the first place.
+func TestContainer_C12_PackagesNarrowWhenMailStepsWontRun(t *testing.T) {
+	name := "sentinel-c12-narrow-packages"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// Deliberately empty: no MAILRISE_SMTP_USER/PASS anywhere, the same
+	// "operator has not filled .env in yet" state a first bringup starts
+	// from.
+	if out, errOut, code := exec_(systemctlOKStub + "\n: > /root/test.env"); code != 0 {
+		t.Fatalf("FAIL C12 (narrow packages): prep failed: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("bash /work/install.sh --env-file /root/test.env")
+	if code != 78 {
+		t.Fatalf("FAIL C12 (narrow packages): exit=%d, want 78 (missing MAILRISE_SMTP_USER/PASS): %s %s", code, out, errOut)
+	}
+
+	for _, pkg := range []string{"rasdaemon", "lm-sensors"} {
+		if pkgOut, _, dpkgCode := exec_("dpkg-query -W -f='${Status}' " + pkg + " 2>/dev/null"); dpkgCode != 0 || !strings.Contains(pkgOut, "install ok installed") {
+			skipUnlessCI(t, "C12 (narrow packages): %s did not actually install in this environment (no network reachable?): %s", pkg, pkgOut)
+		}
+	}
+	for _, pkg := range []string{"msmtp", "msmtp-mta"} {
+		if pkgOut, _, dpkgCode := exec_("dpkg-query -W -f='${Status}' " + pkg + " 2>/dev/null"); dpkgCode == 0 && strings.Contains(pkgOut, "install ok installed") {
+			t.Errorf("FAIL C12 (narrow packages): %s was installed even though no mail step can use it without credentials: %s", pkg, pkgOut)
+		}
+	}
+	if !strings.Contains(out, "step1 packages:") || !strings.Contains(out, "msmtp") {
+		t.Errorf("FAIL C12 (narrow packages): summary does not explain that msmtp/msmtp-mta were left out: %s", out)
+	}
+	logPass(t, "PASS C12 (step1 installs only what the steps that will actually run need)")
+}
+
+// TestContainer_C12_NoExistingMTAInstallsMsmtpMta is
+// TestContainer_C12_ExistingMTANeverDisplaced's other half: a host with
+// no pre-existing mail-transport-agent provider has nothing to
+// displace, and msmtp-mta is a legitimate, needed install there (step3
+// writes /etc/msmtprc and steps 4/5 want ZED_EMAIL_PROG=msmtp to work).
+// Without this case, "step1 never installs msmtp-mta at all" would
+// also make the existing-MTA test pass, for the wrong reason, silently
+// deleting the feature rather than gating it. Both halves, always.
+func TestContainer_C12_NoExistingMTAInstallsMsmtpMta(t *testing.T) {
+	name := "sentinel-c12-no-existing-mta"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	prep := systemctlOKStub + "\n" +
+		`printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(prep); code != 0 {
+		t.Fatalf("FAIL C12 (no existing MTA): prep failed: %s %s", out, errOut)
+	}
+	// Confirm the fixture host genuinely has no MTA yet, otherwise a
+	// pass here would prove nothing about the "nothing to displace"
+	// case it exists to check.
+	if pkgOut, _, code := exec_("dpkg-query -W -f='${Status}' postfix exim4 2>/dev/null"); code == 0 && strings.Contains(pkgOut, "install ok installed") {
+		t.Fatalf("FAIL C12 (no existing MTA): fixture host already has an MTA installed, this test's premise does not hold: %s", pkgOut)
+	}
+
+	out, errOut, code := exec_("bash /work/install.sh --env-file /root/test.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL C12 (no existing MTA): install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	}
+
+	if pkgOut, _, dpkgCode := exec_("dpkg-query -W -f='${Status}' msmtp-mta 2>/dev/null"); dpkgCode != 0 || !strings.Contains(pkgOut, "install ok installed") {
+		skipUnlessCI(t, "C12 (no existing MTA): msmtp-mta did not actually install in this environment (no network reachable?): %s (install.sh output: %s %s)", pkgOut, out, errOut)
+	}
+	logPass(t, "PASS C12 (no existing MTA present: msmtp-mta still installs normally)")
+}
+
 // TestContainer_C12_EnvOwnerUnmappedUID: step 6 resolving the .env owner
 // by NAME (stat -c %U) breaks silently for a uid with no /etc/passwd
 // entry, stat prints the literal string "UNKNOWN", `install -o UNKNOWN`
