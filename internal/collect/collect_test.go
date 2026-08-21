@@ -76,7 +76,7 @@ func newTree(t *testing.T) tree {
 		t.Fatal(err)
 	}
 	// Real Linux kstat named-table format: 2 header lines, then
-	// "<name> <type> <value>" rows — readPoolKstat/parseKstatFile parse
+	// "<name> <type> <value>" rows, readPoolKstat/parseKstatFile parse
 	// this the same way readArcStats parses arcstats.
 	mustWrite(t, filepath.Join(tr.hostProc, "spl", "kstat", "zfs", "hotstore", "state"),
 		"7 1 0x01 1 80 12345678 1234567890\nname                            type data\nstate                           4    0\n")
@@ -148,7 +148,7 @@ func writeJSONL(t *testing.T, path string, records []map[string]any) {
 }
 
 // compileSchema loads the embedded facts.schema.json exactly as
-// facts_test.go does — collect can't reuse that unexported helper across
+// facts_test.go does, collect can't reuse that unexported helper across
 // packages, so this is collect's own copy of the same two lines.
 func compileSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
@@ -395,7 +395,7 @@ func TestSectionTimeout(t *testing.T) {
 		t.Errorf("sensors exit_code = %d, want 124", code)
 	}
 	if elapsed >= 15*time.Second {
-		t.Errorf("Run took %v — timeout is not per-section", elapsed)
+		t.Errorf("Run took %v, timeout is not per-section", elapsed)
 	}
 }
 
@@ -475,7 +475,7 @@ func TestTruncationKeepsOldest(t *testing.T) {
 
 // D2, normal-loop case: with <= RAW_ALERT_MAX_LINES protected entries
 // planted, the normal §5 step-2 loop has plenty of unprotected filler to
-// drop first — every protected entry must survive, exactly, not just
+// drop first, every protected entry must survive, exactly, not just
 // "more than zero".
 func TestTruncationProtectsCriticalNormalLoop(t *testing.T) {
 	tr := newTree(t)
@@ -502,7 +502,7 @@ func TestTruncationProtectsCriticalNormalLoop(t *testing.T) {
 		t.Fatalf("kernel section failed: %+v", f.Kernel)
 	}
 	if !f.Kernel.Data.Truncated {
-		t.Fatal("test setup did not actually truncate — assertions below would be vacuous")
+		t.Fatal("test setup did not actually truncate, assertions below would be vacuous")
 	}
 	survivors := 0
 	for _, e := range f.Kernel.Data.Entries {
@@ -515,7 +515,7 @@ func TestTruncationProtectsCriticalNormalLoop(t *testing.T) {
 	}
 	for _, ce := range f.Meta.CollectorErrors {
 		if ce.Section == "*" {
-			t.Error("hard truncation fired — test setup should have stayed in the normal loop")
+			t.Error("hard truncation fired, test setup should have stayed in the normal loop")
 		}
 	}
 }
@@ -558,7 +558,7 @@ func TestTruncationProtectsCriticalHardTruncation(t *testing.T) {
 	}
 	// entries were collected in ascending ts order, so the newest
 	// RAW_ALERT_MAX_LINES are the LAST cfg.RawAlertMaxLines of the planted
-	// records — assert the survivors are exactly that tail, in order.
+	// records, assert the survivors are exactly that tail, in order.
 	wantFirstIdent := fmt.Sprintf("kernel-%03d", total-cfg.RawAlertMaxLines)
 	wantLastIdent := fmt.Sprintf("kernel-%03d", total-1)
 	if f.Kernel.Data.Entries[0].Identifier != wantFirstIdent {
@@ -670,7 +670,7 @@ func TestNetworkBaseline(t *testing.T) {
 	//
 	// T5 fix, carried here because the Dockerfile builder stage re-runs
 	// `go vet`/`go test` and runs as root: a chmod-based injection
-	// (os.Chmod(stateDir, 0o500)) is vacuous under uid 0 — permission
+	// (os.Chmod(stateDir, 0o500)) is vacuous under uid 0, permission
 	// bits are not consulted for root at all, so the write would silently
 	// succeed and this test would assert nothing.
 	//
@@ -680,14 +680,14 @@ func TestNetworkBaseline(t *testing.T) {
 	// a pre-existing directory there fails that READ with something
 	// other than fs.ErrNotExist, which collectNetwork's switch treats as
 	// fatal to the whole section (the `default:` case) rather than
-	// "never write, but try" — a different code path than the one this
+	// "never write, but try", a different code path than the one this
 	// test exists to exercise.
 	//
 	// Removing StateDir itself, after config.Load() has already
 	// validated it exists, is root-proof for a structural reason no
 	// uid can route around: os.CreateTemp cannot create a file inside a
 	// directory that is not there, and neither read nor write of any
-	// path under it can produce anything but ENOENT — which IS
+	// path under it can produce anything but ENOENT, which IS
 	// fs.ErrNotExist, so readBaseline correctly takes the
 	// "not initialized yet, attempt to write" branch, and it's
 	// writeBaseline's os.CreateTemp that then fails, exercising the
@@ -714,7 +714,7 @@ func TestNetworkBaseline(t *testing.T) {
 		t.Error("expected one collector_errors[] entry for the failed baseline write")
 	}
 	// collect.md §2/§7: baseline not created ⇒ baseline_initialized stays
-	// false — a write failure must not report a baseline that was never
+	// false, a write failure must not report a baseline that was never
 	// actually written.
 	if fr.Network.Data.BaselineInitialized {
 		t.Error("baseline_initialized must be false when the baseline write failed")
@@ -1007,7 +1007,7 @@ func TestAllSectionsFail(t *testing.T) {
 			return
 		}
 		if got != sectionErr {
-			t.Errorf("%s: section.Err = %q, collector_errors[].reason = %q — must be identical", section, sectionErr, got)
+			t.Errorf("%s: section.Err = %q, collector_errors[].reason = %q, must be identical", section, sectionErr, got)
 		}
 	}
 	assertSameReason("kernel", f.Kernel.Err)
@@ -1028,14 +1028,14 @@ func TestAllSectionsFail(t *testing.T) {
 
 // --- injected kernel error (container-only) ---
 
-// C5: with a real journald present (SENTINEL_CONTAINER=1 — set by the T7
+// C5: with a real journald present (SENTINEL_CONTAINER=1, set by the T7
 // container test target, never locally), an injected kern.err line must
 // show up in kernel.entries within one collect.Run. Loudly skipped
-// otherwise per C9 ("must t.Skip loudly, never pass silently") — this
+// otherwise per C9 ("must t.Skip loudly, never pass silently"), this
 // must actually run under SENTINEL_CONTAINER=1, not stay a permanent stub.
 func TestInjectedKernelError(t *testing.T) {
 	if os.Getenv("SENTINEL_CONTAINER") != "1" {
-		t.Skip("SENTINEL_CONTAINER=1 not set — requires a real journald")
+		t.Skip("SENTINEL_CONTAINER=1 not set, requires a real journald")
 	}
 	marker := fmt.Sprintf("SENTINEL-TEST-%d", os.Getpid())
 	if err := exec.Command("logger", "-p", "kern.err", marker).Run(); err != nil {
@@ -1062,11 +1062,11 @@ func TestInjectedKernelError(t *testing.T) {
 }
 
 // collect.md §5 step 3: hitting the hard-truncation fixed point must set
-// meta.truncated: true — this is the exact state where the analyzer most
+// meta.truncated: true, this is the exact state where the analyzer most
 // needs to know the picture is incomplete. Exercised directly against
 // Truncate() with no sections present at all, so there is nothing for
 // hardTruncate to reduce and no section-level Truncated flag can end up
-// true by coincidence — the only way this passes is if hitting the fixed
+// true by coincidence, the only way this passes is if hitting the fixed
 // point itself sets meta.truncated.
 func TestHardTruncationSetsMetaTruncated(t *testing.T) {
 	cfg := &config.Config{FactsMaxBytes: 10, RawAlertMaxPriority: 2, RawAlertMaxLines: 20}
@@ -1089,7 +1089,7 @@ func TestHardTruncationSetsMetaTruncated(t *testing.T) {
 }
 
 // collect.md §7: journalctl stderr is captured into the error reason
-// (first 200 bytes) — it's exactly where a permission or group_add
+// (first 200 bytes), it's exactly where a permission or group_add
 // problem on the target host would announce itself.
 func TestExitErrorReasonIncludesStderr(t *testing.T) {
 	tr := newTree(t)
@@ -1126,7 +1126,7 @@ func TestExitErrorReasonIncludesStderr(t *testing.T) {
 	}
 }
 
-// collect.md §4: meta.window examples are "10m" / "24h" — Duration.String()
+// collect.md §4: meta.window examples are "10m" / "24h", Duration.String()
 // would emit "10m0s" / "24h0m0s".
 func TestMetaWindowFormat(t *testing.T) {
 	tr := newTree(t)
@@ -1152,7 +1152,7 @@ func TestMetaWindowFormat(t *testing.T) {
 // --- second agy round: absent optional sources, remote-fs skip, record cap ---
 
 // collect.md §3 "Absent optional sources": $HOST_RASDAEMON not existing
-// (rasdaemon not installed) must not fail the ras section — store: [],
+// (rasdaemon not installed) must not fail the ras section, store: [],
 // journal-backed entries[] still collected.
 func TestRasAbsentRasdaemonIsNotAFailure(t *testing.T) {
 	tr := newTree(t)
@@ -1180,7 +1180,7 @@ func TestRasAbsentRasdaemonIsNotAFailure(t *testing.T) {
 }
 
 // collect.md §3 "Absent optional sources": no ZFS kstat tree (module not
-// loaded) must not fail the zfs section — arc: {}, pools: [], zed
+// loaded) must not fail the zfs section, arc: {}, pools: [], zed
 // events[] still collected.
 func TestZFSAbsentKstatTreeIsNotAFailure(t *testing.T) {
 	tr := newTree(t)
@@ -1211,7 +1211,7 @@ func TestZFSAbsentKstatTreeIsNotAFailure(t *testing.T) {
 }
 
 // collect.md §3 "Absent optional sources": no tcp6/udp6 (IPv6 disabled)
-// must not fail the network section — the IPv4 files still produce it.
+// must not fail the network section, the IPv4 files still produce it.
 func TestNetworkAbsentIPv6FilesIsNotAFailure(t *testing.T) {
 	tr := newTree(t)
 	if err := os.Remove(filepath.Join(tr.hostProc, "net", "tcp6")); err != nil {
@@ -1232,14 +1232,14 @@ func TestNetworkAbsentIPv6FilesIsNotAFailure(t *testing.T) {
 }
 
 // collect.md §3 row 6 note: remote filesystem types must be skipped, the
-// same as the pseudo-fs set — this is what keeps a hung NFS/CIFS mount
+// same as the pseudo-fs set, this is what keeps a hung NFS/CIFS mount
 // from putting syscall.Statfs into uninterruptible D-state.
 func TestResourcesSkipsRemoteFilesystems(t *testing.T) {
 	tr := newTree(t)
 	mustWrite(t, filepath.Join(tr.hostProc, "mounts"),
 		"rootdev / ext4 rw 0 0\nproc /proc proc rw 0 0\nnasbox:/export /mnt/nas nfs4 rw 0 0\n")
 	// Create /mnt/nas under hostRoot for real so syscall.Statfs would
-	// SUCCEED if the fstype skip were broken — a missing path would be
+	// SUCCEED if the fstype skip were broken, a missing path would be
 	// skipped either way (Statfs fails, §3 row 6's "failure ⇒ skipped"
 	// rule), which would make this test pass without the remote-fs set
 	// doing anything.
@@ -1257,12 +1257,12 @@ func TestResourcesSkipsRemoteFilesystems(t *testing.T) {
 	}
 	for _, fs := range f.Resources.Data.Filesystems {
 		if fs.Mount == "/mnt/nas" {
-			t.Errorf("nfs4 mount reached the output — remote-fs skip set is not applied: %+v", fs)
+			t.Errorf("nfs4 mount reached the output, remote-fs skip set is not applied: %+v", fs)
 		}
 	}
 }
 
-// New C3 variable JOURNAL_MAX_RECORDS reaches journal.Query.MaxRecords —
+// New C3 variable JOURNAL_MAX_RECORDS reaches journal.Query.MaxRecords,
 // exercised end to end through collect.Run rather than just journal.Run,
 // since that's the actual wiring collect.md asks for.
 func TestJournalMaxRecordsWiredThroughCollect(t *testing.T) {
@@ -1348,7 +1348,7 @@ func TestKernelPartialDirectoryFailureStaysHealthy(t *testing.T) {
 // having none.
 //
 // The chip set in testdata/sensors-hwmon.json is the one the target host
-// actually exposes through /sys/class/hwmon — three NVMe controllers, two
+// actually exposes through /sys/class/hwmon, three NVMe controllers, two
 // JC42 DIMM sensors, the PCH and coretemp. The readings are representative
 // rather than captured, because lm-sensors is not installed on that host
 // until install.sh puts it there; the chip names are what matter for the

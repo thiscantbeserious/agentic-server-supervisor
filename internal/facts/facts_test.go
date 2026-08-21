@@ -49,7 +49,7 @@ func TestSectionUnmarshalError(t *testing.T) {
 }
 
 // N10/main decision: "error present ⇒ the section is failed, data
-// ignored" — a document that carries both "error" and data keys (which
+// ignored", a document that carries both "error" and data keys (which
 // facts.schema.json itself rejects as malformed, see
 // TestFactsSchema_RejectsMalformed) must decode deterministically as a
 // failed section, not silently as a healthy one with a lost collector

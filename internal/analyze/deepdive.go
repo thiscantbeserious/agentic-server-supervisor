@@ -29,7 +29,7 @@ var deepDiveCapable = map[string]bool{"zfs": true, "smart": true, "kernel": true
 const noDeepDiveSuffix = " (no deep-dive available for this component)"
 
 // isNewFinding reports whether a finding has not been seen as an active
-// alert before. Any stat error counts as "new" — a fresh state directory
+// alert before. Any stat error counts as "new", a fresh state directory
 // makes every finding new, which is the safe direction.
 func isNewFinding(stateDir string, f report.Finding) bool {
 	if f.Severity == "info" || f.Key == "" {
@@ -113,8 +113,8 @@ func queuedKeysByAge(stateDir string) []string {
 // manageDeepQueue keeps the deferred-candidate queue honest: every new
 // deep-dive-capable finding that was not chosen is queued, the consumed
 // candidate's entry is removed, and entries for findings no longer in the
-// report are dropped as stale. Errors here never fail the tick — queue
-// bookkeeping must not gate analysis — but each one leaves a log line
+// report are dropped as stale. Errors here never fail the tick, queue
+// bookkeeping must not gate analysis, but each one leaves a log line
 // rather than vanishing.
 func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey string, logger *slog.Logger) {
 	dir := filepath.Join(stateDir, "deep-queue")
@@ -173,7 +173,7 @@ func manageDeepQueue(stateDir string, findings []report.Finding, candidateKey st
 // The merge trusts only our own pointer to the candidate finding, never a
 // key echoed back by the model. The returned headline, when present,
 // replaces the triage headline: the headline becomes the notification
-// title, and triage wrote it knowing only the shallow tick facts — if the
+// title, and triage wrote it knowing only the shallow tick facts, if the
 // deep collection reveals something worse, a stale headline misleads the
 // operator at exactly the wrong moment.
 func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep *report.Report, nonce string, histLines []string, pid int, cleanup *[]string, logger *slog.Logger) {
@@ -242,7 +242,7 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 		logger.Info("deep-dive failed, keeping triage report")
 		return
 	}
-	// No retry at deep dive — an envelope failure is just another
+	// No retry at deep dive, an envelope failure is just another
 	// non-fatal enrichment failure.
 	response, everr := decodeAgyEnvelope(out)
 	if everr != nil {

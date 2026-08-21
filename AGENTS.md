@@ -10,7 +10,7 @@ They do not know which milestone produced a line, which review round found a
 defect, or who asked for a change. None of that helps them; all of it costs
 them attention on the way to what they actually need.
 
-A comment earns its place by explaining **why the code is the way it is** —
+A comment earns its place by explaining **why the code is the way it is**,
 the constraint, the measurement, the failure it prevents. Not by recording
 how it came to be written.
 
@@ -21,7 +21,7 @@ how it came to be written.
   "main's explicit ask", "their own catch", "found by the agy gate".
 - **People and roles**: who proposed, who implemented, who approved.
 - **Chronology**: "the previous version", "an earlier draft said", "used to
-  be", "now changed to" — unless the old behaviour is still reachable in
+  be", "now changed to", unless the old behaviour is still reachable in
   the wild and the reader must recognise it.
 
 Git history holds all of this, keyed to the exact lines, and holds it better
@@ -32,11 +32,11 @@ than prose can. A comment repeating it is a worse copy that goes stale.
 Name the constraint and its consequence:
 
 ```go
-// Bad  — process archaeology
+// Bad , process archaeology
 // Round-4 review DEFECT (their own proposal, their own catch): the previous
 // count guard was `grep -c ""$1""`, which main asked us to fix in item 3.
 
-// Good — the reason, and how to recognise the trap
+// Good, the reason, and how to recognise the trap
 // Quote the key explicitly rather than by adjacent string concatenation:
 // `""$1""` collapses to an unquoted `$1`, and `grep -c` counts matching
 // LINES, so on a minified document it can only ever return 0 or 1.
@@ -59,12 +59,12 @@ name instead. A comment explaining that `stage2` means the deep-dive call is
 a name that failed. Rename it, delete the comment.
 
 The corollary: when a name is right, most comments become unnecessary, and
-the ones that remain are all about *why* — which is the only thing a reader
+the ones that remain are all about *why*, which is the only thing a reader
 cannot recover from the code itself.
 
 ## Where milestone references legitimately live
 
-`PLAN.md` — it *is* the milestone plan. Nothing else.
+`PLAN.md`, it *is* the milestone plan. Nothing else.
 
 Contracts describe how the system behaves, not when it was built. A contract
 sentence that only makes sense if you know what T5 was is a sentence that

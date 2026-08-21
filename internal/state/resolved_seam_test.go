@@ -19,7 +19,7 @@ import (
 // `key` of every active alert with exact string equality (after a
 // ^[0-9a-f]{16}$ shape guard). The two components must agree on what a
 // resolved[] entry IS, or an analyzer-produced resolution matches nothing
-// and every all-clear is silently dropped — exactly the bug the old
+// and every all-clear is silently dropped, exactly the bug the old
 // evidence/headline dual-match was patching around.
 //
 // Hand-writing a resolved[] string here would just re-encode whichever
@@ -29,8 +29,8 @@ import (
 // establishes the alert (so active-alerts/ holds a real stored key, not a
 // fixture); tick 2 goes through analyze.Run, which reads that same
 // history and computes resolved[] as the real production code would
-// when the finding stops recurring; that report's bytes — never
-// constructed by hand — are then fed into the SAME store's Process.
+// when the finding stops recurring; that report's bytes, never
+// constructed by hand, are then fed into the SAME store's Process.
 func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 	stateDir := t.TempDir()
 	const evidence = "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
@@ -89,7 +89,7 @@ func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RunAgy's real contract (§6 step 4) is the agy --output-format json
-	// envelope, not the bare model response — wrap it the same way
+	// envelope, not the bare model response, wrap it the same way
 	// analyze's own test helpers (mustEnvelope) do, so this exercises the
 	// real decode path rather than a shortcut only this test would take.
 	envelope := struct {
@@ -123,7 +123,7 @@ func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 	}
 	// Setup guard: this must be the 16-hex key the whole test exists to
 	// exercise, not a headline or evidence snippet (which would make the
-	// test vacuous — matching those shapes never touched the seam).
+	// test vacuous, matching those shapes never touched the seam).
 	if rep2.Resolved[0] != key {
 		t.Fatalf("setup guard: resolved[0] = %q, want the tick-1 alert's own key %q", rep2.Resolved[0], key)
 	}
@@ -135,11 +135,11 @@ func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 
 	// --- tick 3: feed analyze's REAL output back into the SAME state
 	// store. If state's key-matching regressed, this resolved[] entry
-	// would match nothing — the alert would still be sitting in
+	// would match nothing, the alert would still be sitting in
 	// active-alerts/ right now. ---
 	d3 := mustProcess(t, store, b2)
 	if _, ok := store.loadAlert(key); ok {
-		t.Errorf("alert %s still open after analyze's real resolved[] output — S.3(e) key-matching regressed", key)
+		t.Errorf("alert %s still open after analyze's real resolved[] output, S.3(e) key-matching regressed", key)
 	}
 	if d3.Reason != "all_clear" || len(d3.Report.Resolved) != 1 {
 		t.Errorf("tick 3: reason=%s resolved=%v, want reason=all_clear with exactly the one closed headline", d3.Reason, d3.Report.Resolved)

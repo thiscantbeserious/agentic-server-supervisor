@@ -23,7 +23,7 @@ var (
 	ErrUnknownID = errors.New("unknown outbox id")
 )
 
-// severityRank orders info < watch < alert (S.3d) — the single ranking
+// severityRank orders info < watch < alert (S.3d), the single ranking
 // used both to detect escalation and to pick the outgoing status (g).
 var severityRank = map[string]int{"info": 0, "watch": 1, "alert": 2}
 
@@ -64,7 +64,7 @@ func New(cfg *config.Config) (*Store, error) {
 	}
 
 	// New deliberately does NOT seed the heartbeat file. A supervisor that
-	// has never run must read as unhealthy — seeding it here (even with
+	// has never run must read as unhealthy, seeding it here (even with
 	// "empty" content) gives it a fresh mtime the moment `sentinel health`
 	// happens to call New(), which makes health report HEALTHY on a
 	// container that never ticked. Only Process ever creates or rewrites
@@ -81,8 +81,8 @@ func (s *Store) now() int64 {
 
 // resolveTickSeq is S.3(a): cfg.TickSeq if > 0, else report.meta.tick_seq
 // if present, else 0. This is the single tick_seq used everywhere in this
-// Process call — the outgoing Decision, the history filename, and the
-// ActiveAlert tick_seq_first/last bookkeeping — never written back to disk
+// Process call, the outgoing Decision, the history filename, and the
+// ActiveAlert tick_seq_first/last bookkeeping, never written back to disk
 // (state owns no tick-seq file; that's runtime's, S-D3).
 func resolveTickSeq(cfg *config.Config, rep *report.Report) int64 {
 	if cfg.TickSeq > 0 {
@@ -98,7 +98,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	now := s.now()
 
 	// S.2: "not an object, or no findings array -> exit 65". Input
-	// validation is deliberately permissive beyond that — S.7 requires a
+	// validation is deliberately permissive beyond that, S.7 requires a
 	// state failure never lose an alert ("tick sends the report
 	// unfiltered"), so an input that report.Validate would reject (e.g. an
 	// 81-rune headline) must still be processed. What must validate against
@@ -118,7 +118,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	}
 
 	// S.3(b): history stores the INPUT document (status/headline/body/
-	// resolved), not whatever step (g) below mutates rep into — snapshot
+	// resolved), not whatever step (g) below mutates rep into, snapshot
 	// it now, before any of c/d/e/f/g touch rep. Findings are annotated
 	// separately below (into `annotated`, in original order); Status/
 	// Headline/Body/Resolved must survive byte-for-byte.
@@ -142,7 +142,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		// A supplied key is trusted only if it already matches dedup.Key's
 		// own output shape. `key` is joined straight into a filesystem path
 		// below (loadAlert/saveAlert), so an attacker-shaped value such as
-		// "../../pwned" or "../history/x" must never reach that join — it
+		// "../../pwned" or "../history/x" must never reach that join, it
 		// escapes $STATE_DIR (S.2, A1) or drops a non-conforming file into
 		// a sibling directory analyze/history readers trust. Recomputing
 		// is free: dedup.Key always conforms.
@@ -219,11 +219,11 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		}
 	}
 
-	// e) resolved / all-clear — only alerts NOT touched in step (d) (S-D7).
+	// e) resolved / all-clear, only alerts NOT touched in step (d) (S-D7).
 	// contracts/state.md S.3(e): each entry is a 16-hex dedup.Key (analyze
 	// §6 step 7); reject anything not matching that shape (drop, no error)
 	// and compare the remainder against the stored `key` of every
-	// untouched active alert by exact string equality — no normalization,
+	// untouched active alert by exact string equality, no normalization,
 	// no case folding, no substring matching. Never build a path from the
 	// entry; it only identifies a record already read via os.ReadDir.
 	var allClear []string
@@ -241,7 +241,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				continue
 			}
 			// S.3(e): "A key that was never notified is deleted without an
-			// all-clear." — always delete on a match, but only surface it
+			// all-clear.", always delete on a match, but only surface it
 			// as an all-clear when the operator was actually told about it.
 			if alert.NotifyCount > 0 {
 				found := false
@@ -256,7 +256,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 				}
 			}
 			// Delete by the directory entry name (guaranteed a single path
-			// element by os.ReadDir), never by alert.Key — that field comes
+			// element by os.ReadDir), never by alert.Key, that field comes
 			// from the stored record's own JSON body, which may be stale,
 			// hand-edited, or (on an older build, before the step-(d)
 			// adoption guard) attacker-shaped, and can disagree with the
@@ -277,7 +277,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	hbCurrent := strings.TrimSpace(string(hbData))
 	hbDue := hbCurrent != hbStr && hbTime.Hour() >= s.cfg.HeartbeatHour
 
-	// g) message assembly — first matching rule.
+	// g) message assembly, first matching rule.
 	switch {
 	case len(notified) > 0:
 		decision.Notify = true
@@ -347,10 +347,10 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	alertFiles, _ := os.ReadDir(filepath.Join(s.cfg.StateDir, "active-alerts"))
 	decision.ActiveCount = len(alertFiles)
 
-	// b) history write — after (d), because it needs the post-update
+	// b) history write, after (d), because it needs the post-update
 	// annotations; every finding (notified AND suppressed), ORIGINAL INPUT
 	// status/headline/body/resolved and finding order, never verbatim
-	// (findings are annotated) and never decision.report — decision.report
+	// (findings are annotated) and never decision.report, decision.report
 	// is what step (g) mutated rep into, not the input (S.3b).
 	if err := s.writeAnnotatedHistory(now, tickSeq, origStatus, origHeadline, origBody, origResolved, rep.Meta, annotated); err != nil {
 		return nil, fmt.Errorf("state: write history: %w", err)
@@ -387,7 +387,7 @@ func allClearHeadline(allClear []string) string {
 // <RFC3339 UTC of the oldest kept history entry>." k = number of kept
 // history files that exist BEFORE this tick's own entry is written. now is
 // this Process call's clock (C9: never time.Now(), always cfg.Now/the
-// caller's clock) — used as the fallback "since" when history/ is still
+// caller's clock), used as the fallback "since" when history/ is still
 // empty (a fresh $STATE_DIR's first heartbeat), a case the contract text
 // doesn't spell out explicitly.
 func heartbeatBody(stateDir string, now int64) string {
@@ -451,7 +451,7 @@ func (s *Store) rotateHistory() {
 // check (alerts.go) is currently unreachable in every test: any corrupt
 // record this sweep would have caught is already gone by the time step (d)
 // could call loadAlert on it. Both checks are still correct defence in
-// depth, not redundant code — but a future change here (skipping
+// depth, not redundant code, but a future change here (skipping
 // well-named files, running every N ticks instead of every tick) would
 // silently remove that guarantee, and no test would catch it. Keep this
 // sweeping the whole directory every call.
@@ -479,12 +479,12 @@ func (s *Store) History(n int) ([]json.RawMessage, error) {
 
 	// Unparsable files are skipped and DON'T count toward n (S.7): stop
 	// only once n valid entries are collected or the directory is
-	// exhausted, not after scanning the first n directory positions —
+	// exhausted, not after scanning the first n directory positions,
 	// otherwise a single corrupt file among the newest N silently shrinks
 	// the trend window analyze reads.
 	// n reaching here unvalidated (History is exported; the CLI's own
 	// n<0 rejection is not a guarantee every caller gets) must never
-	// reach make()'s cap argument negative — that panics, not errors.
+	// reach make()'s cap argument negative, that panics, not errors.
 	result := make([]json.RawMessage, 0, max(0, min(n, len(files))))
 	for _, f := range files {
 		if len(result) >= n {

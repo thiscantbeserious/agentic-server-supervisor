@@ -5,7 +5,7 @@ package runtime
 // ineffective group_add,
 // or a wrong HOST_JOURNAL_DIR mount all produce the SAME symptom: the
 // container starts, the filesystem-level preflight (dir exists, has
-// files) already passed, but journalctl itself returns nothing — which
+// files) already passed, but journalctl itself returns nothing, which
 // reads as "quiet system" forever. These tests drive checkJournalReadable
 // directly with hand-written stubs (not the shared testdata/bin fixture
 // keys) because the discriminating cases here are about exit code and
@@ -55,7 +55,7 @@ func TestCheckJournalReadable_RealRecord(t *testing.T) {
 // TestCheckJournalReadable_EmptyExitZero is the exact trap the reviewer
 // measured against real journalctl in debian:trixie-slim: an unreadable
 // (or genuinely empty) journal exits 0 and, WITHOUT -o json, prints the
-// sentinel line "-- No entries --" to stdout — which a naive
+// sentinel line "-- No entries --" to stdout, which a naive
 // exit-code-only OR non-empty-stdout check both wave through. The stub
 // exits 0 and writes literally nothing, modeling the "-o json" case the
 // real check must use.
@@ -76,7 +76,7 @@ func TestCheckJournalReadable_EmptyExitZero(t *testing.T) {
 // -o json so this line never appears in the first place, and even if the
 // stub sends it anyway (defense in depth for this test), the check must
 // not accept it as a real record because it must have been invoked with
-// -o json in the first place — a JSON decoder would reject this line.
+// -o json in the first place, a JSON decoder would reject this line.
 func TestCheckJournalReadable_NoEntriesSentinelLine(t *testing.T) {
 	withStubJournalctlOnPath(t, `echo -- No entries --`)
 	cfg := testConfig(t, tick0)
@@ -121,14 +121,14 @@ exit 0
 	cfg := testConfig(t, tick0)
 
 	if err := checkJournalReadable(context.Background(), cfg); err != nil {
-		t.Fatalf("checkJournalReadable() = %v, want nil — the stub only emits a record when -o json is passed", err)
+		t.Fatalf("checkJournalReadable() = %v, want nil, the stub only emits a record when -o json is passed", err)
 	}
 }
 
 // TestCheckJournalReadable_UsesConfiguredDir proves the check queries the
 // CONFIGURED journal mount (HOST_JOURNAL_DIR / HOST_JOURNAL_VOLATILE_DIR),
 // not a bare invocation reading the test host's own /var/log/journal
-// (which does not exist in this mount layout at all — R4 mounts it at
+// (which does not exist in this mount layout at all, R4 mounts it at
 // /host/journal). A stub that only succeeds when it is invoked with
 // exactly the configured directory (via -D) proves this.
 func TestCheckJournalReadable_UsesConfiguredDir(t *testing.T) {
@@ -148,14 +148,14 @@ exit 1
 	t.Setenv("JOURNALCTL_TEST_WANT_DIR", cfg.HostJournalDir)
 
 	if err := checkJournalReadable(context.Background(), cfg); err != nil {
-		t.Fatalf("checkJournalReadable() = %v, want nil — the stub only succeeds when -D targets cfg.HostJournalDir", err)
+		t.Fatalf("checkJournalReadable() = %v, want nil, the stub only succeeds when -D targets cfg.HostJournalDir", err)
 	}
 }
 
 // TestStartupPreflight_JournalUnreadable_Exit78 is the integration point:
 // the filesystem-level preflight (dir exists, non-empty listing) already
 // passes in testConfig (a placeholder ".keep" file satisfies it), so the
-// only thing that can still fail here is the new journalctl-level check —
+// only thing that can still fail here is the new journalctl-level check,
 // proving it is actually wired into StartupPreflight, not just a helper
 // nobody calls.
 func TestStartupPreflight_JournalUnreadable_Exit78(t *testing.T) {
@@ -174,7 +174,7 @@ func TestStartupPreflight_JournalUnreadable_Exit78(t *testing.T) {
 		t.Error("err = nil, want non-nil naming the journal readability failure")
 	}
 
-	// The requirement is two clauses, not one — log ERROR naming the
+	// The requirement is two clauses, not one, log ERROR naming the
 	// likely cause (JOURNAL_GID / group_add / the /host/journal mount)
 	// AND exit 78. Asserting only the exit code lets the log line be
 	// deleted entirely, or stripped of its cause hint, without failing
@@ -210,25 +210,25 @@ func TestStartupPreflight_JournalReadable_Passes(t *testing.T) {
 // requirement: this is the one test in this file that talks to a REAL
 // journalctl rather than a stub belief about one, proving the "-o json
 // exits 0 with 0 bytes on an empty/unreadable journal" behavior this
-// whole check is built on actually holds outside our own fixtures — the
+// whole check is built on actually holds outside our own fixtures, the
 // exact behavior the reviewer measured directly in debian:trixie-slim and
 // the coordinator confirmed independently (PLAN.md amendment 29c385a).
 // Gated on SENTINEL_CONTAINER=1 (this repo's real-infrastructure marker,
 // C9) AND a present journalctl binary; skips LOUDLY (t.Skip with a named
-// reason) rather than silently passing when either is absent — this dev
+// reason) rather than silently passing when either is absent, this dev
 // machine (macOS) has no journalctl at all, so unconditionally requiring
 // it would fail every local run instead of proving anything.
 func TestCheckJournalReadable_RealJournalctl_Gated(t *testing.T) {
 	if os.Getenv("SENTINEL_CONTAINER") != "1" {
-		t.Skip("SKIP: SENTINEL_CONTAINER=1 not set — this test requires a real journalctl binary (container/Linux only)")
+		t.Skip("SKIP: SENTINEL_CONTAINER=1 not set, this test requires a real journalctl binary (container/Linux only)")
 	}
 	if _, err := exec.LookPath("journalctl"); err != nil {
-		t.Skip("SKIP: journalctl not found on PATH — this test requires a real journalctl binary")
+		t.Skip("SKIP: journalctl not found on PATH, this test requires a real journalctl binary")
 	}
 
 	cfg := testConfig(t, tick0)
 	// An empty tempdir mounted as HOST_JOURNAL_DIR: no journal files at
-	// all, which is the "unreadable/empty" case in miniature — real
+	// all, which is the "unreadable/empty" case in miniature, real
 	// journalctl must exit 0 and write 0 bytes under -o json, exactly the
 	// behavior checkJournalReadable relies on to fail loud rather than
 	// silently reading forever from nothing.
@@ -236,6 +236,6 @@ func TestCheckJournalReadable_RealJournalctl_Gated(t *testing.T) {
 	cfg.HostJournalVolatileDir = t.TempDir()
 
 	if err := checkJournalReadable(context.Background(), cfg); err == nil {
-		t.Error("checkJournalReadable() = nil against a real journalctl with no journal files — want an error (empty journal must fail loud)")
+		t.Error("checkJournalReadable() = nil against a real journalctl with no journal files, want an error (empty journal must fail loud)")
 	}
 }

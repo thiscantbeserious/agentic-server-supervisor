@@ -102,7 +102,7 @@ func TestStatusTypeMapping(t *testing.T) {
 
 // --- 5: TestBodyOrder ---
 //
-// 2593e07's skeleton: GAP, heading, value — repeated per section, in
+// 2593e07's skeleton: GAP, heading, value, repeated per section, in
 // order explanation -> Evidence -> Analysis (alert only) -> Recommendation.
 
 func TestBodyOrder(t *testing.T) {
@@ -145,7 +145,7 @@ func TestBodyOrder(t *testing.T) {
 }
 
 // TestGapLineIsU2800 pins the exact codepoint, not just "whatever gapLine
-// happens to equal" — a self-referential check against the package
+// happens to equal", a self-referential check against the package
 // constant would pass even if someone silently swapped it for a space.
 // U+2800 was chosen because it is a printable character (nothing trims
 // it) that still isn't itself pattern whitespace via unicode.IsSpace.
@@ -308,7 +308,7 @@ func TestSanitizeAllFields(t *testing.T) {
 	}
 
 	// The title template itself legitimately wraps the status in literal
-	// "[" "]" ("[ALERT] host: headline") — that markup is the renderer's
+	// "[" "]" ("[ALERT] host: headline"), that markup is the renderer's
 	// own, added after sanitization (N.0.4), not report text. Check only
 	// the report-derived portion (everything after "<host>: ").
 	_, headlinePart, ok := strings.Cut(p.Title, ": ")
@@ -325,7 +325,7 @@ func TestSanitizeAllFields(t *testing.T) {
 	}
 
 	// Evidence is rendered on its own line inside a code span (heading
-	// "**Evidence:**" on the line above) — only a backtick can break the
+	// "**Evidence:**" on the line above), only a backtick can break the
 	// code span, so only the backtick is touched. The fixture's evidence
 	// carries a backtick (must become a quote) AND underscores/asterisks/
 	// brackets (must survive verbatim, unlike the prose fields above).
@@ -559,7 +559,7 @@ func TestNoLegacySeparatorsOrIndentation(t *testing.T) {
 		"html":     BuildHTMLBody(cfg, r),
 	} {
 		t.Run(name, func(t *testing.T) {
-			for _, bad := range []string{"·", "—", "- "} {
+			for _, bad := range []string{"·", ", ", "- "} {
 				if strings.Contains(body, bad) {
 					t.Errorf("body still carries legacy separator %q: %s", bad, body)
 				}

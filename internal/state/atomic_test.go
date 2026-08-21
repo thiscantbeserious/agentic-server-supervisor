@@ -8,7 +8,7 @@ import (
 )
 
 // writeAtomic must not leave its temp file behind when the final Rename
-// fails — a stray .tmp-* in history/ evicts a real report from analyze's
+// fails, a stray .tmp-* in history/ evicts a real report from analyze's
 // window (S.9 case 2), and one anywhere else is a write outside the C4
 // whitelist that outlives the failed call. Renaming a regular file onto an
 // existing directory reliably fails (EISDIR) on every platform this runs

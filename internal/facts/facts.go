@@ -1,5 +1,5 @@
 // Package facts defines the collect output wire types (C5) and the embedded
-// facts.schema.json. Imported by collect, analyze, runtime, state — nobody
+// facts.schema.json. Imported by collect, analyze, runtime, state, nobody
 // redefines these types.
 package facts
 
@@ -51,7 +51,7 @@ func (s *Section[T]) UnmarshalJSON(b []byte) error {
 	return json.Unmarshal(b, &s.Data)
 }
 
-// Entry is the NORMALIZED journal entry (C5) — the only journal shape that
+// Entry is the NORMALIZED journal entry (C5), the only journal shape that
 // leaves internal/journal.
 type Entry struct {
 	TS         string  `json:"ts"`

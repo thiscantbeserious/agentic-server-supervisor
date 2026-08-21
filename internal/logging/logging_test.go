@@ -64,7 +64,7 @@ func TestHandlerRespectsMinLevel(t *testing.T) {
 
 // ParseLevel is the mapping every LOG_LEVEL-honoring construction site
 // (internal/state, internal/analyze, cmd/sentinel) routes through instead
-// of hardcoding slog.LevelInfo — this is the one place that mapping can
+// of hardcoding slog.LevelInfo, this is the one place that mapping can
 // be wrong for all three at once.
 func TestParseLevel(t *testing.T) {
 	cases := []struct {

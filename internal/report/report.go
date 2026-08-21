@@ -52,7 +52,7 @@ var keyPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // Validate is the executable form of report.schema.json: enums, rune-length
 // bounds, array caps, and the status/highest-severity consistency rule. It
-// does not use DisallowUnknownFields — unknown fields are stripped by
+// does not use DisallowUnknownFields, unknown fields are stripped by
 // ordinary json.Unmarshal, not rejected.
 func Validate(raw []byte) (*Report, error) {
 	// Presence check first: json.Unmarshal cannot itself tell "absent" from

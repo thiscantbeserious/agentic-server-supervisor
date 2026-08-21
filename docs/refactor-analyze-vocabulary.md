@@ -2,7 +2,7 @@
 
 **Historical design record, August 2026. Not a live specification.**
 `contracts/analyze.md` is binding and wins on every conflict; if this file ever
-disagrees with it, this file is the stale one — leave it alone rather than
+disagrees with it, this file is the stale one, leave it alone rather than
 "correct" it. It is kept because the reasoning is not recoverable from the
 result: why `stage 1`/`stage 2` had to go, what was rejected on the way, and
 which rejected options are not worth re-proposing.
@@ -14,7 +14,7 @@ to the new vocabulary, listed in §5.
 
 ## 1. Vocabulary
 
-The package described its two LLM calls as "stage 1" and "stage 2" — ordinal
+The package described its two LLM calls as "stage 1" and "stage 2", ordinal
 names a reader cannot decode. Replaced by the domain words:
 
 | Old | New | Why |
@@ -23,11 +23,11 @@ names a reader cannot decode. Replaced by the domain words:
 | stage 2 | **deep dive** | Not invented: the contract already said "deep-dive selection", `deep-queue/`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, the `DEEP` fence; the code already had `runDeepDive`, `deepDiveCapable`. Only the artifacts were named "stage2". |
 
 `deep dive` was already contract vocabulary; `stage 1`/`stage 2` was jargon
-layered on top of it. The contract is therefore amended too — it was the source
+layered on top of it. The contract is therefore amended too, it was the source
 of the bad naming, not a victim of it.
 
 **Naming principle**, applicable beyond this package: *name every unit by its
-domain role in the vocabulary the binding contract already uses — never by
+domain role in the vocabulary the binding contract already uses, never by
 ordinal position, layer cliché, or build order.* `collect`, `state` and
 `notify` already obeyed this; `analyze` was the only offender.
 
@@ -35,7 +35,7 @@ ordinal position, layer cliché, or build order.* `collect`, `state` and
 
 ```
 internal/analyze/
-├── analyze.go        Run, Options, Deps, DefaultDeps — tick orchestration only
+├── analyze.go        Run, Options, Deps, DefaultDeps, tick orchestration only
 ├── agy.go            the agy subprocess: exec, env, envelope, error classes
 ├── triage.go         call 1: runTriage, agyAttempt, classifyAgyErr
 ├── deepdive.go       call 2 whole: execution, selection, queue, validation
@@ -55,7 +55,7 @@ Deleted: `templates/` (5 files → 1), `stage2.go`, `deep.go`, `sentinel.md`,
 
 Three things this asserts that the old tree did not:
 
-- **The deep dive has one location.** It was smeared across three files —
+- **The deep dive has one location.** It was smeared across three files,
   selection in `deep.go`, execution buried mid-`analyze.go`, validation in
   `stage2.go`. `stage2.go` additionally hid the recommendation guard, which
   runs on the triage-only path too and has nothing to do with call 2.
@@ -83,16 +83,16 @@ Three things this asserts that the old tree did not:
   fragments become one `prompt.tmpl` with defines in render order, and the
   schema joins them because it is model-facing bytes.
 - **`buildCorrectionBlock`'s Go string literal moves into `prompt.tmpl`.** After
-  this, no *fixed* prompt text — no instruction, boundary paragraph or fence —
+  this, no *fixed* prompt text, no instruction, boundary paragraph or fence,
   lives in a Go string literal. Variable payloads are still marshalled from Go
   (the facts and finding JSON, the history projection's field names, the
   validator message the correction quotes); the claim is about the skeleton, not
-  about every byte. The truncation of the validation error also stays in Go —
+  about every byte. The truncation of the validation error also stays in Go,
   that is logic, not text.
 
 ## 3. Documentation rules
 
-1. A comment says what the thing does and why it exists — never which clause
+1. A comment says what the thing does and why it exists, never which clause
    mandated it. No `§`, `C<n>`, `A<n>`, `D<n>`, `step N`, test-case numbers, or
    review-round archaeology anywhere in code comments; git history owns that.
 2. Where a comment was only a citation, the rewrite states the actual reason
@@ -118,7 +118,7 @@ the recommendation guard.
 
 Byte-neutrality of rendered prompts is proven by `TestPromptGoldenFiles` and
 `TestPromptGoldenFiles_EmptyHistory`. **Golden file contents do not change and
-must not be regenerated** — their only occurrences of "stage" are ordinary
+must not be regenerated**, their only occurrences of "stage" are ordinary
 English from the role prose ("the analysis stage of a supervisor"), not the
 jargon. Only the three golden filenames change.
 
@@ -132,7 +132,7 @@ it cannot ship silently.
 
 ## 5. Observable string renames (approved)
 
-Nothing in the repo parses any of these — verified by grep. No on-disk state, no
+Nothing in the repo parses any of these, verified by grep. No on-disk state, no
 dedup key, no metric derives from them. No golden regeneration.
 
 - Three stderr line shapes: `stage1 attempt=… rc=…` → `triage attempt=… rc=…`,
@@ -146,22 +146,22 @@ dedup key, no metric derives from them. No golden regeneration.
 
 ## 6. Contract amendments
 
-`contracts/analyze.md` — the `stage 1`/`stage 2` vocabulary throughout, the
+`contracts/analyze.md`, the `stage 1`/`stage 2` vocabulary throughout, the
 stderr example lines, the §7 template headings, the role document path
 (including the §7.3 heading at :466 and the test-table row at :701), and the
-file-layout tree. `CONTRACTS.md` — the embedded-assets path in C1, the package
+file-layout tree. `CONTRACTS.md`, the embedded-assets path in C1, the package
 layout line, **and C8 at :228** ("Deep context for stage 2 is `collect.Run`
 with `DeepComponent` set"), which is live jargon in a binding convention.
-`contracts/runtime.md` — the role document filename. `PLAN.md` — "two-stage
-analysis" wording. `internal/report/report_test.go:37` — the `"stage-2 fields"`
+`contracts/runtime.md`, the role document filename. `PLAN.md`, "two-stage
+analysis" wording. `internal/report/report_test.go:37`, the `"stage-2 fields"`
 case name. `ARCHITECTURE.md` needs **nothing**; it already used the vocabulary
 being adopted.
 
-**`stage` is overloaded in this repo — three uses must NOT be renamed:**
-`contracts/runtime.md:33,40` (`Stage 1 — builder` / `Stage 2 — runtime`) are
+**`stage` is overloaded in this repo, three uses must NOT be renamed:**
+`contracts/runtime.md:33,40` (`Stage 1, builder` / `Stage 2, runtime`) are
 Docker build stages. `PLAN.md:22,35,47` and `CONTRACTS.md:236,239` say
 "implementation stage" in the TODO sense. And `role.md` contains "the analysis
-stage of a read-only server supervisor" — ordinary English, and its bytes are
+stage of a read-only server supervisor", ordinary English, and its bytes are
 inside all three goldens. A blanket `sed` fails the golden tests loudly, but
 would corrupt the documents silently.
 

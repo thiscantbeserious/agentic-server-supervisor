@@ -16,7 +16,7 @@ import (
 )
 
 // sharedBin/buildOnce compile the binary exactly once for the whole test
-// binary run (not once per test function) into a package-level temp dir —
+// binary run (not once per test function) into a package-level temp dir,
 // buildSentinel used to shell out to "go build" from 13 separate test
 // functions, which is the same compile repeated 13 times for no reason.
 var (
@@ -79,7 +79,7 @@ func runBin(t *testing.T, bin string, env []string, args ...string) (stdout, std
 
 // baseEnv builds a hermetic child environment (C9): only PATH/HOME (needed
 // to exec the binary) plus the C3 vars each test cares about. It must NOT
-// inherit the test process's ambient environment — a stray TICK_WINDOW,
+// inherit the test process's ambient environment, a stray TICK_WINDOW,
 // LOG_LEVEL, TZ or SENTINEL_NOW on a dev machine or CI runner would
 // silently change what these subprocess tests exercise.
 func baseEnv(t *testing.T, stateDir string) []string {
@@ -94,7 +94,7 @@ func baseEnv(t *testing.T, stateDir string) []string {
 }
 
 // N9: baseEnv must not leak the test process's ambient environment into
-// the subprocess — an ambient LOG_LEVEL (or TICK_WINDOW, TZ, SENTINEL_NOW)
+// the subprocess, an ambient LOG_LEVEL (or TICK_WINDOW, TZ, SENTINEL_NOW)
 // on a dev machine or CI runner must not change what the child sees.
 func TestBaseEnvIsHermetic(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "BOGUS-AMBIENT-VALUE")
@@ -148,7 +148,7 @@ func TestCollectBadDeepValue(t *testing.T) {
 	}
 }
 
-// D8: a usage error must say only that — not a correct usage diagnostic
+// D8: a usage error must say only that, not a correct usage diagnostic
 // followed by a false "not yet implemented" claim about the subcommand.
 func TestUsageErrorsDoNotClaimNotImplemented(t *testing.T) {
 	bin := buildSentinel(t)
@@ -254,13 +254,13 @@ func TestTickWithoutStateDirFlagUsesEnv(t *testing.T) {
 
 // TestTickOnceRunsStartupPreflight verifies R2's startup sequence
 // ("preflight, the read-only lint, agy-home seeding") runs "once before
-// --loop starts ticking, AND once before the single tick in --once" — if
+// --loop starts ticking, AND once before the single tick in --once", if
 // main.go only ran it inside Loop(), a --once invocation with neither
 // journal directory mounted would silently skip a check --loop would have
 // enforced. baseEnv gives a
 // real, writable $STATE_DIR (so state.New succeeds) but never sets
 // HOST_JOURNAL_DIR/HOST_JOURNAL_VOLATILE_DIR, so both fall back to their
-// C3 defaults (/host/journal, /host/journal-volatile) — real container
+// C3 defaults (/host/journal, /host/journal-volatile), real container
 // paths that do not exist on a dev/CI host, which is exactly the
 // "neither journal directory is readable and non-empty" case StartupPreflight
 // must catch.
@@ -323,7 +323,7 @@ func fullTickEnv(t *testing.T, stateDir string) []string {
 
 // TestTickOnceAllocatesTickSeq verifies R3.1's tick-seq counter is scoped
 // to the sentinel-tick COMMAND ("owned exclusively by tick"), not to
-// --loop — hardcoding seq=1 for every --once invocation would let an
+// --loop, hardcoding seq=1 for every --once invocation would let an
 // operator debugging against a live /state volume silently write seq-1
 // records into active-alerts the loop was tracking at seq 400+,
 // corrupting the trend data analyze reads back out of history/. This MUST
@@ -338,7 +338,7 @@ func TestTickOnceAllocatesTickSeq(t *testing.T) {
 
 	// agy isn't on PATH (AGY_BIN points nowhere), so analyze legitimately
 	// falls back and the tick reports exit 3 (C2: "3 | analyze failed").
-	// That's an expected, valid outcome here — a usage/config-error code
+	// That's an expected, valid outcome here, a usage/config-error code
 	// (64/65/69/78) would mean the run never reached a real tick at all,
 	// which is what actually matters for this test.
 	stdout1, stderr1, code1 := runBin(t, bin, env, "tick", "--once")
@@ -356,7 +356,7 @@ func TestTickOnceAllocatesTickSeq(t *testing.T) {
 	}
 	seq2 := tickSeqFromStdout(t, stdout2)
 	if seq2 != 2 {
-		t.Fatalf("run 2: meta.tick_seq = %d, want 2 — the counter must advance across separate --once invocations (stdout=%s)", seq2, stdout2)
+		t.Fatalf("run 2: meta.tick_seq = %d, want 2, the counter must advance across separate --once invocations (stdout=%s)", seq2, stdout2)
 	}
 
 	if _, err := os.Stat(filepath.Join(stateDir, "tick-seq")); err != nil {
@@ -417,7 +417,7 @@ func TestConfigErrorExits78AndNamesVariable(t *testing.T) {
 // regardless of configuration. run() never holds a *config.Config (each
 // subcommand loads
 // its own), so logLevelForSubcommandError re-reads it via a second, cheap
-// config.Load() call — this drives that exact function in-process, the
+// config.Load() call, this drives that exact function in-process, the
 // same one logSubcommandError calls, rather than a hand-built level.
 func TestLogLevelForSubcommandError_HonorsLogLevel(t *testing.T) {
 	t.Setenv("STATE_DIR", t.TempDir())

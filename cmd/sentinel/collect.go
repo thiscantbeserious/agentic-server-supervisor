@@ -17,7 +17,7 @@ const collectUsage = "usage: sentinel collect [--deep zfs|smart|kernel|ras]"
 
 // runCollect implements `sentinel collect` (contracts/collect.md §1):
 // flag parsing, collect.Run, and the error → exit code map. stdout is
-// reserved for the compact JSON document (C7) — everything else goes to
+// reserved for the compact JSON document (C7), everything else goes to
 // stderr, and stdout is never written on a non-zero exit.
 func runCollect(args []string) (int, error) {
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)

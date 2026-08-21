@@ -114,7 +114,7 @@ func TestKey(t *testing.T) {
 }
 
 func TestKeyRawAlertVector(t *testing.T) {
-	// The raw-alert path uses dedup.Key("kernel", entry.Message) — priority is not part of the key.
+	// The raw-alert path uses dedup.Key("kernel", entry.Message), priority is not part of the key.
 	msg := "ata3.00: exception Emask 0x0 SAct 0x0 SErr 0x0 action 0x6 frozen"
 	k := Key("kernel", msg)
 	if len(k) != 16 {

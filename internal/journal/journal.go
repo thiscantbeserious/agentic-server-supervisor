@@ -28,7 +28,7 @@ var ErrNoJournal = errors.New("journal directory not found")
 // Dirs and merged.
 type Query struct {
 	Dirs  []string // existing directories only (see Dirs())
-	Since string   // e.g. "600s" — Run passes it to journalctl as "--since -<Since>"
+	Since string   // e.g. "600s", Run passes it to journalctl as "--since -<Since>"
 	Args  []string // e.g. []string{"-k", "-p", "err"}
 
 	// ExcludeTransport drops decoded records whose _TRANSPORT field matches
@@ -43,26 +43,26 @@ type Query struct {
 	// exceeds it (contracts/collect.md §3 "Record cap"): once the window
 	// is full, decoding a further record evicts one kept record and
 	// counts it in the returned dropped total, so the survivors are
-	// always the newest — and the loss is always accounted for
+	// always the newest, and the loss is always accounted for
 	// (journalctl -n would make it uncountable: journald just never sends
 	// the surplus). 0 means unlimited.
 	MaxRecords int
 
 	// RawAlertMaxPriority exempts entries with priority <= this value
 	// from eviction (D2) for as long as any unprotected entry remains in
-	// the window — eviction picks the oldest unprotected entry first.
+	// the window, eviction picks the oldest unprotected entry first.
 	// Once the window holds nothing but protected entries, the ceiling
 	// still holds: the oldest protected entry is evicted instead and
 	// counted like any other drop. An unbounded heap during a genuine
 	// emerg/crit storm is the exact OOM the cap exists to prevent, and
 	// losing the oldest of MaxRecords critical lines is better than
-	// losing the whole container — and the storm itself — to the OOM
+	// losing the whole container, and the storm itself, to the OOM
 	// killer. D2 means "evicted last" here, not "never".
 	RawAlertMaxPriority int
 }
 
 // DirError is one directory's journalctl failure. Run tolerates any
-// number of these as long as at least one directory succeeded — the
+// number of these as long as at least one directory succeeded, the
 // persistent and volatile journals are two views of the same log, and a
 // permission problem on one must not discard records already collected
 // from the other (contracts/collect.md §3).
@@ -91,11 +91,11 @@ func Dirs(paths ...string) []string {
 // Run execs journalctl once per dir, decodes the JSON stream, normalizes,
 // merges, sorts by ts and de-duplicates on (ts, message).
 //
-// dropped counts records beyond Query.MaxRecords across all dirs — the
+// dropped counts records beyond Query.MaxRecords across all dirs, the
 // caller adds it to the section's dropped_entries and sets truncated:
 // true when dropped > 0. warnings carries one *DirError per directory
 // that failed while at least one other directory succeeded (§3 "one
-// directory failing does not discard the other") — the caller records
+// directory failing does not discard the other"), the caller records
 // each as a collector_errors[] entry without failing the section. err is
 // non-nil only when EVERY directory failed (or neither exists), in which
 // case entries/dropped/warnings are all zero and the section must fail.
@@ -127,7 +127,7 @@ func Run(ctx context.Context, q Query) (entries []facts.Entry, dropped int, warn
 	if !ok {
 		// Every directory failed: this is a section failure, not a
 		// tolerated partial one. Surface the first directory's error
-		// (deterministic — Dirs() preserves HOST_JOURNAL_DIR before
+		// (deterministic, Dirs() preserves HOST_JOURNAL_DIR before
 		// HOST_JOURNAL_VOLATILE_DIR) as the query's own error.
 		return nil, 0, nil, warn[0]
 	}
@@ -171,7 +171,7 @@ func runOne(ctx context.Context, dir, since string, args []string, exclude map[s
 	// entry has priority <= maxPriority) and cleared the moment an
 	// unprotected record is appended. It turns the common "window is one
 	// long emerg storm" case from an O(n) rescan per record into an O(1)
-	// check — without it, that path is quadratic (contracts/collect.md
+	// check, without it, that path is quadratic (contracts/collect.md
 	// §3 "Record cap").
 	allProtected := false
 	dec := json.NewDecoder(stdout)
@@ -184,7 +184,7 @@ decodeLoop:
 		case decErr != nil:
 			if ctx.Err() == context.DeadlineExceeded {
 				// The pipe was torn down because the section timeout
-				// killed journalctl mid-stream — that looks like a
+				// killed journalctl mid-stream, that looks like a
 				// decode error but is a timeout, not corruption.
 				cmd.Wait() //nolint:errcheck // reap the child
 				return nil, 0, context.DeadlineExceeded
@@ -209,7 +209,7 @@ decodeLoop:
 			// window never exceeds maxRecords. Evict the oldest
 			// unprotected (priority > RAW_ALERT_MAX_PRIORITY) kept entry
 			// first, same as §5. D2 means "evicted last" here, not
-			// "never" — once the window holds nothing but protected
+			// "never", once the window holds nothing but protected
 			// entries (reachable only once maxRecords consecutive
 			// emerg/crit/alert records have arrived), the oldest
 			// protected entry is evicted instead and counted the same as
@@ -233,7 +233,7 @@ decodeLoop:
 			if evictIdx == -1 {
 				// ponytail: evictIdx is always 0 here (oldest, protected
 				// or not), so this could drop the head without the
-				// memmove append(entries[:i], entries[i+1:]...) does —
+				// memmove append(entries[:i], entries[i+1:]...) does,
 				// O(n×cap) all-protected worst case reaches
 				// SECTION_TIMEOUT around 600k records/query. Left as is:
 				// well outside anything bam produces, and a reslice-based
@@ -372,8 +372,8 @@ func parseMessage(raw json.RawMessage) string {
 	return ""
 }
 
-// mergeDedup sorts ascending by ts (stable, so ties keep original —
-// per-dir, dir-order — order) and drops (ts, message) duplicates, keeping
+// mergeDedup sorts ascending by ts (stable, so ties keep original,
+// per-dir, dir-order, order) and drops (ts, message) duplicates, keeping
 // the first occurrence.
 func mergeDedup(entries []facts.Entry) []facts.Entry {
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].TS < entries[j].TS })

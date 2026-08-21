@@ -1,4 +1,4 @@
-// guard.go: the deterministic deny-list over the recommendation field —
+// guard.go: the deterministic deny-list over the recommendation field,
 // the last check before model output reaches text an operator might paste
 // into a root shell.
 //
@@ -19,13 +19,13 @@ import (
 // patterns there destroyed legitimate reports on day one. A recommendation
 // is different in kind: it is a command proposal a tired operator may paste
 // into a root shell, so the patterns are broad and false positives are
-// accepted — a suppressed suggestion costs one visible meta finding, a
+// accepted, a suppressed suggestion costs one visible meta finding, a
 // missed one can cost the host.
 //
 // Hard-won shape rules, each from a real false-positive class:
 //   - danger tokens are word-bounded ("dd" must not match "add");
 //   - a TLD-shaped suffix is only dangerous when it is not operational
-//     vocabulary — on the target every systemd unit is "<name>.service",
+//     vocabulary, on the target every systemd unit is "<name>.service",
 //     and a guard that cannot say "restart smartd.service" destroys the
 //     output it protects. "sh" is deliberately absent from the safe set:
 //     .sh is a live TLD widely used to host payloads;
@@ -41,7 +41,7 @@ import (
 // and run it with the shell" is not catchable by substring matching. The
 // residual risk is accepted because a human evaluates every recommendation
 // and the supervisor itself executes nothing. Any change here must pass
-// both the attack table and the operational-prose table in the tests —
+// both the attack table and the operational-prose table in the tests,
 // three consecutive false-positive classes came from testing against the
 // attack table alone.
 var (
@@ -77,7 +77,7 @@ const recommendationWithheldEvidence = "recommendation withheld"
 // appends one watch finding recording the withholding. The record is never
 // dropped: if the report is at the findings cap, the first "info"
 // (all-clear) finding is evicted to make room, or the last finding when the
-// report carries no "info" finding — losing an existing finding is better
+// report carries no "info" finding, losing an existing finding is better
 // than silently losing the fact that a dangerous proposal was suppressed.
 // Idempotent, and a no-op when no finding carries a recommendation.
 func guardRecommendations(rep *report.Report) {

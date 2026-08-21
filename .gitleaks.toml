@@ -1,7 +1,7 @@
 [extend]
 useDefault = true
 
-# The default ruleset does not detect a Telegram bot token — verified by
+# The default ruleset does not detect a Telegram bot token, verified by
 # planting one and watching a stock scan report nothing. That is the one
 # credential this system cannot operate without, so it carries its own rule.
 [[rules]]

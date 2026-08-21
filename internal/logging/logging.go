@@ -6,7 +6,7 @@
 //
 // Callers set the component via logger.With("component", "collect"). Never
 // log $AGY_SECRET_DIR contents, APPRISE_KEY, MAILRISE_PASS, TELEGRAM_*
-// values, prompt or facts content, or agy stdout (C7) — the handler cannot
+// values, prompt or facts content, or agy stdout (C7), the handler cannot
 // enforce that; it is a discipline for every call site.
 package logging
 
@@ -24,7 +24,7 @@ const componentKey = "component"
 
 // ParseLevel maps a LOG_LEVEL string to its slog.Level. internal/config's
 // Load already restricts LOG_LEVEL to exactly DEBUG/INFO/WARN/ERROR (exit
-// 78 otherwise) — this is a pure mapping of that validated value, not a
+// 78 otherwise), this is a pure mapping of that validated value, not a
 // second validator, so anything else (including "") falls back to
 // LevelInfo rather than erroring again.
 func ParseLevel(s string) slog.Level {

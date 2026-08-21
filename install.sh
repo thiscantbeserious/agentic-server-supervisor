@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — R5. The one deliberate bash artifact in this
+# install.sh, R5. The one deliberate bash artifact in this
 # repo: it runs on the host as root before the sentinel image exists,
 # needs apt-get and systemctl, and shipping a second Go binary to the host
 # just to write a handful of config files is more moving parts than an
@@ -7,7 +7,7 @@
 # if the host part ever grows.
 #
 # ponytail: kept as a single bash script rather than promoted to a Go
-# subcommand for that reason — the ceiling is "the host part grows past
+# subcommand for that reason, the ceiling is "the host part grows past
 # what a shell script can do cleanly," not a line count.
 #
 # The binding spec is contracts/runtime.md R5.
@@ -26,7 +26,7 @@ ENV_FILE="./.env"
 ENV_FILE_EXPLICIT=0
 
 # Stack creation (curl | sudo bash, nothing copied onto the host first).
-# REPO_SLUG is this script's own repository — it is not a generic
+# REPO_SLUG is this script's own repository, it is not a generic
 # installer for someone else's fork, so this is a constant, not a flag.
 REPO_SLUG="thiscantbeserious/agentic-server-supervisor"
 REF="${SENTINEL_REF:-main}"
@@ -35,7 +35,7 @@ LAYOUT=""
 COMPOSE_NAME=""
 ENV_NAME=""
 # Set to 1 only when resolve_stack_dir found 2+ compose-root candidates
-# under --check/--dry-run and (correctly) refused to pick one — the run
+# under --check/--dry-run and (correctly) refused to pick one, the run
 # block below reads this to skip step0b_secrets/step6 rather than
 # preview a plan against the unrelated default ./.env, the same
 # "state left stale past an early return" shape RENDER_COLLAPSED had.
@@ -51,12 +51,12 @@ usage: $PROG [--check] [--dry-run] [--mailrise-host HOST] [--mailrise-port PORT]
   --mailrise-port PORT    SMTP port (default 8025)
   --env-file PATH         use this exact env file, unmodified layout (default ./.env);
                           mutually exclusive with --stack-dir
-  --stack-dir PATH        create/use the compose stack here — fetches docker-compose.yml
+  --stack-dir PATH        create/use the compose stack here, fetches docker-compose.yml
                           and mailrise.conf from this script's own repo, prompts for the
                           bot token/chat id/mailrise password if missing (default:
-                          detected — a detected compose root's own "<name>/sentinel"
+                          detected, a detected compose root's own "<name>/sentinel"
                           if exactly one is found on this host, /opt/sentinel if none are;
-                          several candidates are never picked silently — a numbered menu
+                          several candidates are never picked silently, a numbered menu
                           asks which one, or type a path of your own; offered
                           interactively, Enter accepts a single detected default)
   --ref REF                git ref to fetch deploy/docker-compose.yml and
@@ -80,7 +80,7 @@ require_value() {
     exit 64
   fi
   # None of the three value-taking flags accepts a value starting with
-  # "-" (a hostname, a port, a path) — so a missing value followed by
+  # "-" (a hostname, a port, a path), so a missing value followed by
   # the next flag, long ("--mailrise-host --check") or short
   # ("--env-file -h"), must not silently consume that flag as the
   # value. On a script that runs as root and is meant to run
@@ -106,7 +106,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$ENV_FILE_EXPLICIT" -eq 1 ] && [ -n "$STACK_DIR" ]; then
-  echo "$PROG: --env-file and --stack-dir are mutually exclusive — --env-file targets one file you already filled in yourself; --stack-dir creates a whole new stack" >&2
+  echo "$PROG: --env-file and --stack-dir are mutually exclusive, --env-file targets one file you already filled in yourself; --stack-dir creates a whole new stack" >&2
   usage >&2
   exit 64
 fi
@@ -125,7 +125,7 @@ TRANSIENT_FAIL=0
 
 # Whether the package each later step depends on is actually present.
 # Set by step1 after it knows the real outcome (already-installed,
-# freshly installed, or failed) — never assumed from step1's own exit
+# freshly installed, or failed), never assumed from step1's own exit
 # status alone, since apt-get install with multiple packages does not
 # guarantee all-or-nothing. A step that configures a service or a mail
 # target for a package that isn't there is the half-configured host this
@@ -134,7 +134,7 @@ TRANSIENT_FAIL=0
 RASDAEMON_OK=0
 MSMTP_OK=0
 
-# Set by docker_preflight, below, once — never assumed. The sentinel
+# Set by docker_preflight, below, once, never assumed. The sentinel
 # stack cannot start without both, and the two are checked separately
 # because "docker missing" and "docker present but the compose plugin
 # is not" are different operator actions to fix.
@@ -143,13 +143,13 @@ COMPOSE_OK=0
 
 # MAIL_OK means mail will actually work: the msmtp package is present
 # AND step3 wrote a credentialed /etc/msmtprc. Package presence alone is
-# not enough — smartd's -m target and ZED_EMAIL_PROG both hand mail to
+# not enough, smartd's -m target and ZED_EMAIL_PROG both hand mail to
 # msmtp regardless of whether msmtp has anything to send with, so a step
 # that only checked MSMTP_OK would point live alert paths at an msmtp
 # with no config file at all whenever credentials are the missing piece
-# rather than the package. Steps 3, 4 and 5 all gate on this ONE flag —
+# rather than the package. Steps 3, 4 and 5 all gate on this ONE flag,
 # not three separate checks that could drift apart from each other
-# again — because the property that matters is identical for all three:
+# again, because the property that matters is identical for all three:
 # a step whose output cannot work must not run. Computed once, right
 # after step1, by compute_mail_status.
 MAIL_OK=0
@@ -157,11 +157,11 @@ MAIL_NOT_OK_REASON=""
 SMTP_USER=""
 SMTP_PASS=""
 # Set only for the credentials-missing case specifically (never for a
-# missing package, which is TRANSIENT_FAIL/75 — retryable by installing
+# missing package, which is TRANSIENT_FAIL/75, retryable by installing
 # the package). Missing credentials are permanent until a human edits
 # --env-file, so R5 (contract) now assigns this its own exit 78, the
 # same code C2 uses for "required ops input missing" on the sentinel
-# binary — 75 would tell rollout automation to retry a condition that
+# binary, 75 would tell rollout automation to retry a condition that
 # never resolves without that edit.
 MISSING_ENV_INPUT=0
 
@@ -189,7 +189,7 @@ compute_mail_status() {
     # converged while every mail send fails silently.
     MAIL_OK=0
     MAIL_NOT_OK_REASON="MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS missing or empty in $ENV_FILE"
-    echo "$PROG: $MAIL_NOT_OK_REASON — mail delivery (msmtprc, smartd -m, ZED) will not be configured" >&2
+    echo "$PROG: $MAIL_NOT_OK_REASON, mail delivery (msmtprc, smartd -m, ZED) will not be configured" >&2
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
       MISSING_ENV_INPUT=1
     fi
@@ -209,9 +209,9 @@ compute_mail_status() {
 # Sets RENDER_COLLAPSED to the number of managed blocks found when more
 # than one existed (0 otherwise), so callers can report a collapse
 # distinctly from an ordinary content update. Everything between our own
-# markers is OUR content, never the operator's — unlike the pre-existing
+# markers is OUR content, never the operator's, unlike the pre-existing
 # smartd -m line, which had to survive as a comment because it belonged
-# to them — so a second block found alongside the first is our own mess
+# to them, so a second block found alongside the first is our own mess
 # (a half-finished run, a restored backup, a merge) and collapsing it
 # destroys nothing an operator wrote. A host that cannot resolve this
 # without a human is worse than one that fixes it and says so.
@@ -237,7 +237,7 @@ $MARK_END"
 
   # Computed here, before the CHECK/DRY_RUN early returns below, so a
   # caller under either mode can still report "would collapse N blocks"
-  # accurately — block_count is known already at this point, and a
+  # accurately, block_count is known already at this point, and a
   # collapse is a fact about the file's CURRENT content, not about
   # whether this call is about to write anything.
   if [ "$block_count" -gt 1 ]; then
@@ -263,16 +263,16 @@ $MARK_END"
     if [ "$block_count" -ge 1 ]; then
       # Emit the desired block once, at the FIRST begin marker; every
       # later marker pair (and its content) is dropped entirely rather
-      # than re-emitted — collapsing N blocks into 1, not just refreshing
+      # than re-emitted, collapsing N blocks into 1, not just refreshing
       # the content of each.
       #
       # `repl` carries desired_block, which embeds operator data
-      # (step3's `password ${smtp_pass}`) — passed via `env` + ENVIRON,
+      # (step3's `password ${smtp_pass}`), passed via `env` + ENVIRON,
       # NOT `awk -v repl=...`. `awk -v` performs escape-sequence
       # processing on the assigned value: `awk -v r="p\tb" 'BEGIN{print
       # r}'` prints a literal TAB, not the four characters `p\tb`. This
       # is the third instance of the same family of bug as `sed`'s
-      # `s///` and bash's own `${var//pat/rep}` — a mechanism that looks
+      # `s///` and bash's own `${var//pat/rep}`, a mechanism that looks
       # like plain string interpolation but silently reinterprets
       # backslash/ampersand sequences in the value it is handed.
       # `ENVIRON` performs no such processing, so a password containing
@@ -283,7 +283,7 @@ $MARK_END"
       # it is ever handed something else. Three other `awk -v` sites
       # remain elsewhere in this script (outside_block/outside_after's
       # scans, and the pre-existing-`-m`-line comment-out), all carrying
-      # only MARK_BEGIN/MARK_END/DISABLED_MARK — fixed script constants,
+      # only MARK_BEGIN/MARK_END/DISABLED_MARK, fixed script constants,
       # never operator data, so left as `-v`.
       env b="$MARK_BEGIN" e="$MARK_END" repl="$desired_block" awk '
         $0==ENVIRON["b"] {if (!seen) {print ENVIRON["repl"]; seen=1} skip=1; next}
@@ -301,10 +301,10 @@ $MARK_END"
 
   if ! install -m "$mode" -o root -g root "$tmp" "$file"; then
     # An unchecked `install` (read-only /etc, full disk) would report
-    # success — "updated" and changed+1 — while writing nothing. Fail
+    # success, "updated" and changed+1, while writing nothing. Fail
     # loud instead: TRANSIENT_FAIL makes the whole run exit 75 (safe to
     # re-run), and returning 1 here means the caller's "already
-    # converged" branch runs rather than "updated" — imperfect wording
+    # converged" branch runs rather than "updated", imperfect wording
     # for this one case, but it never claims a write that did not
     # happen, and the exit code is the honest signal an operator or a
     # script checking $? actually reads.
@@ -324,7 +324,7 @@ pkg_installed() {
 # strip_quotes removes ONE matched pair of surrounding single or double
 # quotes from an env-file value. Quoting a value
 # (MAILRISE_SMTP_PASS="secret") is ordinary env-file style, and
-# .env.example being unquoted does not mean an operator's real .env is —
+# .env.example being unquoted does not mean an operator's real .env is,
 # unstripped, msmtp receives the quote characters as part of the
 # password and authentication fails against the real value while a
 # string check on the config file would still look fine.
@@ -340,15 +340,15 @@ strip_quotes() {
   printf '%s' "$v"
 }
 
-# replace_token TEMPLATE TOKEN VALUE — every literal occurrence of TOKEN
+# replace_token TEMPLATE TOKEN VALUE, every literal occurrence of TOKEN
 # in TEMPLATE replaced with VALUE, printed to stdout. Deliberately NOT
 # bash's own "${template//TOKEN/VALUE}" pattern substitution: that was
 # measured to have the SAME pitfall sed's s/// has, just less
-# documented — bash 5.2's own replacement text treats an unescaped '&'
+# documented, bash 5.2's own replacement text treats an unescaped '&'
 # as "the matched text" too. Reproduced directly:
 # x="hello WORLD bye"; echo "${x//WORLD/A&B}" prints "hello AWORLDB bye",
 # not "hello A&B bye". This function uses only prefix/suffix REMOVAL
-# (${var%%pat*}, ${var#*pat}) and plain "$value" concatenation — neither
+# (${var%%pat*}, ${var#*pat}) and plain "$value" concatenation, neither
 # operation has any "replacement text" concept, so no character VALUE
 # contains can ever be treated as special. VALUE is used exactly once
 # per occurrence via ordinary variable interpolation, which is always
@@ -374,7 +374,7 @@ replace_token() {
 
 # have_tty succeeds only if this process has a controlling terminal
 # reachable at /dev/tty. Under `curl -fsSL URL | sudo bash`, fd 0 IS the
-# piped script, not a place to read an operator's answer from — reading a
+# piped script, not a place to read an operator's answer from, reading a
 # prompt from stdin in that shape would silently consume a line of shell
 # source as a bot token. /dev/tty is the one path that still refers to the
 # real terminal (or, under `ssh -t`, the allocated pty) regardless of what
@@ -383,7 +383,7 @@ have_tty() {
   { : <>/dev/tty; } 2>/dev/null
 }
 
-# prompt_with_default PROMPT DEFAULT — shows PROMPT and DEFAULT, reads one
+# prompt_with_default PROMPT DEFAULT, shows PROMPT and DEFAULT, reads one
 # line from /dev/tty, echoes DEFAULT verbatim if the operator just pressed
 # Enter. Never used for secrets.
 prompt_with_default() {
@@ -397,7 +397,7 @@ prompt_with_default() {
   fi
 }
 
-# prompt_secret PROMPT — reads one line from /dev/tty with terminal echo
+# prompt_secret PROMPT, reads one line from /dev/tty with terminal echo
 # off (read -rs), so the value never appears on screen, in scrollback, or
 # in any session log a terminal multiplexer might keep. Same class of rule
 # as C7's prohibition on logging the apprise key: a secret that touches
@@ -411,10 +411,10 @@ prompt_secret() {
   printf '%s' "$val"
 }
 
-# require_secret NAME PROMPT CURRENT SILENT — sets REQUIRE_SECRET_RESULT.
+# require_secret NAME PROMPT CURRENT SILENT, sets REQUIRE_SECRET_RESULT.
 # Deliberately NOT called as val="$(require_secret ...)": command
 # substitution forks a subshell, and MISSING_ENV_INPUT=1 set inside a
-# subshell never reaches the parent shell — an earlier version of this
+# subshell never reaches the parent shell, an earlier version of this
 # function did exactly that and silently lost the flag, which is the
 # kind of bug this whole design exists to prevent (a missing secret
 # reported as fine). A global result variable has no subshell to lose
@@ -422,11 +422,11 @@ prompt_secret() {
 #
 # Returns CURRENT unchanged if already non-empty: idempotent re-run,
 # never re-prompt for a value already in the env file. Otherwise prompts
-# (silently, read -rs, if SILENT=1; visibly, read -r, if SILENT=0 — a
+# (silently, read -rs, if SILENT=1; visibly, read -r, if SILENT=0, a
 # chat id is not a credential) when a terminal is available. Under
 # --check/--dry-run, which must never prompt, records the gap as drift
 # instead. With no terminal at all on a real run, sets MISSING_ENV_INPUT
-# and returns empty — never a silent empty write, which is the one
+# and returns empty, never a silent empty write, which is the one
 # failure mode worse than any prompt: a supervisor stack that starts,
 # reports healthy, and never delivers a single notification.
 require_secret() {
@@ -442,7 +442,7 @@ require_secret() {
     return
   fi
   if ! have_tty; then
-    echo "$PROG: $name is required and not already set in $ENV_FILE, but no controlling terminal is available to prompt for it (this is what \`curl | bash\` looks like without a real terminal) — re-run with a terminal attached, or pre-fill $ENV_FILE and pass --env-file" >&2
+    echo "$PROG: $name is required and not already set in $ENV_FILE, but no controlling terminal is available to prompt for it (this is what \`curl | bash\` looks like without a real terminal), re-run with a terminal attached, or pre-fill $ENV_FILE and pass --env-file" >&2
     MISSING_ENV_INPUT=1
     return
   fi
@@ -454,22 +454,22 @@ require_secret() {
     IFS= read -r val < /dev/tty
     REQUIRE_SECRET_RESULT="$val"
   fi
-  # A terminal was available and the operator answered — but Enter with
+  # A terminal was available and the operator answered, but Enter with
   # nothing typed is not an answer. Treated identically to the no-TTY
   # case above: this is the same "I still don't have it" outcome by a
   # different route, and MAILRISE_SMTP_USER/PASS only escaped this
   # exact gap by luck (compute_mail_status re-reads the env file
-  # independently and catches a blank password on its own) — TOKEN and
+  # independently and catches a blank password on its own), TOKEN and
   # CHAT_ID have no such second check, and compose does not :?-guard
   # them, so an empty answer here used to install a stack that reports
   # success with no Telegram credentials at all.
   if [ -z "$REQUIRE_SECRET_RESULT" ]; then
-    echo "$PROG: $name was left empty at the prompt — it is still required; re-run and this script will prompt only for what is still missing" >&2
+    echo "$PROG: $name was left empty at the prompt, it is still required; re-run and this script will prompt only for what is still missing" >&2
     MISSING_ENV_INPUT=1
   fi
 }
 
-# verb_phrase ACTUAL WOULD — the top-level run summary is the last thing
+# verb_phrase ACTUAL WOULD, the top-level run summary is the last thing
 # an operator reads before deciding to write to a real host, so it must
 # never claim more than the mode actually did. The per-action lines
 # already say "[dry-run] would ..."; this keeps the summary lines that
@@ -482,7 +482,7 @@ verb_phrase() {
   fi
 }
 
-# env_var_value FILE KEY — current value of KEY in FILE, quote-stripped,
+# env_var_value FILE KEY, current value of KEY in FILE, quote-stripped,
 # empty if absent. Reuses strip_quotes for the same reason
 # compute_mail_status already does: a quoted value in an operator-edited
 # file must not carry its quote characters into a credential.
@@ -492,10 +492,10 @@ env_var_value() {
   strip_quotes "$(grep "^${key}=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2-)"
 }
 
-# upsert_env_var FILE KEY VALUE — sets KEY=VALUE in FILE only if KEY is
+# upsert_env_var FILE KEY VALUE, sets KEY=VALUE in FILE only if KEY is
 # currently absent or empty there; a key already carrying a non-empty
 # value is left untouched, so re-running never clobbers an operator's own
-# edit or a value a prior run already prompted for. VALUE="" is a no-op —
+# edit or a value a prior run already prompted for. VALUE="" is a no-op,
 # the caller is responsible for not calling this when a required secret
 # is still unknown, and skipping the write here too is a second guard
 # against ever staging an empty assignment. Mode 0600 root:root always:
@@ -538,7 +538,7 @@ set_env_default() {  # KEY VALUE
   fi
 }
 
-# write_file_if_differs FILE MODE SRC_PATH — installs SRC_PATH to FILE at
+# write_file_if_differs FILE MODE SRC_PATH, installs SRC_PATH to FILE at
 # MODE only if the content differs (or FILE is missing). Same
 # mktemp+install atomic-replace pattern as render_managed_block, but for
 # a file this script owns in full rather than one shared with an
@@ -564,7 +564,7 @@ write_file_if_differs() {
   return 0
 }
 
-# ensure_dir DIR MODE DESC — idempotent mkdir with the same
+# ensure_dir DIR MODE DESC, idempotent mkdir with the same
 # note/changed/--check/--dry-run bookkeeping every other step uses.
 ensure_dir() {
   local dir="$1" mode="$2" desc="$3"
@@ -593,10 +593,10 @@ ensure_dir() {
   changed=$((changed+1))
 }
 
-# ensure_symlink LINK TARGET_BASENAME — creates LINK -> TARGET_BASENAME
+# ensure_symlink LINK TARGET_BASENAME, creates LINK -> TARGET_BASENAME
 # (relative, so the stack directory stays movable) only if it does not
 # already point there. Never touches a LINK that exists as a regular
-# file — that would mean real content already lives there, and silently
+# file, that would mean real content already lives there, and silently
 # replacing it is exactly the kind of surprise this whole script exists
 # to avoid.
 ensure_symlink() {
@@ -607,7 +607,7 @@ ensure_symlink() {
       return
     fi
   elif [ -e "$link" ]; then
-    echo "$PROG: $link exists and is not a symlink to $target — refusing to overwrite it" >&2
+    echo "$PROG: $link exists and is not a symlink to $target, refusing to overwrite it" >&2
     TRANSIENT_FAIL=1
     return
   fi
@@ -629,7 +629,7 @@ ensure_symlink() {
   changed=$((changed+1))
 }
 
-# ensure_curl installs curl if it is missing — needed to fetch the stack
+# ensure_curl installs curl if it is missing, needed to fetch the stack
 # files from this script's own repository. Best-effort under
 # --check/--dry-run (never installs anything there; reports the gap).
 ensure_curl() {
@@ -637,7 +637,7 @@ ensure_curl() {
     return 0
   fi
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    echo "$PROG: curl is not installed — cannot fetch the stack files (would run: apt-get install -y curl)" >&2
+    echo "$PROG: curl is not installed, cannot fetch the stack files (would run: apt-get install -y curl)" >&2
     return 1
   fi
   apt-get update -qq || true
@@ -645,9 +645,9 @@ ensure_curl() {
   command -v curl >/dev/null 2>&1
 }
 
-# fetch_repo_file REPO_PATH SIGNATURE — downloads REPO_PATH from this
+# fetch_repo_file REPO_PATH SIGNATURE, downloads REPO_PATH from this
 # script's own repository at $REF into FETCHED_TMP. Checks the HTTP
-# status explicitly and that the payload contains SIGNATURE — a cheap
+# status explicitly and that the payload contains SIGNATURE, a cheap
 # defence against a captive portal, a proxy, or a bad ref answering 200
 # with something that is not the file asked for, which `curl -f` alone
 # does not catch when the intermediary itself answers success.
@@ -657,26 +657,26 @@ fetch_repo_file() {
   # code and rc are declared separately from the assignment on purpose:
   # `local code="$(curl ...)"` would make `local` itself the last command
   # in that statement, so `rc=$?` right after would capture local's exit
-  # status (always 0) instead of curl's — the whole status check below
+  # status (always 0) instead of curl's, the whole status check below
   # would silently become dead code that still looks correct.
   local code rc
   FETCHED_TMP="$(mktemp)"
   code="$(curl -fsSL -w '%{http_code}' -o "$FETCHED_TMP" "$url" 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ] || [ "$code" != "200" ]; then
-    echo "$PROG: failed to fetch ${repo_path} from ref '${REF}' (curl exit=${rc}, http=${code:-none}) — check network access and that --ref/\$SENTINEL_REF names a real ref" >&2
+    echo "$PROG: failed to fetch ${repo_path} from ref '${REF}' (curl exit=${rc}, http=${code:-none}), check network access and that --ref/\$SENTINEL_REF names a real ref" >&2
     rm -f "$FETCHED_TMP"; FETCHED_TMP=""
     return 1
   fi
   if [ ! -s "$FETCHED_TMP" ] || ! grep -q "$signature" "$FETCHED_TMP"; then
-    echo "$PROG: fetched ${repo_path} from ref '${REF}' does not look right (empty, or missing expected content) — refusing to write it" >&2
+    echo "$PROG: fetched ${repo_path} from ref '${REF}' does not look right (empty, or missing expected content), refusing to write it" >&2
     rm -f "$FETCHED_TMP"; FETCHED_TMP=""
     return 1
   fi
   return 0
 }
 
-# invoking_home — the home directory of the user who ran sudo, not
+# invoking_home, the home directory of the user who ran sudo, not
 # root's. `sudo bash` sets SUDO_USER; resolved via getent rather than
 # trusting $HOME, which under sudo may already be root's unless the
 # invocation happens to preserve it.
@@ -751,11 +751,11 @@ compose_root_looks_omv() {
   return 1
 }
 
-# omv_confdbadm_bin — locates the omv-confdbadm binary without trusting
+# omv_confdbadm_bin, locates the omv-confdbadm binary without trusting
 # a bare name on PATH: it lives at /usr/sbin/omv-confdbadm, not
 # /usr/bin, and a normal user's PATH does not include /usr/sbin at all.
 # `sudo`'s secure_path usually does (this script always runs as root),
-# so `command -v` alone would usually work — "usually" is exactly the
+# so `command -v` alone would usually work, "usually" is exactly the
 # word that means it is not something to rely on. Absolute path first,
 # `command -v` as a fallback for a host where the plugin ships it
 # somewhere else.
@@ -764,11 +764,11 @@ omv_confdbadm_bin() {
   command -v omv-confdbadm 2>/dev/null
 }
 
-# omv_confdbadm_compose_root — best-effort SECONDARY signal, authoritative
+# omv_confdbadm_compose_root, best-effort SECONDARY signal, authoritative
 # when it works: asks OMV's own config database where the compose
 # plugin's shared folder lives, instead of inferring it from disk
 # layout. It exists for the one case structural detection cannot see at
-# all — a freshly enabled compose plugin with zero stacks created yet,
+# all, a freshly enabled compose plugin with zero stacks created yet,
 # so there is nothing on disk to pattern-match.
 #
 # omv-confdbadm requires root. Confirmed against a real OMV host: run
@@ -785,22 +785,22 @@ omv_confdbadm_bin() {
 # (discarded here) so stdout is empty in that case regardless, and the
 # JSON-shape guard is the second, independent reason a traceback could
 # never be scraped for a UUID- or path-shaped substring even if it
-# somehow reached stdout — a loose parser could otherwise hand back a
+# somehow reached stdout, a loose parser could otherwise hand back a
 # Python library path out of the traceback's own file references as if
 # it were a real compose root.
 #
 # The SUCCESSFUL output shape (the `sharedfolderref` → `conf.system.
 # sharedfolder` UUID resolution below) is still NOT verified against a
-# real OMV host as part of this change — the working rules keep live
+# real OMV host as part of this change, the working rules keep live
 # validation against the target host read-only, and the read-only probe that did run
 # needs root to see a real answer, which the operator declined to hand
 # over interactively. `conf.service.compose` is documented, across the
 # OMV versions consulted while writing this, to carry the shared folder
 # as a reference (`sharedfolderref`, a UUID) resolved through a second
-# lookup (`conf.system.sharedfolder`) — this remains an assumption until
+# lookup (`conf.system.sharedfolder`), this remains an assumption until
 # a real successful run confirms it. Any shape this does not recognise
 # degrades to "unknown" (return 1), never a guess. No caller ever
-# prefers this over an explicit structural "no" — it only answers the
+# prefers this over an explicit structural "no", it only answers the
 # empty-root case compose_root_looks_omv cannot.
 omv_confdbadm_compose_root() {
   local bin cfg rc ref path
@@ -810,7 +810,7 @@ omv_confdbadm_compose_root() {
   cfg="$("$bin" read conf.service.compose 2>/dev/null)"
   rc=$?
   [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
-  # $() strips only TRAILING newlines, never leading whitespace — a
+  # $() strips only TRAILING newlines, never leading whitespace, a
   # well-formed answer that happens to start with a blank line or
   # leading spaces would otherwise be rejected by the shape guard below
   # exactly like a real failure would be. The real output shape is
@@ -837,13 +837,13 @@ omv_confdbadm_compose_root() {
     *) return 1 ;;
   esac
   # Flattened to one line first, then matched as a single flat `{...}`
-  # OBJECT containing our uuid — not a line-adjacency `grep -B2` between
+  # OBJECT containing our uuid, not a line-adjacency `grep -B2` between
   # separately-matched "uuid" and "path" lines. A `-B2` window silently
   # assumes "path" sits within two lines AFTER "uuid" in the source
   # text; real `omv-confdbadm read` output was not confirmed to be
   # formatted that way (root access to check was declined), and if it
   # pretty-prints with "path" before "uuid", or more than two lines
-  # apart, `-B2` never matches at all — this signal would silently stay
+  # apart, `-B2` never matches at all, this signal would silently stay
   # "unknown" forever on a real host, exactly the class of bug a
   # showcase-only test fixture cannot catch. Matching within one flat
   # object is both order- and distance-independent for the one shape
@@ -873,20 +873,20 @@ omv_confdbadm_compose_root() {
   printf '%s' "$path"
 }
 
-# candidate_compose_roots — a BOUNDED list of directories worth checking
+# candidate_compose_roots, a BOUNDED list of directories worth checking
 # structurally when nothing has yet said where OMV's compose root is.
 # Deliberately fixed glob patterns, never a recursive `find /` or `find
-# /srv` — a real walk of a multi-disk NAS pool can take minutes and
+# /srv`, a real walk of a multi-disk NAS pool can take minutes and
 # looks indistinguishable from a hang. Each pattern reaches at most one
 # level into a plausible parent (`/docker-compose` itself, one level
-# under the shared-folder mount conventions OMV commonly uses —
-# `/srv/dev-disk-by-uuid-*`, `/srv/dev-disk-by-label-*`, `/srv/*` — and
+# under the shared-folder mount conventions OMV commonly uses,
+# `/srv/dev-disk-by-uuid-*`, `/srv/dev-disk-by-label-*`, `/srv/*`, and
 # one level under `/opt` and `/var/lib`, the two other places a manually
 # configured shared folder is commonly rooted). A bare `/*` scan of the
 # whole filesystem root was deliberately left out: it would need
 # explicit pruning of /proc, /sys, /dev, /run and similar pseudo
 # filesystems to stay bounded, and every realistic OMV shared-folder
-# convention is already covered by the patterns below. Not exhaustive —
+# convention is already covered by the patterns below. Not exhaustive,
 # a custom location matching none of these needs --stack-dir, and
 # resolve_stack_dir says so explicitly whenever it prints the candidate
 # list.
@@ -899,14 +899,14 @@ candidate_compose_roots() {
   done
 }
 
-# count_existing_stacks DIR — how many subdirectories of DIR are shaped
+# count_existing_stacks DIR, how many subdirectories of DIR are shaped
 # like an OMV-managed stack (the same "<name>.yml" + "compose.yml"
 # symlink shape compose_root_looks_omv checks for). Used only to give an
 # operator choosing among several candidates something to tell them
 # apart by besides the bare path.
 count_existing_stacks() {
   local root="$1" d base n=0
-  # Same bounded find|head as compose_root_looks_omv, same reason — a
+  # Same bounded find|head as compose_root_looks_omv, same reason, a
   # bash glob would enumerate the whole directory before this loop
   # could even start counting. Only reached for candidates already
   # confirmed structurally OMV-shaped (the ambiguous-menu display), so
@@ -922,18 +922,18 @@ count_existing_stacks() {
   printf '%d' "$n"
 }
 
-# docker_compose_project_roots — PRIMARY signal: asks Docker itself
+# docker_compose_project_roots, PRIMARY signal: asks Docker itself
 # where compose-managed stacks actually live, rather than inferring it
 # from directory shape. `docker compose ls --all --format json` reports
 # every known project together with the compose file(s) that back it,
 # a fact about this host that holds regardless of naming convention,
-# symlink spelling, or platform — it works on any Docker host, not only
+# symlink spelling, or platform, it works on any Docker host, not only
 # an OpenMediaVault one, which is why it outranks the two signals below.
 # It is also the only signal that finds a stack created by hand outside
 # OMV's own compose plugin.
 #
 # Returns "<root>\t<reason>" lines, one per distinct PARENT directory of
-# a project's compose-file directory — the parent is the candidate
+# a project's compose-file directory, the parent is the candidate
 # compose ROOT, the same granularity the structural and omv-confdbadm
 # signals already return, since a root holds one subdirectory per
 # project.
@@ -941,7 +941,7 @@ count_existing_stacks() {
 # The exact JSON shape below (a flat array of objects with a
 # "ConfigFiles" field, comma-joined when a project uses more than one
 # compose file) is what `docker compose ls --format json` is documented
-# to emit, but it has NOT been confirmed against a real daemon — the
+# to emit, but it has NOT been confirmed against a real daemon, the
 # account on the target host is not in the docker group and interactive
 # sudo access was declined (CLAUDE.md keeps that host read-only). Every
 # step below treats a shape it does not recognise as "no candidates
@@ -1004,22 +1004,22 @@ $roots
 ROOTS
 }
 
-# detect_compose_root_candidates — every directory that plausibly holds
+# detect_compose_root_candidates, every directory that plausibly holds
 # (or should hold) the sentinel compose stack, one "<root>\t<reason>"
 # line per distinct resolved path. Deliberately a LIST rather than a
 # single "best" answer: a host can have more than one directory
 # matching some signal (a leftover from a migrated install, a second
 # shared folder), and picking one silently is the same
 # guess-on-the-operator's-behalf this detection design exists to
-# eliminate. Combines three signals, in priority order — a candidate
+# eliminate. Combines three signals, in priority order, a candidate
 # found by more than one signal keeps the highest-priority signal's
 # reason, since that is the most concrete thing known about it:
 #
-#   1. docker_compose_project_roots (above) — a fact about the running
+#   1. docker_compose_project_roots (above), a fact about the running
 #      host, independent of platform.
-#   2. omv_confdbadm_compose_root — the one signal that can see an
+#   2. omv_confdbadm_compose_root, the one signal that can see an
 #      OpenMediaVault compose root with zero stacks in it yet.
-#   3. compose_root_looks_omv over candidate_compose_roots — the bounded
+#   3. compose_root_looks_omv over candidate_compose_roots, the bounded
 #      structural scan, which also only ever finds a root with at least
 #      one stack already in it.
 detect_compose_root_candidates() {
@@ -1068,7 +1068,7 @@ CANDIDATES
 }
 
 # detect_layout inspects STACK_DIR's PARENT itself, never how STACK_DIR
-# was chosen — an explicit --stack-dir pointing under a structurally
+# was chosen, an explicit --stack-dir pointing under a structurally
 # OMV-shaped root gets the OMV layout exactly the same as the
 # auto-detected default would. A plain directory gets docker-compose.yml
 # + .env directly: sentinel.yml plus a compose.yml symlink would be
@@ -1083,7 +1083,7 @@ detect_layout() {
     ENV_NAME="sentinel.env"
     return
   fi
-  # No sibling stack to pattern-match against — a first stack on a
+  # No sibling stack to pattern-match against, a first stack on a
   # fresh OMV install, or an ordinary directory that just happens to be
   # empty, look identical to structural detection. Fall back to asking
   # OMV directly; anything short of an authoritative match (no
@@ -1102,14 +1102,14 @@ detect_layout() {
 }
 
 # resolve_stack_dir sets STACK_DIR. Precedence: --stack-dir flag always
-# wins outright — no scan, no prompt, the operator being explicit beats
+# wins outright, no scan, no prompt, the operator being explicit beats
 # anything this script could detect. Otherwise the candidate count
 # decides:
-#   0 candidates  — the conventional /opt/sentinel default, exactly as
+#   0 candidates , the conventional /opt/sentinel default, exactly as
 #                   before detection existed at all.
-#   1 candidate   — proposed as the default, with a one-line reason so
+#   1 candidate  , proposed as the default, with a one-line reason so
 #                   the operator sees it was DETECTED, not decreed.
-#   2+ candidates — never picked silently: a numbered menu (real run,
+#   2+ candidates, never picked silently: a numbered menu (real run,
 #                   terminal only) with an option to type a path of its
 #                   own; --check/--dry-run reports the ambiguity and the
 #                   full list without prompting (dry-run/check must
@@ -1153,12 +1153,12 @@ resolve_stack_dir() {
   fi
 
   # 2+ candidates: never guessed. Listed with enough context (path, and
-  # WHY it was proposed — which signal found it, not just how many
+  # WHY it was proposed, which signal found it, not just how many
   # existing stacks it holds) that a choice between them means
-  # something, and flagged as possibly incomplete — the scan is bounded
+  # something, and flagged as possibly incomplete, the scan is bounded
   # (see candidate_compose_roots) and a custom location can still be
   # missed.
-  echo "$PROG: multiple possible compose roots found — refusing to guess which one you meant:" >&2
+  echo "$PROG: multiple possible compose roots found, refusing to guess which one you meant:" >&2
   local i=1 selected=""
   while IFS=$'\t' read -r path reason; do
     [ -n "$path" ] || continue
@@ -1167,10 +1167,10 @@ resolve_stack_dir() {
   done <<CANDS
 $candidates
 CANDS
-  echo "  (this list is not guaranteed exhaustive — pass --stack-dir directly if yours is not shown)" >&2
+  echo "  (this list is not guaranteed exhaustive, pass --stack-dir directly if yours is not shown)" >&2
 
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    note "stack directory: ambiguous — $count possible compose roots found (see stderr for the list); pass --stack-dir to choose"
+    note "stack directory: ambiguous, $count possible compose roots found (see stderr for the list); pass --stack-dir to choose"
     changed=$((changed+1))
     STACK_UNRESOLVED=1
     return
@@ -1191,23 +1191,23 @@ CANDS
         ;;
     esac
     if [ -z "$selected" ]; then
-      echo "$PROG: no valid selection made — refusing to guess; re-run and choose a number or a path" >&2
+      echo "$PROG: no valid selection made, refusing to guess; re-run and choose a number or a path" >&2
       exit 78
     fi
     STACK_DIR="$selected"
     return
   fi
 
-  echo "$PROG: no controlling terminal available to choose among them (this is what \`curl | sudo bash\` looks like without a real terminal) — re-run with a terminal attached, or pass --stack-dir explicitly" >&2
+  echo "$PROG: no controlling terminal available to choose among them (this is what \`curl | sudo bash\` looks like without a real terminal), re-run with a terminal attached, or pass --stack-dir explicitly" >&2
   exit 78
 }
 
-# resolve_stack_dir_prompt PROPOSED _RESERVED — the shared real-run/
+# resolve_stack_dir_prompt PROPOSED _RESERVED, the shared real-run/
 # check/dry-run/no-tty decision every candidate-count branch above ends
 # in once it has settled on a single PROPOSED default: offered
 # interactively (Enter accepts it) when a terminal is available, used
-# silently under --check/--dry-run (which must never prompt), or — no
-# terminal, a real run — refused outright with exit 78 rather than
+# silently under --check/--dry-run (which must never prompt), or, no
+# terminal, a real run, refused outright with exit 78 rather than
 # guessing a directory to write into. Factored out because the 0- and
 # 1-candidate cases are otherwise identical but for how PROPOSED was
 # chosen.
@@ -1221,7 +1221,7 @@ resolve_stack_dir_prompt() {
     STACK_DIR="$(prompt_with_default "Install the stack in" "$proposed")"
     return
   fi
-  echo "$PROG: no --stack-dir given and no controlling terminal available to prompt for one (this is what \`curl | sudo bash\` looks like without a real terminal) — refusing to guess where to write the stack; re-run with a terminal attached, or pass --stack-dir explicitly" >&2
+  echo "$PROG: no --stack-dir given and no controlling terminal available to prompt for one (this is what \`curl | sudo bash\` looks like without a real terminal), refusing to guess where to write the stack; re-run with a terminal attached, or pass --stack-dir explicitly" >&2
   exit 78
 }
 
@@ -1235,15 +1235,15 @@ resolve_stack_dir_prompt() {
 # docker itself, so refusing the whole run over a runtime it cannot
 # provide would be worse than reporting it and continuing. What must
 # never happen is the run summary implying the stack is ready when it
-# is not — every step downstream that depends on DOCKER_OK/COMPOSE_OK
+# is not, every step downstream that depends on DOCKER_OK/COMPOSE_OK
 # (step_apprise_seed) says so explicitly, not just here.
 docker_preflight() {
   if ! command -v docker >/dev/null 2>&1; then
-    note "docker preflight: docker not found on PATH — install docker before the stack can be started; the steps above/below still apply on their own"
+    note "docker preflight: docker not found on PATH, install docker before the stack can be started; the steps above/below still apply on their own"
     return
   fi
   if ! docker info >/dev/null 2>&1; then
-    note "docker preflight: docker found but the daemon is not reachable (not running, or this user lacks permission) — the stack cannot be started until it is"
+    note "docker preflight: docker found but the daemon is not reachable (not running, or this user lacks permission), the stack cannot be started until it is"
     return
   fi
   DOCKER_OK=1
@@ -1253,10 +1253,10 @@ docker_preflight() {
     return
   fi
   if command -v docker-compose >/dev/null 2>&1; then
-    note "docker preflight: only the legacy standalone docker-compose binary is present — this stack needs the compose PLUGIN (\`docker compose\`), not docker-compose; install docker-compose-plugin"
+    note "docker preflight: only the legacy standalone docker-compose binary is present, this stack needs the compose PLUGIN (\`docker compose\`), not docker-compose; install docker-compose-plugin"
     return
   fi
-  note "docker preflight: docker daemon reachable but the compose plugin is missing (\`docker compose version\` failed) — install docker-compose-plugin before the stack can be started"
+  note "docker preflight: docker daemon reachable but the compose plugin is missing (\`docker compose version\` failed), install docker-compose-plugin before the stack can be started"
 }
 
 # step0a_layout resolves where the stack lives, fetches
@@ -1267,7 +1267,7 @@ docker_preflight() {
 step0a_layout() {
   resolve_stack_dir
   # STACK_DIR stays empty here only in one case: --check/--dry-run found
-  # several possible compose roots and (correctly) refused to pick one —
+  # several possible compose roots and (correctly) refused to pick one,
   # resolve_stack_dir already reported the ambiguity and the candidate
   # list. There is no coherent directory left to preview further steps
   # against, so this step stops here rather than resolving "" through
@@ -1278,7 +1278,7 @@ step0a_layout() {
   # dirname (in detect_layout, below) is purely lexical, so a stack
   # directory reached through a symlink into an OMV compose root would
   # otherwise be classified "plain" even though it really sits inside
-  # one — the files land in the right place on disk while OMV never
+  # one, the files land in the right place on disk while OMV never
   # enumerates the stack, which produces exactly the "the stack looks
   # fine but the plugin doesn't know it exists" shape this whole design
   # exists to avoid. readlink -f resolves every symlink component and
@@ -1289,11 +1289,11 @@ step0a_layout() {
   # follows the same two signals as detect_layout: structural shape
   # first (STACK_DIR already holds other stacks), OMV's own config
   # second (settles it even for a root with nothing in it yet). Neither
-  # signal is a literal path — a directory that merely happens to be
+  # signal is a literal path, a directory that merely happens to be
   # named /docker-compose but is not actually a detected root is left
   # alone; see compose_root_looks_omv/omv_confdbadm_compose_root above.
   if compose_root_looks_omv "$STACK_DIR"; then
-    echo "$PROG: --stack-dir $STACK_DIR is itself an OMV compose root — it already holds other stacks laid out the way OMV's compose plugin lays them out — not a stack directory inside one; writing a compose file there would sit alongside every other stack's own directory instead of inside one; use a subdirectory, e.g. ${STACK_DIR}/sentinel" >&2
+    echo "$PROG: --stack-dir $STACK_DIR is itself an OMV compose root, it already holds other stacks laid out the way OMV's compose plugin lays them out, not a stack directory inside one; writing a compose file there would sit alongside every other stack's own directory instead of inside one; use a subdirectory, e.g. ${STACK_DIR}/sentinel" >&2
     exit 64
   fi
   local omv_root_cfg
@@ -1338,7 +1338,7 @@ step0a_layout() {
 # chat id, mailrise password) plus everything derivable without asking
 # (JOURNAL_GID is left to the existing step6; the rest default here).
 # Every field goes through set_env_default, which never overwrites a
-# value already present — a re-run after a transient failure only fills
+# value already present, a re-run after a transient failure only fills
 # in what is still missing, never re-prompts for what is already there.
 step0b_secrets() {
   local existing_token existing_chat existing_smtp_user existing_smtp_pass
@@ -1375,32 +1375,32 @@ step0b_secrets() {
   if [ "$changed" -gt "$before_changed" ]; then
     note "stack env: $(verb_phrase "wrote" "would write") $((changed-before_changed)) field(s) to $ENV_FILE"
   elif [ "$MISSING_ENV_INPUT" -eq 1 ]; then
-    note "stack env: $ENV_FILE unchanged — still missing the input reported above"
+    note "stack env: $ENV_FILE unchanged, still missing the input reported above"
   else
     note "stack env: $ENV_FILE already had every field"
   fi
 
   if [ "$MISSING_ENV_INPUT" -eq 1 ]; then
-    note "stack mailrise.conf: not written — still missing required input above"
+    note "stack mailrise.conf: not written, still missing required input above"
     return
   fi
   if [ -z "$token" ] || [ -z "$chat" ] || [ -z "$smtp_user" ] || [ -z "$smtp_pass" ]; then
     # require_secret now sets MISSING_ENV_INPUT for every real-run path
     # that can return empty (no terminal, or an empty answer at one),
-    # and the guard above already returned for that case — so on a real
+    # and the guard above already returned for that case, so on a real
     # run, reaching here with an empty value means only --check/--dry-run
     # skipped the prompt entirely, per require_secret's own contract.
     # mailrise.conf's content depends on all four, so there is nothing
     # meaningful to render yet beyond the note require_secret already
     # recorded for each missing one.
-    note "stack mailrise.conf: not previewed — depends on values not yet set"
+    note "stack mailrise.conf: not previewed, depends on values not yet set"
     return
   fi
 
   if fetch_repo_file "deploy/mailrise/mailrise.conf.example" "REPLACE_BOT_TOKEN"; then
     # replace_token, not sed and not bash's own "${tpl//pat/rep}": both
     # were measured to treat an unescaped '&' in the replacement text as
-    # "the matched text", not literal data — sed's s/// documents this;
+    # "the matched text", not literal data, sed's s/// documents this;
     # bash's own pattern substitution has the identical behavior far
     # less documented (reproduced directly: x="hello WORLD bye";
     # echo "${x//WORLD/A&B}" prints "hello AWORLDB bye"). sed's `/`
@@ -1408,7 +1408,7 @@ step0b_secrets() {
     # password containing one crashed sed outright and left a
     # ZERO-BYTE mailrise.conf that this script still reported as
     # "written". replace_token uses only prefix/suffix removal and
-    # plain variable interpolation — no replacement-text concept at
+    # plain variable interpolation, no replacement-text concept at
     # all, so no character in a token/chat id/password can ever be
     # treated as special.
     local tpl
@@ -1426,11 +1426,11 @@ step0b_secrets() {
     # Fail-closed regardless of substitution mechanism: a value that
     # itself contained the literal text "REPLACE_" (contrived, but
     # cheaper to reject than to reason about) or any other unexpected
-    # substitution gap must never be written and reported as done —
+    # substitution gap must never be written and reported as done,
     # that is a stack that "installs successfully" and cannot deliver a
     # single notification.
     if grep -q 'REPLACE_' "$rendered"; then
-      echo "$PROG: rendered mailrise.conf still contains an unreplaced REPLACE_ token — refusing to write it" >&2
+      echo "$PROG: rendered mailrise.conf still contains an unreplaced REPLACE_ token, refusing to write it" >&2
       TRANSIENT_FAIL=1
       rm -f "$rendered"
       return
@@ -1438,7 +1438,7 @@ step0b_secrets() {
 
     local mailrise_path="${STACK_DIR}/mailrise/mailrise.conf"
     if write_file_if_differs "$mailrise_path" 0644 "$rendered"; then
-      note "stack mailrise.conf: $(verb_phrase "written" "would be written") (mode 0644 — see deploy/README.md, NOT 0600)"
+      note "stack mailrise.conf: $(verb_phrase "written" "would be written") (mode 0644, see deploy/README.md, NOT 0600)"
       changed=$((changed+1))
     else
       note "stack mailrise.conf: already up to date"
@@ -1495,10 +1495,10 @@ step1() {
   pkg_installed rasdaemon && RASDAEMON_OK=1
   { pkg_installed msmtp || pkg_installed msmtp-mta; } && MSMTP_OK=1
   if [ "$RASDAEMON_OK" -ne 1 ]; then
-    note "step1 packages: rasdaemon not installed — step2 will be skipped"
+    note "step1 packages: rasdaemon not installed, step2 will be skipped"
   fi
   if [ "$MSMTP_OK" -ne 1 ]; then
-    note "step1 packages: msmtp not installed — steps 3-5's mail delivery will be skipped"
+    note "step1 packages: msmtp not installed, steps 3-5's mail delivery will be skipped"
   fi
 }
 
@@ -1545,13 +1545,13 @@ step3() {
   # tls: off on the LAN (internal/notify/smtpfallback.go's own comment
   # and its plainAuthNoTLS type document the same fact for sentinel's
   # own SMTP client). "auth on" tells msmtp to auto-pick the "safest"
-  # method, and msmtp refuses PLAIN/LOGIN — the only methods a plain
-  # mailrise listener offers — over a non-TLS connection even with
+  # method, and msmtp refuses PLAIN/LOGIN, the only methods a plain
+  # mailrise listener offers, over a non-TLS connection even with
   # "tls off" set explicitly: verified against real msmtp 1.8.28 on
   # Debian 13 against a stub advertising "AUTH PLAIN LOGIN", "auth on"
   # + user/password + tls off still exits 69 "cannot use a secure
   # authentication method". Forcing the method explicitly ("auth
-  # plain") is what bypasses that guard — the exact same fix
+  # plain") is what bypasses that guard, the exact same fix
   # smtpfallback.go already applies on the Go side for the identical
   # reason, so this keeps both SMTP clients doing the same thing
   # against the same server.
@@ -1586,11 +1586,11 @@ SMARTD_LINE='DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m smartd@mailris
 
 DISABLED_MARK="# disabled by agentic-server-supervisor: "
 
-# OMV_GENERATED_MARKER — the header OpenMediaVault stamps into files it
+# OMV_GENERATED_MARKER, the header OpenMediaVault stamps into files it
 # regenerates from its own config database (confirmed against a real
 # host, read-only, per CLAUDE.md). A file carrying it is rewritten by
 # OMV on the next S.M.A.R.T. settings change, plugin update, or
-# reconfigure — anything this script writes there survives only until
+# reconfigure, anything this script writes there survives only until
 # then, and the failure that follows is silent: smartd stops monitoring
 # anything, and internal/collect's `smart` section reads as an empty,
 # healthy-looking section rather than a broken one.
@@ -1600,19 +1600,19 @@ file_is_omv_managed() {
   [ -f "$1" ] && grep -q "$OMV_GENERATED_MARKER" "$1" 2>/dev/null
 }
 
-# confirm_monitoring_change PROMPT — step4/step5 both reconfigure and
+# confirm_monitoring_change PROMPT, step4/step5 both reconfigure and
 # restart a monitoring daemon already watching the operator's disks or
 # pool; that is a bigger action than writing a config value, so it is
 # the operator's explicit call rather than a side effect of installing
-# a supervisor — no flag, an interactive [y/N] instead (main's explicit
+# a supervisor, no flag, an interactive [y/N] instead (main's explicit
 # instruction). Reuses prompt_with_default rather than a second prompt
 # helper, so it reads from /dev/tty the same way every other prompt in
-# this script does. Never prompts under --check/--dry-run — those must
-# never prompt at all — and the caller is expected to preview what it
+# this script does. Never prompts under --check/--dry-run, those must
+# never prompt at all, and the caller is expected to preview what it
 # would ask/write itself in that case. Sets CONFIRM_REASON so the
 # caller's own note can say exactly why a "no" happened: declined at
 # the prompt, or no controlling terminal to ask (never assumed consent
-# from silence — the same rule require_secret already applies to a
+# from silence, the same rule require_secret already applies to a
 # missing credential).
 confirm_monitoring_change() {
   CONFIRM_REASON=""
@@ -1620,7 +1620,7 @@ confirm_monitoring_change() {
     return 0
   fi
   if ! have_tty; then
-    CONFIRM_REASON="no controlling terminal to ask — defaulted to No"
+    CONFIRM_REASON="no controlling terminal to ask, defaulted to No"
     return 1
   fi
   local ans
@@ -1635,11 +1635,11 @@ confirm_monitoring_change() {
 step4() {
   file="/etc/smartd.conf"
   if file_is_omv_managed "$file"; then
-    note "step4 $file: skipped — this host manages smartd through its own configuration (OpenMediaVault auto-generates $file and would revert any edit here); enable SMART monitoring/email in the OMV UI's S.M.A.R.T. settings instead"
+    note "step4 $file: skipped, this host manages smartd through its own configuration (OpenMediaVault auto-generates $file and would revert any edit here); enable SMART monitoring/email in the OMV UI's S.M.A.R.T. settings instead"
     return
   fi
   if [ "$MAIL_OK" -ne 1 ]; then
-    note "step4 /etc/smartd.conf: skipped ($MAIL_NOT_OK_REASON — the DEVICESCAN mail target it configures cannot deliver)"
+    note "step4 /etc/smartd.conf: skipped ($MAIL_NOT_OK_REASON, the DEVICESCAN mail target it configures cannot deliver)"
     return
   fi
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
@@ -1647,13 +1647,13 @@ step4() {
   fi
   if ! confirm_monitoring_change "Configure ${file} to email SMART alerts via mailrise and restart smartd?"; then
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
-      note "step4 $file: skipped — $CONFIRM_REASON; re-run and answer 'y' (or edit $file by hand) to enable SMART email alerts"
+      note "step4 $file: skipped, $CONFIRM_REASON; re-run and answer 'y' (or edit $file by hand) to enable SMART email alerts"
     fi
     return
   fi
   preamble=""
   # Captured BEFORE any edit in this function, including the in-place
-  # -m comment below — not just before render_managed_block's own
+  # -m comment below, not just before render_managed_block's own
   # rewrite. Capturing it after the -m edit would make that edit's own
   # change to the file invisible to the before/after diff
   # render_managed_block uses to decide whether to restart smartd and
@@ -1665,15 +1665,15 @@ step4() {
   before_hash=""
   [ -f "$file" ] && before_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
   # A pre-existing unmanaged -m line is commented out WHERE IT STANDS
-  # (contracts/runtime.md R5) — not merely noted in the managed block's
+  # (contracts/runtime.md R5), not merely noted in the managed block's
   # preamble while staying live at the top of the file.
   # Two active -m targets is not just untidy: real smartd refuses to
   # start at all with two ("Unable to register device ... Exiting"),
-  # which would take the whole SMART path down. Never deleted — the
+  # which would take the whole SMART path down. Never deleted, the
   # .bak-<epoch> copy plus this in-place comment are how the operator
   # gets their original line back.
   if [ -f "$file" ]; then
-    # Scan only the content OUTSIDE the managed block — the managed
+    # Scan only the content OUTSIDE the managed block, the managed
     # DEVICESCAN line itself legitimately contains "-m ", and scanning the
     # whole file (minus just the two marker lines) would re-detect our own
     # output as "pre-existing unmanaged" on every run, defeating
@@ -1694,19 +1694,19 @@ step4() {
       tmp_m="$(mktemp)"
       # Scoped to content OUTSIDE the managed block, exactly like the
       # detection scan above. Without the b/e tracking here, this awk
-      # matches EVERY "-m "-containing line in the whole file — including
+      # matches EVERY "-m "-containing line in the whole file, including
       # the managed block's own live DEVICESCAN line, which is never
       # prefixed with "#" and matches the same pattern. When a managed
       # block already exists alongside a still-live unmanaged line, an
       # unscoped version of this awk comments out the real DEVICESCAN
-      # line too, alongside the operator's old one — self-healing rather
+      # line too, alongside the operator's old one, self-healing rather
       # than an outage, since the edit runs BEFORE render_managed_block,
       # which then reads the block back damaged, finds it no longer
       # matches desired_block, and rewrites it from scratch, restoring
       # the live line (confirmed by mutation: removing the scoping still
       # leaves DEVICESCAN count 1 after a run). Scoping it is still the
-      # correct fix — it avoids a pointless rewrite-and-restart cycle on
-      # every run that finds a pre-existing -m line — just not a fix for
+      # correct fix, it avoids a pointless rewrite-and-restart cycle on
+      # every run that finds a pre-existing -m line, just not a fix for
       # silent data loss, which it never was.
       awk -v mark="$DISABLED_MARK" -v b="$MARK_BEGIN" -v e="$MARK_END" '
         $0==b {inblock=1}
@@ -1719,7 +1719,7 @@ step4() {
         # render_managed_block's install call above: an unchecked
         # install (read-only /etc, full disk) would report the -m line
         # as commented out while nothing was actually written. Fail
-        # loud instead — TRANSIENT_FAIL surfaces as exit 75, and the
+        # loud instead, TRANSIENT_FAIL surfaces as exit 75, and the
         # note says what actually happened.
         echo "$PROG: failed to install $file (commenting out pre-existing -m line)" >&2
         TRANSIENT_FAIL=1
@@ -1729,7 +1729,7 @@ step4() {
         rm -f "$tmp_m"
         note "step4 smartd: pre-existing -m line found, commented out where it stands"
       fi
-      # Re-read after the in-place edit — the preamble below is derived
+      # Re-read after the in-place edit, the preamble below is derived
       # from the PERSISTENT marker (next block), not from this pre-edit
       # scan, so the recorded fact survives every future run even after
       # the live "-m " line no longer exists to re-detect.
@@ -1738,12 +1738,12 @@ step4() {
     fi
 
     # The preamble is derived from the PERSISTENT in-place marker, not
-    # from a live re-scan for an uncommented "-m " line — once step4 has
+    # from a live re-scan for an uncommented "-m " line, once step4 has
     # commented the original out, that live scan finds nothing on every
     # later run, and re-deriving the preamble from it would silently drop
     # the recorded fact (and un-converge the managed block) on run 2.
-    # Scanning for our own marker instead makes the record — and the
-    # block's content — stable forever after the one-time transition.
+    # Scanning for our own marker instead makes the record, and the
+    # block's content, stable forever after the one-time transition.
     outside_after="$(awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
       $0==b {skip=1; next}
       $0==e {skip=0; next}
@@ -1752,7 +1752,7 @@ step4() {
     ' "$file" 2>/dev/null)"
     disabled_lines="$(printf '%s\n' "$outside_after" | grep -F "$DISABLED_MARK" || true)"
     if [ -n "$disabled_lines" ]; then
-      preamble="# disabled by agentic-server-supervisor (pre-existing config, commented in place — see backup)
+      preamble="# disabled by agentic-server-supervisor (pre-existing config, commented in place, see backup)
 "
     fi
   fi
@@ -1771,7 +1771,7 @@ step4() {
   fi
 
   # This must fire even when render_managed_block itself found nothing
-  # to rewrite (did_update=0) — the -m in-place comment edit earlier in
+  # to rewrite (did_update=0), the -m in-place comment edit earlier in
   # this function is a real change render_managed_block never sees, so
   # gating the restart+changed bookkeeping on render_managed_block's own
   # return value alone would miss exactly that case.
@@ -1795,18 +1795,18 @@ step5() {
   dir="/etc/zfs/zed.d"
   file="${dir}/zed.rc"
   if [ ! -d "$dir" ]; then
-    echo "$PROG: WARN: $dir does not exist — skipping ZED configuration" >&2
+    echo "$PROG: WARN: $dir does not exist, skipping ZED configuration" >&2
     note "step5 ZED: skipped (no /etc/zfs/zed.d)"
     return
   fi
   # OMV does not currently generate zed.rc, but the check is cheap and
-  # the reasoning is identical to step4's — see file_is_omv_managed.
+  # the reasoning is identical to step4's, see file_is_omv_managed.
   if file_is_omv_managed "$file"; then
-    note "step5 $file: skipped — this host manages ZED through its own configuration ($file is auto-generated and would revert any edit here); enable ZFS event email there instead"
+    note "step5 $file: skipped, this host manages ZED through its own configuration ($file is auto-generated and would revert any edit here); enable ZFS event email there instead"
     return
   fi
   if [ "$MAIL_OK" -ne 1 ]; then
-    note "step5 ZED: skipped ($MAIL_NOT_OK_REASON — ZED_EMAIL_PROG=msmtp would be unusable)"
+    note "step5 ZED: skipped ($MAIL_NOT_OK_REASON, ZED_EMAIL_PROG=msmtp would be unusable)"
     return
   fi
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
@@ -1814,7 +1814,7 @@ step5() {
   fi
   if ! confirm_monitoring_change "Configure ${file} to email ZFS events via mailrise and restart zfs-zed?"; then
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
-      note "step5 $file: skipped — $CONFIRM_REASON; re-run and answer 'y' (or edit $file by hand) to enable ZFS event email"
+      note "step5 $file: skipped, $CONFIRM_REASON; re-run and answer 'y' (or edit $file by hand) to enable ZFS event email"
     fi
     return
   fi
@@ -1883,7 +1883,7 @@ step6() {
       cp "$ENV_FILE" "$tmp"
       # A .env with no trailing newline (common from a hand-edited or
       # backup-restored file) means this append lands on the SAME line
-      # as the previous value with no separator — verified:
+      # as the previous value with no separator, verified:
       # "MAILRISE_SMTP_PASS=secret" + append becomes
       # "MAILRISE_SMTP_PASS=secretJOURNAL_GID=7777", destroying both
       # values.
@@ -1898,7 +1898,7 @@ step6() {
   # Preserve the .env's EXISTING owner rather than letting `install`
   # default to root:root (this script requires EUID=0). If
   # `docker compose` is later run as a non-root ops user, a root:root
-  # 0600 .env would be unreadable to them — this file is ops-authored
+  # 0600 .env would be unreadable to them, this file is ops-authored
   # (JOURNAL_GID is the one field install.sh itself writes into it)
   # and stays owned by whoever created it. A fresh file (this script
   # creating .env for the first time) has no prior owner to preserve, so
@@ -1909,7 +1909,7 @@ step6() {
     # Resolving by NAME (stat %U/%G) breaks for a uid with no
     # /etc/passwd entry (an .env restored from backup, copied off
     # another host, or living on a shared folder with foreign ownership)
-    # — stat then prints the literal string "UNKNOWN", install rejects
+    #, stat then prints the literal string "UNKNOWN", install rejects
     # it ("invalid user 'UNKNOWN'"), and without a checked exit status
     # the step would report "updated" and count it in changed while
     # writing nothing. Numeric ids never hit that: stat -c %u/%g always
@@ -1932,13 +1932,13 @@ step6() {
 # --- apprise seed ----------------------------------------------------
 
 # step_apprise_seed registers the Telegram target with apprise-api's
-# own HTTP API — POST /add/KEY with urls=tgram://TOKEN/CHAT_ID — the
+# own HTTP API, POST /add/KEY with urls=tgram://TOKEN/CHAT_ID, the
 # same registration deploy/README.md documents and
 # internal/notify/seed.go performs from inside the container; this is
 # the host-side equivalent, reading straight from ENV_FILE rather than
 # a rendered config file, since install.sh has no such file to render.
 # Writing apprise/sentinel.cfg by hand does NOT register the key (see
-# deploy/README.md) — POST is the only real registration, and this is
+# deploy/README.md), POST is the only real registration, and this is
 # the one step of this script that is not idempotent by "already
 # converged" file comparison: apprise-api's own /add is itself an
 # idempotent upsert, so re-POSTing identical urls on every run is
@@ -1946,7 +1946,7 @@ step6() {
 #
 # Deliberately does NOT run `docker compose up -d` itself. This script
 # writes and validates config; the operator drives every container
-# lifecycle action (CLAUDE.md — "the user drives all rollout actions").
+# lifecycle action (CLAUDE.md, "the user drives all rollout actions").
 # Seeding therefore happens on whichever run finds the stack already
 # up: a run before that reports exactly what remains (install docker,
 # `docker compose up -d`) and that re-running this script afterward is
@@ -1960,7 +1960,7 @@ step_apprise_seed() {
   endpoint="http://${bind}:8000/add/${key}"
 
   if [ -z "$token" ] || [ -z "$chat" ]; then
-    note "apprise seed: skipped — TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not both set in $ENV_FILE yet"
+    note "apprise seed: skipped, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not both set in $ENV_FILE yet"
     return
   fi
 
@@ -1970,7 +1970,7 @@ step_apprise_seed() {
   fi
 
   if [ "$DOCKER_OK" -ne 1 ] || [ "$COMPOSE_OK" -ne 1 ]; then
-    note "apprise seed: skipped — docker/compose not ready (see docker preflight above); install docker, run 'docker compose up -d' in the stack directory, then re-run this script to seed apprise"
+    note "apprise seed: skipped, docker/compose not ready (see docker preflight above); install docker, run 'docker compose up -d' in the stack directory, then re-run this script to seed apprise"
     return
   fi
 
@@ -1982,7 +1982,7 @@ step_apprise_seed() {
   local tmp status curl_rc
   tmp="$(mktemp)"
   # The token reaches curl only via stdin (--data-urlencode urls@-),
-  # never as a command-line argument — argv is visible to any other
+  # never as a command-line argument, argv is visible to any other
   # process on the host via ps; stdin is not. -f/--fail is deliberately
   # NOT used: it would make curl treat 204 (and any 4xx/5xx) as a
   # transport error indistinguishable from "apprise unreachable",
@@ -1994,25 +1994,25 @@ step_apprise_seed() {
   if [ "$curl_rc" -ne 0 ]; then
     # Not reachable is a normal intermediate state, not a fault: this
     # step runs before the operator has necessarily brought the stack
-    # up (install.sh never does that itself). No TRANSIENT_FAIL here —
+    # up (install.sh never does that itself). No TRANSIENT_FAIL here,
     # only the two branches below, where apprise DID answer and told
     # us the registration failed, do that.
-    note "apprise seed: could not reach apprise at $endpoint (the stack may not be up yet) — run 'docker compose up -d' in the stack directory, then re-run this script"
+    note "apprise seed: could not reach apprise at $endpoint (the stack may not be up yet), run 'docker compose up -d' in the stack directory, then re-run this script"
     return
   fi
   # N.3.1's rule applies here too: a 204 from apprise-api means the key
   # was never registered, not that it succeeded quietly. Unlike
-  # "unreachable" above, apprise DID answer here — this is a definite,
+  # "unreachable" above, apprise DID answer here, this is a definite,
   # present failure of the primary notification path, not a stack
   # that merely isn't up yet, and reporting it via exit 0 would tell
   # anything reading $? that the run succeeded. TRANSIENT_FAIL (exit
   # 75) rather than a fresh fatal code: apprise can plausibly still be
   # mid-startup even though it's already answering HTTP (its own
   # config store not yet writable), and re-running this script is the
-  # documented remedy either way — the same "retryable" contract exit
+  # documented remedy either way, the same "retryable" contract exit
   # 75 already carries for every other step.
   if [ "$status" = "204" ]; then
-    note "apprise seed: apprise responded 204 — the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed"
+    note "apprise seed: apprise responded 204, the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed"
     TRANSIENT_FAIL=1
     return
   fi
@@ -2022,7 +2022,7 @@ step_apprise_seed() {
       changed=$((changed+1))
       ;;
     *)
-      note "apprise seed: apprise responded HTTP $status registering the Telegram target — notifications will not be delivered until this is fixed"
+      note "apprise seed: apprise responded HTTP $status registering the Telegram target, notifications will not be delivered until this is fixed"
       TRANSIENT_FAIL=1
       ;;
   esac
@@ -2039,7 +2039,7 @@ if [ "$ENV_FILE_EXPLICIT" -ne 1 ]; then
   step0a_layout
   # STACK_UNRESOLVED (set only by resolve_stack_dir's ambiguous
   # --check/--dry-run branch) means ENV_FILE is still whatever it
-  # defaulted to (./.env) rather than a real stack's env file — running
+  # defaulted to (./.env) rather than a real stack's env file, running
   # step0b_secrets here would preview "would write 11 field(s) to
   # ./.env", a plan against a file the ambiguity report already said
   # this run is not proceeding with. Skipped, not silently: the
@@ -2048,7 +2048,7 @@ if [ "$ENV_FILE_EXPLICIT" -ne 1 ]; then
   if [ "$STACK_UNRESOLVED" -ne 1 ]; then
     step0b_secrets
   else
-    note "stack env: skipped — no stack directory was resolved (see the ambiguity report above)"
+    note "stack env: skipped, no stack directory was resolved (see the ambiguity report above)"
   fi
 fi
 
@@ -2066,7 +2066,7 @@ step5
 if [ "$STACK_UNRESOLVED" -ne 1 ]; then
   step6
 else
-  note "step6 JOURNAL_GID: skipped — no stack directory was resolved (see the ambiguity report above)"
+  note "step6 JOURNAL_GID: skipped, no stack directory was resolved (see the ambiguity report above)"
 fi
 
 # Same STACK_UNRESOLVED gate: with no stack directory resolved, ENV_FILE
@@ -2075,7 +2075,7 @@ fi
 if [ "$STACK_UNRESOLVED" -ne 1 ]; then
   step_apprise_seed
 else
-  note "apprise seed: skipped — no stack directory was resolved (see the ambiguity report above)"
+  note "apprise seed: skipped, no stack directory was resolved (see the ambiguity report above)"
 fi
 
 echo "$PROG summary:"

@@ -18,7 +18,7 @@ import (
 // outboxIDRe is the exact shape OutboxAdd emits (S.4: "<epoch>-<rand3>").
 // OutboxAck joins its argument onto $STATE_DIR/outbox/ before checking it
 // exists, so an unvalidated id is a path-traversal primitive (e.g.
-// "../history/<file>" resolves outside outbox/ entirely) — reject anything
+// "../history/<file>" resolves outside outbox/ entirely), reject anything
 // that isn't this literal shape before it ever reaches filepath.Join.
 var outboxIDRe = regexp.MustCompile(`^[0-9]+-[0-9]{3}$`)
 
@@ -29,7 +29,7 @@ var stateLogWriter io.Writer
 
 // stateLogger is the C7 "component=state" logger, used only for the one
 // WARN case that isn't allowed to surface as a returned error (trimOutbox's
-// best-effort eviction) — every other diagnostic in this package is
+// best-effort eviction), every other diagnostic in this package is
 // reported through a returned error instead. A method (not a bare func) so
 // it can honor s.cfg.LogLevel instead of hardcoding one.
 func (s *Store) stateLogger() *slog.Logger {
@@ -59,10 +59,10 @@ type OutboxItem struct {
 }
 
 func (s *Store) OutboxAdd(payload []byte) (string, error) {
-	// S.2: "outbox-add stdin — an opaque JSON object; state validates only
+	// S.2: "outbox-add stdin, an opaque JSON object; state validates only
 	// that" -> not a JSON object is exit 65. Unmarshaling into a map alone
 	// lets JSON `null` through (it's valid for any nullable type, so the
-	// map ends up nil with no error) — decode into `any` and require the
+	// map ends up nil with no error), decode into `any` and require the
 	// concrete type to be a JSON object.
 	var probe any
 	if err := json.Unmarshal(payload, &probe); err != nil {
@@ -151,7 +151,7 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 		// "test-alert.json", or a filename with no ".json" extension at
 		// all) sail through: OutboxTake would hand tick a real-looking id
 		// that OutboxAck's own outboxIDRe check then permanently refuses
-		// — an entry that retries, and re-sends via SMTP past
+		//, an entry that retries, and re-sends via SMTP past
 		// OUTBOX_SMTP_AFTER, every tick forever. OutboxAck is the
 		// authority on what a valid id looks like; OutboxTake must apply
 		// the identical predicate, not merely internal self-consistency.
@@ -192,7 +192,7 @@ func (s *Store) OutboxAck(id string) error {
 	// Path traversal guard: id is a positional CLI argument and gets
 	// joined onto $STATE_DIR/outbox/ unchecked below. Without this,
 	// "../history/<file>" (or any id containing a path separator) resolves
-	// outside outbox/ and os.Remove deletes whatever it lands on — a
+	// outside outbox/ and os.Remove deletes whatever it lands on, a
 	// history file analyze's trend window depends on, for one.
 	if !outboxIDRe.MatchString(id) {
 		return ErrUnknownID
@@ -215,18 +215,18 @@ func (s *Store) trimOutbox() error {
 
 	// S.7: a filename outboxIDRe refuses can never be a legitimate queued
 	// alert (OutboxAdd cannot produce that name) and can never be acked
-	// (OutboxAck applies the identical predicate) — S.7's three clauses
+	// (OutboxAck applies the identical predicate), S.7's three clauses
 	// for a corrupt outbox entry (skipped, counted, ackable) are mutually
 	// unsatisfiable for it. Worse, lexical eviction below never reaches
 	// it either: a junk name sorts after every "<epoch>-<rand3>.json"
 	// name, so it is never the oldest. Left alone it is immortal and
-	// permanently steals OUTBOX_MAX capacity from real alerts — at
+	// permanently steals OUTBOX_MAX capacity from real alerts, at
 	// OUTBOX_MAX junk files, every newly queued alert is silently
 	// evicted the instant it's added, behind exit 0. Reclaim these
 	// first, unconditionally, before any well-formed entry is even
 	// considered for eviction.
 	// trimOutbox runs after a successful OutboxAdd, as best-effort cap
-	// enforcement — propagating a Remove failure here would fail the add
+	// enforcement, propagating a Remove failure here would fail the add
 	// for a payload that is already safely written, which is strictly
 	// worse than the eviction that didn't happen. Log at WARN instead: a
 	// failing eviction stays visible (C7) without turning a working add

@@ -1,6 +1,6 @@
-// fallback.go: the ONE fallback runtime authors — the collector fallback
+// fallback.go: the ONE fallback runtime authors, the collector fallback
 // (R3.5). The analyzer's own fallback is authored by internal/analyze and
-// passed through unchanged (C8) — runtime never builds it.
+// passed through unchanged (C8), runtime never builds it.
 package runtime
 
 import (

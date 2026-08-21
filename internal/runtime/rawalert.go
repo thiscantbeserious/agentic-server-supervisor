@@ -23,7 +23,7 @@ type RawCandidate struct {
 }
 
 // Candidates returns kernel entries with Priority <= maxPriority, newest
-// first (R3.3). A missing or failed kernel section yields no candidates —
+// first (R3.3). A missing or failed kernel section yields no candidates,
 // callers must probe kernelScanFailed separately to tell "no crit lines"
 // apart from "the scan itself failed".
 func Candidates(f *facts.Facts, maxPriority int) []RawCandidate {
@@ -61,7 +61,7 @@ func kernelScanFailed(f *facts.Facts) (bool, string) {
 
 const rawAlertsDir = "raw-alerts"
 
-// scanFailedMarkerKey is R3.3's "reserved key scan-failed" — the one
+// scanFailedMarkerKey is R3.3's "reserved key scan-failed", the one
 // marker in the raw-alerts/ directory not shaped like a dedup.Key,
 // deliberately: it identifies "the scan itself is broken" rather than any
 // one candidate, and must never collide with a real kernel-message key.
@@ -159,7 +159,7 @@ func BuildRawReport(cfg *config.Config, seq int64, cands []RawCandidate, dropped
 	findings := make([]report.Finding, 0, len(cands))
 	for _, c := range cands {
 		// report.schema.json bounds evidence at 1000 runes and body at
-		// 2000 (C5) — a single crafted kernel line must not blow either,
+		// 2000 (C5), a single crafted kernel line must not blow either,
 		// the same discipline analyze.Fallback applies to its own
 		// RAWLINES (contracts/analyze.md §5).
 		msg := truncRunesR(c.Entry.Message, 1000)
@@ -195,7 +195,7 @@ func BuildRawReport(cfg *config.Config, seq int64, cands []RawCandidate, dropped
 // itself failed (error, or facts shape drift). The safety path fails
 // loud, never silent.
 func buildScanFailedReport(cfg *config.Config, seq int64, reason string) *report.Report {
-	headline := "Raw-alert scan failed — critical kernel events may be unseen"
+	headline := "Raw-alert scan failed, critical kernel events may be unseen"
 	body := "The kernel section of this tick's facts could not be scanned for critical events: " + reason +
 		". Hardware alerts do not depend on this path alone - the deterministic smartd/ZED mail paths are unaffected."
 	key := dedup.Key("meta", "raw-alert scan failed")
@@ -219,7 +219,7 @@ func buildScanFailedReport(cfg *config.Config, seq int64, reason string) *report
 // markers, detect a scan failure, or select/cap/mark candidates. It
 // returns the report to send (nil ⇒ nothing to send this tick), the count
 // of findings it carries, and whether this was the scan-failure case (the
-// safety path — always visible in the exit code, delivery success or
+// safety path, always visible in the exit code, delivery success or
 // not).
 func scanRawAlerts(cfg *config.Config, f *facts.Facts, now time.Time) (rep *report.Report, findingCount int, scanFailed bool) {
 	sweepMarkers(cfg.StateDir, now, time.Duration(cfg.RawAlertMarkerTTLHours)*time.Hour)
@@ -227,7 +227,7 @@ func scanRawAlerts(cfg *config.Config, f *facts.Facts, now time.Time) (rep *repo
 	if failed, reason := kernelScanFailed(f); failed {
 		// R3.3 (amended 64e57f3): the scan-failure alert is marker-
 		// suppressed like any other raw alert, under the reserved key
-		// "scan-failed" — but scanFailed is still true, unconditionally,
+		// "scan-failed", but scanFailed is still true, unconditionally,
 		// so the exit code stays non-zero on EVERY failing tick even on
 		// a tick where the human channel is throttled. "Fails loud,
 		// never silent" holds for the exit code, the log line and

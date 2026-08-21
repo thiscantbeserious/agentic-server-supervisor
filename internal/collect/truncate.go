@@ -49,7 +49,7 @@ func entryCandidate(path string, entries *[]facts.Entry, dropped *int, truncated
 }
 
 // genericCandidate builds a candidate over a slice with no priority
-// notion (network.listeners, resources.filesystems, deep.history) — every
+// notion (network.listeners, resources.filesystems, deep.history), every
 // element is droppable.
 func genericCandidate[T any](path string, s *[]T, dropped *int, truncated *bool) candidate {
 	noneProtected := func(T) bool { return false }
@@ -227,13 +227,13 @@ func Truncate(f *facts.Facts, cfg *config.Config) {
 	// Hitting the step-3 fixed point always means the document is
 	// incomplete (§5 step 3), even in the edge case where there is
 	// nothing left for hardTruncate to reduce and so no individual
-	// section's own Truncated flag ends up set — anySectionTruncated
+	// section's own Truncated flag ends up set, anySectionTruncated
 	// alone would silently report false there.
 	f.Meta.Truncated = hardTruncated || anySectionTruncated(f)
 }
 
 // truncateEntries implements the same algorithm restricted to a single
-// candidate — the per-section SERVICES_MAX_BYTES budget (§3 row 7, §5
+// candidate, the per-section SERVICES_MAX_BYTES budget (§3 row 7, §5
 // last line).
 func truncateEntries(entries *[]facts.Entry, dropped *int, truncated *bool, maxBytes, maxPri int) {
 	protected := func(e facts.Entry) bool { return e.Priority <= maxPri }

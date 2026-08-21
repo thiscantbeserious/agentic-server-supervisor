@@ -1,5 +1,5 @@
 # Sentinel stack: apprise + mailrise, plus the sentinel supervisor itself,
-# exactly as specified in contracts/runtime.md R4 — one definition, no
+# exactly as specified in contracts/runtime.md R4, one definition, no
 # drift between contract and file.
 #
 # Bring up:   cd deploy && cp .env.example .env && $EDITOR .env && docker compose up -d
@@ -23,7 +23,7 @@ services:
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     user: "10001:10001"
-    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing — run install.sh}"]
+    group_add: ["${JOURNAL_GID:?JOURNAL_GID missing, run install.sh}"]
     pids_limit: 256
     mem_limit: 512m
     stop_grace_period: 15s

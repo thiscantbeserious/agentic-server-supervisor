@@ -31,7 +31,7 @@ RUN apt-get update -qq \
 # A second stage carrying the packages install.sh's own step1 installs.
 #
 # Tests that assert on step1's behaviour ("installing …" versus "already
-# installed") must NOT use this — they need to observe the install happening,
+# installed") must NOT use this, they need to observe the install happening,
 # and starting from a host where it is already done would quietly rewrite what
 # they measure. It exists for tests whose subject is something else entirely,
 # such as the monitoring prompt, so they do not pay for a package install they

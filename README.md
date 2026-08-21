@@ -5,7 +5,7 @@ disk health, ZFS pool state, and hardware sensors, turns what it finds into
 a plain-language report, and delivers that report to Telegram.
 
 It never writes to the host it watches. There is no remediation, no
-self-healing, no action taken on your behalf — only observation and
+self-healing, no action taken on your behalf, only observation and
 notification. If a disk is failing, this tells you; it does not touch the
 disk.
 
@@ -24,15 +24,15 @@ OpenMediaVault and verifying delivery actually works: [deploy/README.md](deploy/
 
 ## What it watches
 
-- **The systemd journal** — kernel lines at `emerg`/`alert`/`crit` priority,
+- **The systemd journal**, kernel lines at `emerg`/`alert`/`crit` priority,
   `smartd` and ZED log entries, service failures.
-- **`smartd`** — SMART health and pending/reallocated sector counts, per disk.
-- **ZFS (`zed`)** — pool state, scrub results, checksum/degraded events.
-- **`lm-sensors`** — temperatures, voltages, fan speeds.
-- **`rasdaemon`** — MCE, ECC, and PCIe AER hardware error events.
+- **`smartd`**, SMART health and pending/reallocated sector counts, per disk.
+- **ZFS (`zed`)**, pool state, scrub results, checksum/degraded events.
+- **`lm-sensors`**, temperatures, voltages, fan speeds.
+- **`rasdaemon`**, MCE, ECC, and PCIe AER hardware error events.
 
 Facts are collected deterministically, then handed to an LLM (Antigravity
-CLI) for classification and a written recommendation — trend vs. transient,
+CLI) for classification and a written recommendation, trend vs. transient,
 what it means, what to check next. The LLM never runs commands and has no
 access to the host beyond the facts it is given.
 
@@ -42,11 +42,11 @@ This is the property that separates it from piping logs at a model and
 hoping. `smartd` and ZED talk SMTP straight to the notification stack, with
 no supervisor process and no LLM in that path at all. And inside the
 supervisor itself, a kernel line at `emerg`/`alert`/`crit` is forwarded
-immediately, unanalyzed, the moment it's seen — before the LLM step even
+immediately, unanalyzed, the moment it's seen, before the LLM step even
 runs. If the analyzer is down, unreachable, unauthenticated, or returns
 garbage, hardware alerts still arrive; only the triage and recommendation
 text is lost. The LLM adds interpretation on top of a path that already
-works without it — it is never the thing standing between a failing disk
+works without it, it is never the thing standing between a failing disk
 and a notification.
 
 ## Architecture

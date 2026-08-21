@@ -16,7 +16,7 @@ import (
 )
 
 // SeedConfig uploads APPRISE_CONFIG_FILE verbatim via POST /add/{key}. Ops
-// one-shot: no substitution, no shell, no expansion — the file arrives
+// one-shot: no substitution, no shell, no expansion, the file arrives
 // already rendered.
 func SeedConfig(ctx context.Context, cfg *config.Config) (int, error) {
 	data, err := os.ReadFile(cfg.AppriseConfigFile)
@@ -51,14 +51,14 @@ func SeedConfig(ctx context.Context, cfg *config.Config) (int, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		// unwrapURLErr: a *url.Error's Error() embeds the full request
-		// URL, whose last path segment is APPRISE_KEY — never let it into
+		// URL, whose last path segment is APPRISE_KEY, never let it into
 		// a returned/logged error (C7, same fix as notify.go's postApprise).
 		return 0, fmt.Errorf("transport: %w", unwrapURLErr(err))
 	}
 	defer resp.Body.Close()
 	// N.3.1's 204 rule applies here too: a 204 means apprise did not
 	// register the key, which is precisely the failure SeedConfig exists
-	// to prevent — the one caller that must never mistake it for success.
+	// to prevent, the one caller that must never mistake it for success.
 	if resp.StatusCode == http.StatusNoContent {
 		return 0, fmt.Errorf("http 204: apprise did not accept the config")
 	}

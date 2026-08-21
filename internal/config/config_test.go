@@ -130,7 +130,7 @@ func TestLoad_TickWindowMustExceedTickInterval(t *testing.T) {
 
 // C3: "Every duration value is parsed by time.ParseDuration with no
 // rewriting of the input." The old "min" alias silently mis-parsed
-// "10mins" as 10 *milliseconds* (ReplaceAll("mins","m"+"ins")->"10ms") —
+// "10mins" as 10 *milliseconds* (ReplaceAll("mins","m"+"ins")->"10ms"),
 // a 60,000x error with no diagnostic. Durations must now use Go syntax
 // ("10m") and anything else is a config error naming the variable.
 func TestLoad_TickWindowRejectsNonGoDurationSyntax(t *testing.T) {
@@ -284,7 +284,7 @@ func TestLoad_C3Ranges(t *testing.T) {
 		{"RAW_ALERT_MARKER_TTL_HOURS above range", map[string]string{"RAW_ALERT_MARKER_TTL_HOURS": "8761"}, "RAW_ALERT_MARKER_TTL_HOURS"},
 		// The overflow value that motivated the <=24h post-conversion bound
 		// (C3): a seconds-valued var is multiplied by time.Second, so a huge
-		// value overflows int64 nanoseconds into a NEGATIVE duration — a
+		// value overflows int64 nanoseconds into a NEGATIVE duration, a
 		// timeout would fire instantly instead of erroring at Load().
 		{"SECTION_TIMEOUT overflows int64 ns when converted", map[string]string{"SECTION_TIMEOUT": "99999999999"}, "SECTION_TIMEOUT"},
 		{"NOTIFY_TIMEOUT overflows int64 ns when converted", map[string]string{"NOTIFY_TIMEOUT": "99999999999"}, "NOTIFY_TIMEOUT"},
@@ -293,7 +293,7 @@ func TestLoad_C3Ranges(t *testing.T) {
 		{"AGY_PRINT_TIMEOUT duration above 24h", map[string]string{"AGY_PRINT_TIMEOUT": "25h"}, "AGY_PRINT_TIMEOUT"},
 		{"DEEP_TIMEOUT duration above 24h", map[string]string{"DEEP_TIMEOUT": "25h"}, "DEEP_TIMEOUT"},
 		// C3 (amended, commit c5cab9a): the 24h bound is on the variable,
-		// not on the Go type Config stores it in — these four stay plain
+		// not on the Go type Config stores it in, these four stay plain
 		// int seconds in Config and only become durations in state/runtime,
 		// but Load must still reject > 86400.
 		{"RAW_ALERT_REPEAT_SECONDS above 86400", map[string]string{"RAW_ALERT_REPEAT_SECONDS": "86401"}, "RAW_ALERT_REPEAT_SECONDS"},

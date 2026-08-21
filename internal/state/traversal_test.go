@@ -16,13 +16,13 @@ import (
 
 // ---- containment regression suite: identifier-from-contents class ----
 //
-// This is the ONLY traversal/containment test file in this package —
+// This is the ONLY traversal/containment test file in this package,
 // deliberately. Two classes of bug produced three real sinks across T5
 // review (findings[].key adopted verbatim in step (d); alert.Key and
 // outbox EntryID trusted from a stored record's own JSON body instead of
 // the filename/lookup-key it was actually read under). All three are
 // exercised here except the outbox one, which lives in
-// TestOutboxTake_SkipsBodyIDFilenameMismatch (state_test.go) — porting it
+// TestOutboxTake_SkipsBodyIDFilenameMismatch (state_test.go), porting it
 // here too would be a second copy of the same containment property with
 // nothing left to catch that the first copy wouldn't, which is exactly
 // the kind of duplicate a future change could let rot unnoticed while its
@@ -30,7 +30,7 @@ import (
 //
 // Every test here is rooted several levels ABOVE $STATE_DIR (see
 // nestedStore), not at it. A snapshot rooted at the state dir cannot
-// observe an escape by construction — that tautology is what let this
+// observe an escape by construction, that tautology is what let this
 // class through review more than once.
 //
 // Validated 15/15 FAIL on a build without the path-escape guard, PASS
@@ -176,7 +176,7 @@ func TestTraversal_ReportKeyKeepsWritesInsideStateDir(t *testing.T) {
 			}
 
 			// $STATE_DIR's own root may hold only the four contracted
-			// names (S.5) — "../canary1" stays inside but still pollutes it.
+			// names (S.5), "../canary1" stays inside but still pollutes it.
 			rootEnts, _ := os.ReadDir(filepath.Join(root, stateRel))
 			allowed := map[string]bool{"heartbeat": true, "history": true, "active-alerts": true, "outbox": true}
 			for _, e := range rootEnts {
@@ -195,7 +195,7 @@ func TestTraversal_ReportKeyKeepsWritesInsideStateDir(t *testing.T) {
 			}
 
 			// The finding must still be PROCESSED, under a recomputed
-			// key — not silently dropped.
+			// key, not silently dropped.
 			if err != nil {
 				t.Fatalf("key %q: Process errored (%v) instead of recomputing the key", tc.key, err)
 			}
@@ -247,7 +247,7 @@ func TestTraversal_ResolvedDeleteUsesFilenameNotStoredKey(t *testing.T) {
 	stateDir := filepath.Join(root, stateRel)
 
 	// active-alerts/../../victim.json resolves to <stateDir>/../victim.json
-	// == root/a/b/c/victim.json — one level ABOVE the state dir.
+	// == root/a/b/c/victim.json, one level ABOVE the state dir.
 	victim := filepath.Join(root, "a", "b", "c", "victim.json")
 	if err := os.WriteFile(victim, []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
@@ -280,9 +280,9 @@ func TestTraversal_ResolvedDeleteUsesFilenameNotStoredKey(t *testing.T) {
 
 	// The load-boundary fix (alerts.go) treats a body/filename key
 	// mismatch as corrupt (S.7) rather than fabricating an all-clear from
-	// contents it just declared untrustworthy — so reason must never be
+	// contents it just declared untrustworthy, so reason must never be
 	// "all_clear" here. (notify may still be true for an unrelated reason,
-	// e.g. the daily heartbeat firing on this same Process call — that's
+	// e.g. the daily heartbeat firing on this same Process call, that's
 	// independent of this record and not what's under test.)
 	if d.Reason == "all_clear" {
 		t.Errorf("reason=%s, want anything but all_clear: a key/filename mismatch is corrupt (S.7), not a legitimate all-clear", d.Reason)
@@ -295,7 +295,7 @@ func TestTraversal_ResolvedDeleteUsesFilenameNotStoredKey(t *testing.T) {
 // Class 2, sink B: step (d)'s "exists" branch loads an active alert via
 // loadAlert(key) and, without the fix, would trust
 // alert.Key from the record's own JSON body for the saveAlert rewrite
-// immediately after — a record at a legitimate filename whose body
+// immediately after, a record at a legitimate filename whose body
 // claims "key":"../../pwned" would be rewritten straight back out to
 // that escaped path on its very next occurrence, with no crafted input
 // required.
@@ -304,7 +304,7 @@ func TestTraversal_ResolvedDeleteUsesFilenameNotStoredKey(t *testing.T) {
 // (c)'s expireStaleAlerts runs before step (d) on every Process call and
 // already deletes this same corrupt record via its own loadAlertByFile
 // check, so loadAlert's independent key check is currently unreachable
-// under test — mutating it alone leaves this test green. See the comment
+// under test, mutating it alone leaves this test green. See the comment
 // on expireStaleAlerts (state.go) for the same fact from the other side.
 // This test still proves what matters: the record never gets rewritten
 // under its stored key, regardless of which of the two checks catches it.
@@ -330,14 +330,14 @@ func TestTraversal_ExistingAlertRewriteUsesValidatedKeyNotStoredKey(t *testing.T
 	before := snap(t, root)
 
 	// An input finding carrying the record's filename as its (valid,
-	// well-formed) key — this is what puts Process on the "exists"
+	// well-formed) key, this is what puts Process on the "exists"
 	// branch that reads the crafted record and, pre-fix, would have
 	// rewritten it straight back out under its body's escaped key.
 	d, err := s.Process(reportWithKey(filenameKey, "alert", "zfs", "mismatch-evidence"))
 	after := snap(t, root)
 
 	// alert.Key = "../../pwned" joined onto ".../state/active-alerts/"
-	// resolves to ".../state/../pwned.json" == root/a/b/c/pwned.json —
+	// resolves to ".../state/../pwned.json" == root/a/b/c/pwned.json,
 	// still inside the observed root (four levels deep), so diffOutside
 	// alone is sufficient proof here; no direct os.Stat needed.
 	if esc := diffOutside(before, after, stateRel); len(esc) > 0 {

@@ -297,7 +297,7 @@ func TestSendFailures(t *testing.T) {
 }
 
 // TestPostFailureLogKeys asserts N.3.5's two distinct log keys for a
-// failed POST, "http=<code>" or "transport=<err>" — not one generic
+// failed POST, "http=<code>" or "transport=<err>", not one generic
 // "error" key a log-scraping alert can't distinguish by cause.
 func TestPostFailureLogKeys(t *testing.T) {
 	r := loadFixture(t, "report-ok.json")
@@ -338,7 +338,7 @@ func TestPostFailureLogKeys(t *testing.T) {
 // TestAppriseKeyNeverLeaks asserts APPRISE_KEY cannot leak. It sits in
 // the URL path of every apprise request, so both a deliberate message
 // (the 204 case) and an incidental one (a *url.Error's Error() embeds the
-// full request URL) can leak it into a returned error or a log line —
+// full request URL) can leak it into a returned error or a log line,
 // C7 / N.3.5 require redaction at every site that logs, wraps, or
 // returns an error that can reach a caller. A distinctive
 // non-default key is required: the default ("sentinel") is indistinguishable
@@ -391,7 +391,7 @@ func TestAppriseKeyNeverLeaks(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected a delivery error")
 			}
-			// Check the key itself AND its percent-encoded form — the
+			// Check the key itself AND its percent-encoded form, the
 			// encoded form is what a *url.Error actually prints, and is
 			// the exact gap a plain literal-match redactor misses.
 			encoded := (&url.URL{Path: c.key}).EscapedPath()
@@ -476,7 +476,7 @@ func TestSMTPFallback(t *testing.T) {
 }
 
 // TestSMTPBody_NoMarkdown is 31cec31 item 1, end-to-end through Send: the
-// DATA block must be the plain-text body (N.3.6), never payload.Body — the
+// DATA block must be the plain-text body (N.3.6), never payload.Body, the
 // cksum fixture's markdown-heavy content (**Findings**, _Analysis:_,
 // backtick-wrapped evidence) is exactly what a real mailrise message
 // forwarded literally before this fix.
@@ -493,7 +493,7 @@ func TestSMTPBody_HTML(t *testing.T) {
 	dataText := smtp.dataText
 	smtp.mu.Unlock()
 
-	// 2593e07: the SMTP path now sends text/html, not text/plain — mailrise
+	// 2593e07: the SMTP path now sends text/html, not text/plain, mailrise
 	// selects the notification format from Content-Type.
 	if !strings.Contains(dataText, "Content-Type: text/html; charset=utf-8") {
 		t.Errorf("SMTP message is not Content-Type: text/html: %s", dataText)
@@ -517,7 +517,7 @@ func TestSMTPBody_HTML(t *testing.T) {
 
 // TestSMTPBody_StripsUnsafeButKeepsFidelity is the 0bdf468 amendment: the
 // HTML path must still drop invalid UTF-8 and control characters the way
-// Sanitize always did for the markdown path — html.EscapeString alone
+// Sanitize always did for the markdown path, html.EscapeString alone
 // only handles the five XML entities, not NUL/BEL/invalid UTF-8. RFC 5321 §2.3.1
 // forbids NUL in SMTP DATA, and a message declaring charset=utf-8 must
 // not carry invalid UTF-8. This is checked in the SAME test as the
@@ -728,7 +728,7 @@ func TestSeedConfig(t *testing.T) {
 
 // TestSeedConfig_204IsFailure asserts N.3.1's 204 rule ("the key was not
 // registered") applies to /add/{key} exactly as it does to /notify/{key}
-// — a 204 there means apprise did NOT accept the config, the one outcome
+// , a 204 there means apprise did NOT accept the config, the one outcome
 // SeedConfig exists to prevent silently.
 func TestSeedConfig_204IsFailure(t *testing.T) {
 	dir := t.TempDir()
@@ -757,4 +757,4 @@ func TestSeedConfig_204IsFailure(t *testing.T) {
 	}
 }
 
-// --- 18: TestE2E (gated) — see e2e_test.go for the full test body.
+// --- 18: TestE2E (gated), see e2e_test.go for the full test body.

@@ -33,7 +33,7 @@ var ErrUnparseable = errors.New("unparseable sensors output")
 // Options configures one Run.
 type Options struct {
 	Cfg           *config.Config
-	Seq           int64  // meta.tick_seq — collect neither reads nor writes tick-seq (D8)
+	Seq           int64  // meta.tick_seq, collect neither reads nor writes tick-seq (D8)
 	DeepComponent string // "" ⇒ tick mode; otherwise zfs|smart|kernel|ras, run under DEEP_TIMEOUT
 }
 
@@ -49,7 +49,7 @@ func now(cfg *config.Config) time.Time {
 
 // Run collects everything, truncates, and returns the document. It
 // returns an error only for internal failures (marshal/stdout write is
-// the caller's concern — Run itself only assembles the struct).
+// the caller's concern, Run itself only assembles the struct).
 func Run(ctx context.Context, o Options) (*facts.Facts, error) {
 	start := time.Now()
 	cfg := o.Cfg
@@ -106,7 +106,7 @@ func Run(ctx context.Context, o Options) (*facts.Facts, error) {
 
 	// duration_ms and timestamp must be in the document BEFORE Truncate
 	// measures it against FACTS_MAX_BYTES (§5: truncation "operates on the
-	// assembled *facts.Facts before it is marshaled") — assigning them
+	// assembled *facts.Facts before it is marshaled"), assigning them
 	// after Truncate lets the final output exceed the budget by their
 	// ~30-40 bytes with no hard-truncation marker to explain why.
 	meta.DurationMs = time.Since(start).Milliseconds()
@@ -132,7 +132,7 @@ func runSection[T any](ctx context.Context, m *facts.Meta, name string, timeout 
 }
 
 // binForSection is used only when the underlying error type carries no
-// program name (namely *exec.ExitError) — the two subprocesses collect
+// program name (namely *exec.ExitError), the two subprocesses collect
 // spawns are fixed per section.
 func binForSection(name string) string {
 	if name == "sensors" {
@@ -217,7 +217,7 @@ func sinceArg(d time.Duration) string {
 // --- kernel / ras / smart / zfs (journal-backed) sections ---
 
 // journalQuery fills in the two fields every call site must pass:
-// MaxRecords (the record-cap window) and RawAlertMaxPriority (D2 — which
+// MaxRecords (the record-cap window) and RawAlertMaxPriority (D2, which
 // entries the cap must never evict, contracts/collect.md §3).
 func journalQuery(cfg *config.Config, dirs []string, since string, args []string, exclude []string) journal.Query {
 	return journal.Query{
@@ -228,7 +228,7 @@ func journalQuery(cfg *config.Config, dirs []string, since string, args []string
 
 // runJournalQuery wraps journal.Run, recording a collector_errors[] row
 // for each directory that failed while at least one other directory
-// succeeded — a tolerated partial failure, not a section failure (§3
+// succeeded, a tolerated partial failure, not a section failure (§3
 // "One directory failing does not discard the other").
 func runJournalQuery(ctx context.Context, meta *facts.Meta, sectionName string, q journal.Query) ([]facts.Entry, int, error) {
 	entries, dropped, warnings, err := journal.Run(ctx, q)
@@ -425,7 +425,7 @@ var pseudoFS = map[string]bool{
 
 // remoteFS (collect.md §3 row 6 note): syscall.Statfs on a hung remote
 // mount blocks in uninterruptible D-state. Go cannot cancel a blocking
-// syscall, so SECTION_TIMEOUT does not save the collector — the goroutine
+// syscall, so SECTION_TIMEOUT does not save the collector, the goroutine
 // and its OS thread are stuck until the mount responds, possibly never.
 // The target host is a NAS, so this is an every-tick risk.
 var remoteFS = map[string]bool{
@@ -638,7 +638,7 @@ func collectNetwork(ctx context.Context, cfg *config.Config, meta *facts.Meta) (
 		if werr := writeBaseline(cfg.StateDir, listeners); werr != nil {
 			// §2/§7: the write failure is never fatal, but a baseline that
 			// was never actually written must not be reported as
-			// initialized — the next tick's listener diff would be
+			// initialized, the next tick's listener diff would be
 			// meaningless. Reason names the stable destination path, not
 			// os.CreateTemp's random ".tmp-*" name.
 			_, code := mapError(werr, "network", 0)
@@ -670,7 +670,7 @@ func readListeners(hostProc string) ([]facts.Listener, error) {
 		if err != nil {
 			// §3 "Absent optional sources": tcp6/udp6 missing (IPv6
 			// disabled) contributes no listeners rather than failing the
-			// whole section — tcp/udp are not optional and stay fatal.
+			// whole section, tcp/udp are not optional and stay fatal.
 			if sp.optional && errors.Is(err, fs.ErrNotExist) {
 				continue
 			}

@@ -43,7 +43,7 @@ func TestStateProcessCLIBadInputExits65(t *testing.T) {
 }
 
 // S.1 says "history [n] and outbox-ack <id> are the only subcommands
-// taking a positional argument" — process, outbox-add and
+// taking a positional argument", process, outbox-add and
 // outbox-take were silently ignoring a stray one instead of treating it as
 // the usage error C2 requires (64). Covers all five state subcommands: the
 // three that take none, and the two that take exactly one (an extra
@@ -154,8 +154,8 @@ func TestStateCLIStateDirUnwritableExits69(t *testing.T) {
 
 // `sentinel health`: exit 0 with a fresh heartbeat, exit 1 with a stale one
 // (S.6 pins the "stale or missing" case to exit 1, C2).
-// A completely fresh $STATE_DIR — `sentinel health` as the very first
-// command ever run against it, before any `state process` — must exit
+// A completely fresh $STATE_DIR, `sentinel health` as the very first
+// command ever run against it, before any `state process`, must exit
 // non-zero. This is the case an in-process test structurally cannot
 // observe if `health` internally calls state.New first: it has to run the
 // real binary against a genuinely empty volume, matching main's container
