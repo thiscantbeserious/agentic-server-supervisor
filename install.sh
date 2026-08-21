@@ -1613,12 +1613,21 @@ step1() {
   local existing_mta
   existing_mta="$(existing_mail_transport_agent)"
   if mail_wiring_wanted; then
-    desired+=(msmtp)
-    if [ -n "$existing_mta" ]; then
-      note "step1 packages: msmtp-mta will not be installed, $existing_mta already provides mail-transport-agent and msmtp-mta declares Conflicts: mail-transport-agent, apt would resolve that by removing $existing_mta; msmtp itself claims no such role and installs normally for step3's own use"
-    else
-      desired+=(msmtp-mta)
+    if [ -z "$existing_mta" ]; then
+      desired+=(msmtp msmtp-mta)
       MSMTP_MTA_OK=1
+    elif zed_uses_msmtp; then
+      # msmtp-mta is still refused, it would take $existing_mta with it, but
+      # the plain client earns its place here: ZED_EMAIL_PROG names the
+      # binary directly and does not care what the system transport is.
+      desired+=(msmtp)
+      note "step1 packages: msmtp-mta will not be installed, $existing_mta already provides mail-transport-agent and msmtp-mta declares Conflicts: mail-transport-agent, apt would resolve that by removing $existing_mta; the plain msmtp client claims no such role and installs for ZED, which invokes it by name"
+    else
+      # Neither package has a purpose here, and installing one anyway is the
+      # mistake underneath the production incident, one step earlier: a mail
+      # transport installed for steps that go on to skip. $existing_mta is
+      # already a working transport, so the delivery path is through it.
+      note "step1 packages: msmtp not installed. $existing_mta holds mail-transport-agent, so msmtp-mta would remove it, and nothing else here would ever invoke msmtp: ZED is left to this platform and smartd hands mail to sendmail, which is $existing_mta. Send through $existing_mta instead by pointing this platform's own notification settings at mailrise on ${MAILRISE_HOST}:${MAILRISE_PORT}, authenticating with the MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS pair from $ENV_FILE, addressed to omv@mailrise.xyz"
     fi
   else
     note "step1 packages: msmtp/msmtp-mta not installed, no MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS in $ENV_FILE yet, so step3 has nothing to configure them for and steps 4-5 gate on the same thing; re-run once the env file has credentials"
@@ -1781,13 +1790,22 @@ file_is_omv_managed() {
 # on a host where postfix holds that role smartd never reaches msmtp, and
 # counting it here would claim a reader that does not exist.
 #
-# This does not gate anything. step3 writes regardless, because a host can
-# gain any of these later and a config file waiting for that is harmless
-# while a missing one is a silent no-delivery. It only lets the summary say
-# so rather than implying mail is now wired.
+# step3 skips when neither is present. Writing it anyway would put the
+# mailrise password in a second place on disk to configure a delivery path
+# the host cannot take, and would report mail as wired in the same summary
+# where steps 4 and 5 say they configured nothing. A host that later gains
+# a reader gets the file on the next run, which is what re-running is for.
+# zed_uses_msmtp: ZED is the one thing that invokes msmtp by name rather
+# than through sendmail, so it is a reader no matter which package holds
+# mail-transport-agent. A platform-generated zed.rc means step5 refuses to
+# touch it, and ZED_EMAIL_PROG is never set to msmtp.
+zed_uses_msmtp() {
+  [ -f /etc/zfs/zed.d/zed.rc ] && ! file_is_omv_managed /etc/zfs/zed.d/zed.rc
+}
+
 msmtprc_has_consumer() {
   [ "$MSMTP_MTA_OK" -eq 1 ] && return 0
-  [ -f /etc/zfs/zed.d/zed.rc ] && ! file_is_omv_managed /etc/zfs/zed.d/zed.rc && return 0
+  zed_uses_msmtp && return 0
   return 1
 }
 
@@ -1799,11 +1817,10 @@ step3() {
     note "step3 $file: skipped ($MAIL_NOT_OK_REASON)"
     return
   fi
-  # Said plainly rather than left to be inferred: on a host where nothing
-  # reads this file, the bare "updated" reads as mail being wired up, two
-  # lines above steps 4 and 5 saying they configured nothing.
-  MSMTPRC_UNUSED_NOTE=""
-  msmtprc_has_consumer || MSMTPRC_UNUSED_NOTE=", though nothing on this host reads it yet: msmtp is not the system mail transport and ZED is not pointed at it, so it is written ready rather than active. Configure mail delivery in this platform's own settings"
+  if ! msmtprc_has_consumer; then
+    note "step3 $file: skipped, nothing on this host reads it: msmtp is not the system mail transport and ZED is not pointed at it, so writing it would put the mailrise password in a second place on disk to serve a path that cannot be taken. Point this platform's own notification settings at mailrise on ${MAILRISE_HOST}:${MAILRISE_PORT} instead, authenticating with MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS, addressed to omv@mailrise.xyz"
+    return
+  fi
 
   smtp_user="$SMTP_USER"
   smtp_pass="$SMTP_PASS"
@@ -1838,11 +1855,11 @@ account default : sentinel"
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
       note "step3 /etc/msmtprc: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
     else
-      note "step3 /etc/msmtprc: $(verb_phrase "updated" "would be updated")${MSMTPRC_UNUSED_NOTE}"
+      note "step3 /etc/msmtprc: $(verb_phrase "updated" "would be updated")"
     fi
     changed=$((changed+1))
   else
-    note "step3 /etc/msmtprc: already converged${MSMTPRC_UNUSED_NOTE}"
+    note "step3 /etc/msmtprc: already converged"
   fi
 }
 
