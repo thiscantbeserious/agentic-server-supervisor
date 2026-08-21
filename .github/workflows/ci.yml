@@ -1,27 +1,15 @@
 name: ci
 
+# No `paths:` filter. A filter here stops the workflow from starting at
+# all, and a required status check that never starts never reports, so a
+# docs-only pull request sat BLOCKED forever against six checks that were
+# not failing, merely absent. Filtering moved into the `changes` job below,
+# whose skips DO report: GitHub counts a skipped job as a successful
+# required check, but only for a workflow that actually ran.
 on:
   push:
     branches: [main]
-    paths:
-      - "cmd/**"
-      - "internal/**"
-      - "deploy/**"
-      - "test/**"
-      - "install.sh"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "cmd/**"
-      - "internal/**"
-      - "deploy/**"
-      - "test/**"
-      - "install.sh"
-      - "go.mod"
-      - "go.sum"
-      - ".github/workflows/ci.yml"
   workflow_dispatch: {}
 
 # packages:write is scoped to the build/merge jobs only (they push to
@@ -32,12 +20,86 @@ permissions:
   contents: read
 
 jobs:
+  # changes decides whether the expensive jobs do anything. It is the one
+  # thing standing between a code change and every gate in this file, so it
+  # fails CLOSED: an event it does not recognise, a base commit it cannot
+  # resolve, or a diff that errors all answer "code changed" and run the
+  # full suite. The failure it must never have is the quiet one, deciding
+  # nothing changed and reporting six green skips over unreviewed code.
+  #
+  # `scan` deliberately does NOT depend on this. Secret scanning has to see
+  # every commit, and a leaked credential in a markdown file is still a
+  # leaked credential; it costs about ten seconds, so there is nothing to
+  # save by skipping it.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          # The diff needs both endpoints present locally; the default
+          # shallow fetch has neither for a pull request.
+          fetch-depth: 0
+
+      - name: Decide whether anything the suite covers actually changed
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          run_everything() {
+            echo "changes: $1, running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          case "$EVENT" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            push)         base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+            *)            run_everything "event '$EVENT' is not one this job knows how to diff" ;;
+          esac
+
+          # A branch's first push reports an all-zero "before", and a force
+          # push can name a commit that no longer exists.
+          case "$base" in
+            ""|0000000000000000000000000000000000000000) run_everything "no usable base commit" ;;
+          esac
+          git cat-file -e "${base}^{commit}" 2>/dev/null || run_everything "base commit $base is not in this clone"
+          git cat-file -e "${head}^{commit}" 2>/dev/null || run_everything "head commit $head is not in this clone"
+
+          if ! files="$(git diff --name-only "$base" "$head" 2>&1)"; then
+            run_everything "git diff failed: $files"
+          fi
+          if [ -z "$files" ]; then
+            run_everything "empty diff, which should not happen and is not worth trusting"
+          fi
+
+          echo "changes: files in $base..$head:"
+          printf '%s\n' "$files" | sed 's/^/  /'
+
+          # Anything outside this list is treated as covered by the suite,
+          # so a path added to the repo later runs everything until someone
+          # deliberately excludes it. Wrong in the safe direction.
+          if printf '%s\n' "$files" | grep -qvE '^(README\.md|AGENTS\.md|CLAUDE\.md|ARCHITECTURE\.md|PLAN\.md|CONTRACTS\.md|LICENSE|\.gitignore|docs/|contracts/.*\.md$|.*\.md$)'; then
+            run_everything "at least one changed path is not documentation"
+          fi
+
+          echo "changes: documentation only, skipping the jobs that build and test code"
+          echo "code=false" >> "$GITHUB_OUTPUT"
+
   lint:
     # Everything gates on the secret scan: if a credential is in the tree,
     # nothing should build, test or publish from it. scan must stay
     # unconditional, a skipped dependency skips this job too, which would
     # turn a scan that never ran into a green pipeline that did nothing.
-    needs: scan
+    needs: [scan, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -79,7 +141,8 @@ jobs:
     # nothing should build, test or publish from it. scan must stay
     # unconditional, a skipped dependency skips this job too, which would
     # turn a scan that never ran into a green pipeline that did nothing.
-    needs: scan
+    needs: [scan, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -130,7 +193,8 @@ jobs:
   # No Telegram credential anywhere in this job, and nothing here
   # reaches api.telegram.org.
   e2e:
-    needs: test
+    needs: [test, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -213,7 +277,8 @@ jobs:
   # reason to spend that on a push where `go vet` or a unit test is
   # already broken.
   container:
-    needs: test
+    needs: [test, changes]
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -286,7 +351,8 @@ jobs:
   # QEMU design, contracts/runtime.md R6), and would be worse here, this
   # job's entire purpose is the thing that has never actually run.
   vm-e2e-debian:
-    needs: test
+    needs: [test, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -337,7 +403,8 @@ jobs:
   # at all, this is what makes that impossible: a changed script is a
   # different tag, full stop.
   vm-omv-image:
-    needs: test
+    needs: [test, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -413,7 +480,8 @@ jobs:
     # them means the image is published once and pulled here. On a warm
     # cache the dependency costs the seconds vm-omv-image needs to confirm
     # the content hash is already published.
-    needs: [test, vm-omv-image]
+    needs: [test, vm-omv-image, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -472,7 +540,8 @@ jobs:
   # one more matrix row here (and in `container` above) and nothing
   # else, no workflow logic branches on which architectures exist.
   build:
-    needs: test
+    needs: [test, changes]
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
