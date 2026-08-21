@@ -918,6 +918,18 @@ omv_confdbadm_bin() {
 # a real successful run confirms it. Any shape this does not recognise
 # degrades to "unknown" (return 1), never a guess. No caller ever
 # prefers this over an explicit structural "no", it only answers the
+# omv_json_field JSON NAME: the value of a top-level string field, for
+# the single-record answers `omv-confdbadm read --uuid` returns. Matching
+# is order- and whitespace-independent, and anchored to nothing, so a
+# pretty-printed record works the same as a compact one.
+omv_json_field() {
+  printf '%s' "$1" \
+    | tr '\n' ' ' \
+    | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+    | head -n1 \
+    | sed -E 's/.*"([^"]*)"$/\1/'
+}
+
 # empty-root case compose_root_looks_omv cannot.
 omv_confdbadm_compose_root() {
   local bin cfg rc ref path
@@ -945,35 +957,52 @@ omv_confdbadm_compose_root() {
   ref="$(printf '%s' "$cfg" | grep -o '"sharedfolderref"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
   [ -n "$ref" ] || return 1
 
-  cfg="$("$bin" read conf.system.sharedfolder 2>/dev/null)"
+  # A shared folder does not store a path. conf.system.sharedfolder holds
+  # "mntentref" and "reldirpath", and the absolute path is the referenced
+  # mountpoint's "dir" with the relative part joined onto it. The version of
+  # this that read a "path" property was reading something that exists in
+  # neither model, so the signal returned false on every real OMV host and
+  # the fresh-install, zero-stacks case it exists for was never answered.
+  # Both shapes are confirmed against OMV's datamodels and a running OMV.
+  #
+  # "read --uuid" asks for the one record rather than the whole table, so
+  # there is no array to scan and no need to find a record by matching
+  # braces: a shared folder carries a nested "privileges" value, which makes
+  # it not a flat object, and a non-greedy "{[^{}]*}" match settles on the
+  # nested value instead of the record containing it. Within a single
+  # record, "mntentref" and "reldirpath" appear once and nowhere inside the
+  # nested value, so a plain field match is unambiguous.
+  local sf mp mntentref reldirpath dir
+  sf="$("$bin" read --uuid "$ref" conf.system.sharedfolder 2>/dev/null)"
   rc=$?
-  [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
-  cfg="${cfg#"${cfg%%[![:space:]]*}"}"
-  case "$cfg" in
-    '['*|'{'*) ;;
-    *) return 1 ;;
-  esac
-  # Flattened to one line first, then matched as a single flat `{...}`
-  # OBJECT containing our uuid, not a line-adjacency `grep -B2` between
-  # separately-matched "uuid" and "path" lines. A `-B2` window silently
-  # assumes "path" sits within two lines AFTER "uuid" in the source
-  # text; real `omv-confdbadm read` output was not confirmed to be
-  # formatted that way (root access to check was declined), and if it
-  # pretty-prints with "path" before "uuid", or more than two lines
-  # apart, `-B2` never matches at all, this signal would silently stay
-  # "unknown" forever on a real host, exactly the class of bug a
-  # showcase-only test fixture cannot catch. Matching within one flat
-  # object is both order- and distance-independent for the one shape
-  # that matters (sharedfolder entries are flat records, no nested
-  # braces), and `[^{}]*` stops at the first `}` so it cannot span
-  # multiple array entries by accident.
-  local flat obj
-  flat="$(printf '%s' "$cfg" | tr '
-' ' ')"
-  obj="$(printf '%s' "$flat" | grep -o "{[^{}]*}" | grep "\"uuid\"[[:space:]]*:[[:space:]]*\"${ref}\"" | head -n1)"
-  [ -n "$obj" ] || return 1
-  path="$(printf '%s' "$obj" | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
-  [ -n "$path" ] || return 1
+  [ "$rc" -eq 0 ] && [ -n "$sf" ] || return 1
+  sf="${sf#"${sf%%[![:space:]]*}"}"
+  case "$sf" in '{'*) ;; *) return 1 ;; esac
+
+  mntentref="$(omv_json_field "$sf" mntentref)"
+  reldirpath="$(omv_json_field "$sf" reldirpath)"
+  [ -n "$mntentref" ] || return 1
+
+  mp="$("$bin" read --uuid "$mntentref" conf.system.filesystem.mountpoint 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -n "$mp" ] || return 1
+  mp="${mp#"${mp%%[![:space:]]*}"}"
+  case "$mp" in '{'*) ;; *) return 1 ;; esac
+
+  dir="$(omv_json_field "$mp" dir)"
+  [ -n "$dir" ] || return 1
+
+  # Trailing slash off the mountpoint, both slashes off the relative part,
+  # so joining them cannot produce "//" or a trailing "/" that would make an
+  # otherwise identical path compare unequal further down.
+  dir="${dir%/}"
+  reldirpath="${reldirpath#/}"
+  reldirpath="${reldirpath%/}"
+  if [ -n "$reldirpath" ]; then
+    path="${dir}/${reldirpath}"
+  else
+    path="$dir"
+  fi
 
   # Defense in depth beyond the JSON-shape guard above: even a value
   # that legitimately starts with '{'/'[' and parses cleanly must still
