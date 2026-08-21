@@ -31,6 +31,11 @@ permissions:
 
 jobs:
   lint:
+    # Everything gates on the secret scan: if a credential is in the tree,
+    # nothing should build, test or publish from it. scan must stay
+    # unconditional — a skipped dependency skips this job too, which would
+    # turn a scan that never ran into a green pipeline that did nothing.
+    needs: scan
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -68,6 +73,11 @@ jobs:
             detect --source=/repo --config=/repo/.gitleaks.toml --no-banner --redact --verbose
 
   test:
+    # Everything gates on the secret scan: if a credential is in the tree,
+    # nothing should build, test or publish from it. scan must stay
+    # unconditional — a skipped dependency skips this job too, which would
+    # turn a scan that never ran into a green pipeline that did nothing.
+    needs: scan
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
