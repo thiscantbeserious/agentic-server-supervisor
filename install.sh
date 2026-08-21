@@ -134,6 +134,13 @@ TRANSIENT_FAIL=0
 RASDAEMON_OK=0
 MSMTP_OK=0
 
+# Set by docker_preflight, below, once — never assumed. The sentinel
+# stack cannot start without both, and the two are checked separately
+# because "docker missing" and "docker present but the compose plugin
+# is not" are different operator actions to fix.
+DOCKER_OK=0
+COMPOSE_OK=0
+
 # MAIL_OK means mail will actually work: the msmtp package is present
 # AND step3 wrote a credentialed /etc/msmtprc. Package presence alone is
 # not enough — smartd's -m target and ZED_EMAIL_PROG both hand mail to
@@ -1084,6 +1091,40 @@ resolve_stack_dir_prompt() {
   exit 78
 }
 
+# docker_preflight runs before any host mutation and checks whether the
+# sentinel stack could actually start: the docker CLI, a reachable
+# daemon, and the compose PLUGIN (`docker compose`, not the legacy
+# standalone `docker-compose` binary this project's compose file is
+# never invoked through). Deliberately a WARNING, never fatal: steps
+# 1-5 (rasdaemon, msmtp, smartd, ZED) have standalone value on a host
+# that never runs a single container, and this script does not install
+# docker itself, so refusing the whole run over a runtime it cannot
+# provide would be worse than reporting it and continuing. What must
+# never happen is the run summary implying the stack is ready when it
+# is not — every step downstream that depends on DOCKER_OK/COMPOSE_OK
+# (step_apprise_seed) says so explicitly, not just here.
+docker_preflight() {
+  if ! command -v docker >/dev/null 2>&1; then
+    note "docker preflight: docker not found on PATH — install docker before the stack can be started; the steps above/below still apply on their own"
+    return
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    note "docker preflight: docker found but the daemon is not reachable (not running, or this user lacks permission) — the stack cannot be started until it is"
+    return
+  fi
+  DOCKER_OK=1
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_OK=1
+    note "docker preflight: docker daemon reachable, compose plugin present"
+    return
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    note "docker preflight: only the legacy standalone docker-compose binary is present — this stack needs the compose PLUGIN (\`docker compose\`), not docker-compose; install docker-compose-plugin"
+    return
+  fi
+  note "docker preflight: docker daemon reachable but the compose plugin is missing (\`docker compose version\` failed) — install docker-compose-plugin before the stack can be started"
+}
+
 # step0a_layout resolves where the stack lives, fetches
 # deploy/docker-compose.yml from this script's own repo at $REF, and
 # creates the directory/compose-file/symlink layout. Runs before step1:
@@ -1680,7 +1721,95 @@ step6() {
   changed=$((changed+1))
 }
 
+# --- apprise seed ----------------------------------------------------
+
+# step_apprise_seed registers the Telegram target with apprise-api's
+# own HTTP API — POST /add/KEY with urls=tgram://TOKEN/CHAT_ID — the
+# same registration deploy/README.md documents and
+# internal/notify/seed.go performs from inside the container; this is
+# the host-side equivalent, reading straight from ENV_FILE rather than
+# a rendered config file, since install.sh has no such file to render.
+# Writing apprise/sentinel.cfg by hand does NOT register the key (see
+# deploy/README.md) — POST is the only real registration, and this is
+# the one step of this script that is not idempotent by "already
+# converged" file comparison: apprise-api's own /add is itself an
+# idempotent upsert, so re-POSTing identical urls on every run is
+# correct rather than something to detect and skip.
+#
+# Deliberately does NOT run `docker compose up -d` itself. This script
+# writes and validates config; the operator drives every container
+# lifecycle action (CLAUDE.md — "the user drives all rollout actions").
+# Seeding therefore happens on whichever run finds the stack already
+# up: a run before that reports exactly what remains (install docker,
+# `docker compose up -d`) and that re-running this script afterward is
+# what completes it.
+step_apprise_seed() {
+  local bind key token chat endpoint
+  bind="$(env_var_value "$ENV_FILE" APPRISE_BIND)"; [ -n "$bind" ] || bind="127.0.0.1"
+  key="$(env_var_value "$ENV_FILE" APPRISE_KEY)"; [ -n "$key" ] || key="sentinel"
+  token="$(env_var_value "$ENV_FILE" TELEGRAM_BOT_TOKEN)"
+  chat="$(env_var_value "$ENV_FILE" TELEGRAM_CHAT_ID)"
+  endpoint="http://${bind}:8000/add/${key}"
+
+  if [ -z "$token" ] || [ -z "$chat" ]; then
+    note "apprise seed: skipped — TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not both set in $ENV_FILE yet"
+    return
+  fi
+
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    note "apprise seed: would register the Telegram target with apprise at $endpoint once the stack is up (nothing is sent under --check/--dry-run)"
+    return
+  fi
+
+  if [ "$DOCKER_OK" -ne 1 ] || [ "$COMPOSE_OK" -ne 1 ]; then
+    note "apprise seed: skipped — docker/compose not ready (see docker preflight above); install docker, run 'docker compose up -d' in the stack directory, then re-run this script to seed apprise"
+    return
+  fi
+
+  # local declared separately from the assignment on purpose (as
+  # fetch_repo_file already does above): `local status="$(curl ...)"`
+  # would make `local` itself the last command in that statement, so
+  # `curl_rc=$?` right after would capture local's exit status (always
+  # 0) instead of curl's.
+  local tmp status curl_rc
+  tmp="$(mktemp)"
+  # The token reaches curl only via stdin (--data-urlencode urls@-),
+  # never as a command-line argument — argv is visible to any other
+  # process on the host via ps; stdin is not. -f/--fail is deliberately
+  # NOT used: it would make curl treat 204 (and any 4xx/5xx) as a
+  # transport error indistinguishable from "apprise unreachable",
+  # exactly the two failure modes this step must tell apart.
+  status="$(printf '%s' "tgram://${token}/${chat}" | curl -sS --max-time 5 -o "$tmp" -w '%{http_code}' -X POST --data-urlencode urls@- "$endpoint" 2>/dev/null)"
+  curl_rc=$?
+  rm -f "$tmp"
+
+  if [ "$curl_rc" -ne 0 ]; then
+    note "apprise seed: could not reach apprise at $endpoint (the stack may not be up yet) — run 'docker compose up -d' in the stack directory, then re-run this script"
+    return
+  fi
+  # N.3.1's rule applies here too: a 204 from apprise-api means the key
+  # was never registered, not that it succeeded quietly.
+  if [ "$status" = "204" ]; then
+    note "apprise seed: apprise responded 204 — the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed"
+    return
+  fi
+  case "$status" in
+    2[0-9][0-9])
+      note "apprise seed: registered the Telegram target with apprise (key=$key)"
+      changed=$((changed+1))
+      ;;
+    *)
+      note "apprise seed: apprise responded HTTP $status registering the Telegram target — notifications will not be delivered until this is fixed"
+      ;;
+  esac
+}
+
 # --- run -------------------------------------------------------------
+
+# Before any host mutation (R5): a docker/compose gap does not stop
+# this run, but every later note about the stack's readiness depends
+# on knowing about it first.
+docker_preflight
 
 if [ "$ENV_FILE_EXPLICIT" -ne 1 ]; then
   step0a_layout
@@ -1714,6 +1843,15 @@ if [ "$STACK_UNRESOLVED" -ne 1 ]; then
   step6
 else
   note "step6 JOURNAL_GID: skipped — no stack directory was resolved (see the ambiguity report above)"
+fi
+
+# Same STACK_UNRESOLVED gate: with no stack directory resolved, ENV_FILE
+# is still the unrelated ./.env default and there is no coherent
+# TELEGRAM_* pair to read.
+if [ "$STACK_UNRESOLVED" -ne 1 ]; then
+  step_apprise_seed
+else
+  note "apprise seed: skipped — no stack directory was resolved (see the ambiguity report above)"
 fi
 
 echo "$PROG summary:"

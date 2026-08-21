@@ -3018,6 +3018,251 @@ printf 'MAILRISE_SMTP_USER=probeuser\nMAILRISE_SMTP_PASS=probepass\n' > /root/re
 	t.Skip("SKIP C12b: neither host.containers.internal nor host.docker.internal reached the local stub SMTP server from the throwaway container in this environment")
 }
 
+// startC12AppriseContainer preps a throwaway container the same way
+// startC12Container does, but stops short of any docker/curl stub —
+// callers install exactly the fakes their case needs, then run
+// install.sh via --env-file (never step0a_layout, so no real network
+// fetch is on the critical path — these cases must not depend on
+// container network reachability, since they test docker/apprise
+// integration logic, not package installation).
+func startC12AppriseContainer(t *testing.T, name, envFileBody string) {
+	t.Helper()
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		skipUnlessCI(t, "C12 docker/apprise: cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+		"-v", root+":/work:ro",
+		"debian:trixie-slim", "sleep", "300")
+	if code != 0 {
+		skipUnlessCI(t, "C12 docker/apprise: could not start throwaway container: %s", errOut)
+	}
+	t.Cleanup(func() { runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name) })
+
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	// install.sh's own os-support gate requires both apt-get (already in
+	// the base image) and systemctl (needs the systemd package) before
+	// it runs any step at all — including the docker preflight these
+	// cases exist to test.
+	prep := `set -e
+cp -r /work /root/repo
+apt-get update -qq
+apt-get install -y -qq systemd >/dev/null 2>&1 || true
+chmod +x /root/repo/install.sh
+cat > /root/repo/.env <<'ENVEOF'
+` + envFileBody + `
+ENVEOF`
+	if out, errOut, code := exec_(prep); code != 0 || !strings.Contains(exec1(t, name, "command -v systemctl"), "systemctl") {
+		skipUnlessCI(t, "C12 docker/apprise: throwaway container prep failed (no network for systemd package?): %s %s", out, errOut)
+	}
+}
+
+func exec1(t *testing.T, name, script string) string {
+	t.Helper()
+	out, _, _ := runCmd(t, 30*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	return out
+}
+
+func c12AppriseExec(t *testing.T, name, script string) (string, string, int) {
+	t.Helper()
+	return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+}
+
+// TestContainer_C12_DockerPreflightMissingIsWarningNotFatal: R5's
+// docker preflight must report a missing docker CLI without making the
+// whole run fail — smartd/ZED/msmtp have standalone value on a host
+// that never runs containers. It must also make the apprise-seed step
+// visibly refuse to claim success, so the run summary can never read as
+// "the stack is ready" when it cannot start.
+func TestContainer_C12_DockerPreflightMissingIsWarningNotFatal(t *testing.T) {
+	name := "sentinel-c12-docker-missing"
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL: install.sh with no docker on PATH exited %d, want 0 or 75 (docker missing must not introduce a new fatal exit code): %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "docker preflight: docker not found") {
+		t.Errorf("FAIL: summary does not report the missing docker CLI: %s", out)
+	}
+	if !strings.Contains(out, "apprise seed: skipped") || !strings.Contains(out, "docker preflight above") {
+		t.Errorf("FAIL: apprise seed step did not visibly refuse to seed when docker is unavailable: %s", out)
+	}
+	if strings.Contains(out, "apprise seed: registered") {
+		t.Errorf("FAIL: summary claims apprise was registered while docker is missing — the stack cannot be running: %s", out)
+	}
+	logPass(t, "PASS C12 docker preflight: missing docker is a warning, not fatal")
+}
+
+// TestContainer_C12_DockerPreflightLegacyComposeOnly: a host with only
+// the legacy standalone docker-compose binary (no compose plugin) must
+// be told specifically that the plugin is what's missing — R5 requires
+// this be distinguished from "docker not found" rather than folded into
+// one generic message.
+func TestContainer_C12_DockerPreflightLegacyComposeOnly(t *testing.T) {
+	name := "sentinel-c12-docker-legacy"
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass")
+
+	stub := `cat > /usr/local/bin/docker <<'DOCKEREOF'
+#!/bin/sh
+if [ "$1" = "info" ]; then exit 0; fi
+exit 1
+DOCKEREOF
+chmod +x /usr/local/bin/docker
+cat > /usr/local/bin/docker-compose <<'DCEOF'
+#!/bin/sh
+exit 0
+DCEOF
+chmod +x /usr/local/bin/docker-compose`
+	if out, errOut, code := c12AppriseExec(t, name, stub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/docker-compose stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL: install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "legacy standalone docker-compose") {
+		t.Errorf("FAIL: legacy docker-compose-only host was not called out specifically — want a message distinguishing it from docker-not-found: %s", out)
+	}
+	if strings.Contains(out, "docker preflight: docker not found") {
+		t.Errorf("FAIL: docker IS present here (only the plugin is missing) — must not be reported as \"not found\": %s", out)
+	}
+	logPass(t, "PASS C12 docker preflight: legacy docker-compose distinguished from missing docker")
+}
+
+// dockerComposeReadyStub is the docker fake shared by the apprise-seed
+// success/failure cases below: `docker info` and `docker compose
+// version` both succeed, so DOCKER_OK/COMPOSE_OK are set and
+// step_apprise_seed actually reaches its curl call — the case this
+// whole file exists to catch is a guard that looks reached but never
+// runs.
+const dockerComposeReadyStub = `cat > /usr/local/bin/docker <<'DOCKEREOF'
+#!/bin/sh
+if [ "$1" = "info" ]; then exit 0; fi
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi
+exit 1
+DOCKEREOF
+chmod +x /usr/local/bin/docker`
+
+// TestContainer_C12_AppriseSeedRegistersAndRedactsToken: with docker/
+// compose ready and a stub apprise-api answering 200, install.sh must
+// report the Telegram target as registered — and the bot token must
+// never appear anywhere in the run's combined output, the same secret
+// discipline the mailrise.conf/msmtprc paths already carry.
+func TestContainer_C12_AppriseSeedRegistersAndRedactsToken(t *testing.T) {
+	name := "sentinel-c12-apprise-ok"
+	const token = "SECRETTOK1REDACTME"
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN="+token+"\nTELEGRAM_CHAT_ID=555")
+
+	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+case "$*" in
+  *"/add/"*) : > "$out"; printf '%s' "200"; exit 0 ;;
+esac
+exit 7
+CURLEOF
+chmod +x /usr/local/bin/curl`
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL: install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "apprise seed: registered") {
+		t.Errorf("FAIL: apprise seed success was not reported once docker/compose/apprise are all ready: %s", out)
+	}
+	if strings.Contains(out, token) || strings.Contains(errOut, token) {
+		t.Errorf("FAIL: the bot token leaked into install.sh's output — must never appear in any log line")
+	}
+	logPass(t, "PASS C12 apprise seed: registers and redacts the token")
+}
+
+// TestContainer_C12_AppriseSeed204IsFailure: N.3.1's rule applies here
+// too — apprise-api answering 204 means the key was never registered.
+// install.sh must report this as a failure, never as success, or the
+// operator is told notifications work when they silently do not.
+func TestContainer_C12_AppriseSeed204IsFailure(t *testing.T) {
+	name := "sentinel-c12-apprise-204"
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+
+	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+case "$*" in
+  *"/add/"*) : > "$out"; printf '%s' "204"; exit 0 ;;
+esac
+exit 7
+CURLEOF
+chmod +x /usr/local/bin/curl`
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	if code != 0 && code != 75 {
+		t.Fatalf("FAIL: install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	}
+	if strings.Contains(out, "apprise seed: registered") {
+		t.Errorf("FAIL: a 204 response was reported as a successful registration: %s", out)
+	}
+	if !strings.Contains(out, "204") || !strings.Contains(out, "NOT registered") {
+		t.Errorf("FAIL: the 204 response was not surfaced as the specific known apprise-api silent-failure it is: %s", out)
+	}
+	logPass(t, "PASS C12 apprise seed: 204 reported as failure")
+}
+
+// TestContainer_C12_AppriseSeedDryRunNoNetworkCall: --dry-run must not
+// perform the registration at all — proven by a curl stub that touches
+// a marker file on ANY invocation; the marker's absence is the only way
+// this test can distinguish "the guard was never reached" from "the
+// guard correctly declined to run", the exact failure shape this
+// project's tests have produced before.
+func TestContainer_C12_AppriseSeedDryRunNoNetworkCall(t *testing.T) {
+	name := "sentinel-c12-apprise-dryrun"
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+
+	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+touch /root/curl-was-called
+exit 1
+CURLEOF
+chmod +x /usr/local/bin/curl`
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --dry-run --env-file /root/repo/.env")
+	if code != 0 {
+		t.Fatalf("FAIL: --dry-run exited %d, want 0: %s %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "apprise seed: would register") {
+		t.Errorf("FAIL: --dry-run did not preview the pending apprise registration: %s", out)
+	}
+	called, _, _ := c12AppriseExec(t, name, "test -f /root/curl-was-called && echo yes || echo no")
+	if strings.TrimSpace(called) != "no" {
+		t.Errorf("FAIL: --dry-run invoked curl against apprise — it must never perform the registration")
+	}
+	logPass(t, "PASS C12 apprise seed: --dry-run never touches the network")
+}
+
 // --- SMTP-with-AUTH stub for C12b ---
 
 type smtpAuthStub struct {
