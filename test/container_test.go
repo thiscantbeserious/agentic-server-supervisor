@@ -2069,6 +2069,49 @@ fi
 	logPass(t, "PASS C12 (omv-confdbadm pretty-printed: order- and distance-independent parsing confirmed against a harder, still-plausible shape)")
 }
 
+// TestContainer_C12_OmvConfdbadmLeadingWhitespace: `$()` strips only
+// TRAILING newlines from command substitution output, never leading
+// whitespace — a well-formed answer that happens to begin with a blank
+// line or leading spaces would otherwise be rejected by the JSON-shape
+// guard (`case "$cfg" in '{'*)`) exactly like a real failure would be.
+// The real omv-confdbadm output shape is still unverified, so this
+// stub deliberately leads BOTH calls' output with a blank line and
+// leading spaces before the opening brace — plausible, not exotic —
+// and confirms the trim added in front of the shape check tolerates it
+// rather than leaving the fresh-install zero-stacks case permanently
+// broken by a formatting detail this script never actually depends on.
+func TestContainer_C12_OmvConfdbadmLeadingWhitespace(t *testing.T) {
+	name := "sentinel-c12-confdbadm-leadingws-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("mkdir -p /usr/sbin")
+
+	const emptyRoot = "/srv/dev-disk-by-uuid-leadingws/docker-compose"
+	stub := `#!/bin/sh
+if [ "$2" = "conf.service.compose" ]; then
+  printf '\n  {"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
+elif [ "$2" = "conf.system.sharedfolder" ]; then
+  printf '\n  [{"uuid":"11111111-1111-1111-1111-111111111111","path":"` + emptyRoot + `"}]\n'
+fi
+`
+	if out, errOut, code := exec_("mkdir -p " + emptyRoot + " && cat > /usr/sbin/omv-confdbadm <<'STUB'\n" + stub + "STUB\nchmod +x /usr/sbin/omv-confdbadm"); code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm leading whitespace): stub setup failed: %s %s", out, errOut)
+	}
+
+	// emptyRoot has no siblings, so only a correctly-trimmed, correctly
+	// parsed config answer can produce omv here.
+	out, _, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm leading whitespace): --dry-run exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "stack directory: "+emptyRoot+"/sentinel") || !strings.Contains(out, "layout: omv") {
+		t.Errorf("FAIL C12 (omv-confdbadm leading whitespace): a leading blank line/spaces before well-formed JSON must not be treated as a shape-guard failure: %s", out)
+	}
+	logPass(t, "PASS C12 (omv-confdbadm leading whitespace: benign leading blank line/spaces tolerated, not mistaken for a malformed answer)")
+}
+
 // TestContainer_C12_DryRunVerbAudit: every "note" line that describes an
 // action this script would take must say "would" under --dry-run, never
 // claim the action already happened. A previous round fixed exactly the
@@ -2341,6 +2384,107 @@ ENVEOF`, stackDir, stackDir, token, chat, c.pass)
 		}
 	}
 	logPass(t, "PASS C12 (mailrise.conf hostile secrets: byte-identical credential in .env and mailrise.conf for every hostile value, never a silent-success corruption)")
+}
+
+// TestContainer_C12_MsmtprcHostileSecrets: BLOCKER (reviewer round 2) —
+// render_managed_block wrote step3's managed block via `awk -v
+// repl="$desired_block" '...'`, and `awk -v` performs ESCAPE-SEQUENCE
+// PROCESSING on the assigned value: `awk -v r='p\tb' 'BEGIN{print r}'`
+// prints a literal TAB, not the four characters p\tb. desired_block for
+// step3 embeds `password ${smtp_pass}` — so a password containing a
+// literal backslash sequence reached /etc/msmtprc mangled while .env
+// kept the real bytes. Same consequence as the mailrise.conf blocker,
+// one file over: msmtp authenticates with the wrong password, mailrise
+// rejects AUTH, every smartd/ZED alert is dropped silently, and
+// `sentinel health` stays green.
+//
+// TestContainer_C12_MailriseConfHostileSecrets does NOT catch this —
+// its container has no msmtp installed, so MAIL_OK stays 0 and step3
+// never runs at all. This test installs msmtp/msmtp-mta specifically so
+// step3 genuinely executes (verified below by requiring "step3
+// /etc/msmtprc: updated" to actually appear in the first run's output,
+// not merely assumed), then asserts (i) /etc/msmtprc's password line is
+// byte-identical to the .env value, for tab/backslash/double-quote —
+// the family this whole round of fixes was about — and (ii) idempotency
+// has teeth: with the bug present, `existing` (mangled) never equals
+// `desired_block` (raw), so every second run re-"converges", restarts
+// msmtp-dependent services, and reports changed>0 forever even though
+// the file's sha256 stops changing — the R5 idempotency contract's
+// "second run reports changed=0" half is exactly what that masks.
+func TestContainer_C12_MsmtprcHostileSecrets(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		skipUnlessCI(t, "C12 (msmtprc hostile secrets): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	cases := []struct {
+		name string
+		pass string
+	}{
+		{"tab", `pass\tword`},
+		{"backslash", `pass\\word`},
+		{"double quote", `pass\"word`},
+	}
+
+	for i, c := range cases {
+		name := fmt.Sprintf("sentinel-c12-msmtprc-hostile-%d", i)
+		runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+		if _, errOut, code := runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+			"-v", root+":/work:ro", "debian:trixie-slim", "sleep", "300"); code != 0 {
+			skipUnlessCI(t, "C12 (msmtprc hostile secrets, %s): could not start throwaway container: %s", c.name, errOut)
+		}
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+		prep := `set -e
+cp -r /work /root/repo
+apt-get update -qq
+apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1
+chmod +x /root/repo/install.sh`
+		if out, errOut, code := exec_(prep); code != 0 {
+			skipUnlessCI(t, "C12 (msmtprc hostile secrets, %s): prep failed (msmtp package unavailable?): %s %s", c.name, out, errOut)
+		}
+		// A quoted heredoc, not printf with the password embedded in the
+		// FORMAT STRING: printf itself interprets \\t/\\\\ as escapes in
+		// its own format argument, which would corrupt the very bytes this
+		// test exists to verify survive intact -- before install.sh ever
+		// saw them. A quoted heredoc delimiter performs no expansion at
+		// all, so c.pass reaches the file exactly as written in Go.
+		envSetup := "cat > /root/repo/.env <<'ENVEOF'\nMAILRISE_SMTP_USER=sentinel\nMAILRISE_SMTP_PASS=" + c.pass + "\nENVEOF"
+		if out, errOut, code := exec_(envSetup); code != 0 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, %s): env setup failed: %s %s", c.name, out, errOut)
+		}
+
+		out1, errOut1, code1 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+		if code1 != 0 && code1 != 75 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, %s): first run exit=%d (want 0 or 75): %s %s", c.name, code1, out1, errOut1)
+		}
+		// Proves step3 genuinely ran (not skipped for lack of
+		// msmtp/credentials) rather than assuming MAIL_OK ended up 1 —
+		// the exact gap that let this bug through the first hostile
+		// secrets test undetected.
+		if !strings.Contains(out1, "step3 /etc/msmtprc: updated") {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, %s): step3 did not run on the first pass (msmtp not actually installed in this environment?): %s %s", c.name, out1, errOut1)
+		}
+
+		msmtprc, _, _ := exec_("grep '^password ' /etc/msmtprc")
+		wantLine := "password " + c.pass
+		if strings.TrimSpace(msmtprc) != wantLine {
+			t.Errorf("FAIL C12 (msmtprc hostile secrets, %s): /etc/msmtprc password line = %q, want %q (byte-identical to .env)", c.name, strings.TrimSpace(msmtprc), wantLine)
+		}
+
+		out2, errOut2, code2 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+		if code2 != 0 && code2 != 75 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, %s): second run exit=%d (want 0 or 75): %s %s", c.name, code2, out2, errOut2)
+		}
+		if !strings.Contains(out2, "step3 /etc/msmtprc: already converged") {
+			t.Errorf("FAIL C12 (msmtprc hostile secrets, %s): second run did not converge for step3 (idempotency broken by a mangled password that never matches its own re-render): %s", c.name, out2)
+		}
+	}
+	logPass(t, "PASS C12 (msmtprc hostile secrets: /etc/msmtprc byte-identical to .env for tab/backslash/double-quote, second run converges)")
 }
 
 // TestContainer_C12_StackInteractiveSecrets: with a real controlling

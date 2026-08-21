@@ -258,9 +258,25 @@ $MARK_END"
       # later marker pair (and its content) is dropped entirely rather
       # than re-emitted — collapsing N blocks into 1, not just refreshing
       # the content of each.
-      awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v repl="$desired_block" '
-        $0==b {if (!seen) {print repl; seen=1} skip=1; next}
-        $0==e {if (skip) {skip=0; next}}
+      #
+      # `repl` carries desired_block, which embeds operator data
+      # (step3's `password ${smtp_pass}`) — passed via `env` + ENVIRON,
+      # NOT `awk -v repl=...`. `awk -v` performs escape-sequence
+      # processing on the assigned value: `awk -v r="p\tb" 'BEGIN{print
+      # r}'` prints a literal TAB, not the four characters `p\tb`. This
+      # is the third instance of the same family of bug as `sed`'s
+      # `s///` and bash's own `${var//pat/rep}` — a mechanism that looks
+      # like plain string interpolation but silently reinterprets
+      # backslash/ampersand sequences in the value it is handed.
+      # `ENVIRON` performs no such processing, so a password containing
+      # a literal backslash sequence reaches msmtprc unchanged. `b`/`e`
+      # stay as literal script constants (never operator data) but are
+      # routed through the same `env`/`ENVIRON` mechanism here too,
+      # rather than leaving them as the one `-v` that would still be
+      # "safe by luck" if this function is ever handed something else.
+      env b="$MARK_BEGIN" e="$MARK_END" repl="$desired_block" awk '
+        $0==ENVIRON["b"] {if (!seen) {print ENVIRON["repl"]; seen=1} skip=1; next}
+        $0==ENVIRON["e"] {if (skip) {skip=0; next}}
         skip {next}
         {print}
       ' "$file" > "$tmp"
@@ -768,6 +784,17 @@ omv_confdbadm_compose_root() {
   cfg="$("$bin" read conf.service.compose 2>/dev/null)"
   rc=$?
   [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
+  # $() strips only TRAILING newlines, never leading whitespace — a
+  # well-formed answer that happens to start with a blank line or
+  # leading spaces would otherwise be rejected by the shape guard below
+  # exactly like a real failure would be. The real output shape is
+  # still unverified, so this trims defensively rather than betting on
+  # a format nobody has confirmed: better to tolerate benign leading
+  # whitespace than to leave the fresh-install zero-stacks case
+  # permanently broken by a formatting detail this script never
+  # actually depends on. Trims only for the shape check; extraction
+  # below (grep -o, not anchored to the start) never needed this.
+  cfg="${cfg#"${cfg%%[![:space:]]*}"}"
   case "$cfg" in
     '{'*) ;;
     *) return 1 ;;
@@ -778,6 +805,7 @@ omv_confdbadm_compose_root() {
   cfg="$("$bin" read conf.system.sharedfolder 2>/dev/null)"
   rc=$?
   [ "$rc" -eq 0 ] && [ -n "$cfg" ] || return 1
+  cfg="${cfg#"${cfg%%[![:space:]]*}"}"
   case "$cfg" in
     '['*|'{'*) ;;
     *) return 1 ;;
