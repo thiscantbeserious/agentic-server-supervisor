@@ -1412,17 +1412,79 @@ func runInstallHostPiped(t *testing.T, container string, args ...string) (stdout
 // TestContainer_C12_InstallHostIdempotent's original inline version
 // once a fifth test needed the identical setup. Registers its own
 // cleanup; the caller does not need a defer.
+// c12BaseImage builds, once per run, the throwaway Debian image every stack
+// test starts from. It carries exactly what startC12Container used to install
+// per test — systemd and curl — and deliberately nothing install.sh itself
+// installs: step1 reports "already installed" when its packages are present
+// and "installing" when they are not, and tests assert on both branches, so
+// pre-seeding those here would quietly rewrite what those tests observe.
+//
+// Installing per test cost ~90s under emulation and a few seconds natively,
+// paid once per test across the whole family. Building once moves that cost
+// from per-test to per-suite.
+var (
+	c12BaseOnce sync.Once
+	c12BaseTag  string
+	c12BaseErr  error
+
+	c12FullOnce sync.Once
+	c12FullTag  string
+	c12FullErr  error
+)
+
+func c12Base(t *testing.T) string {
+	t.Helper()
+	c12BaseOnce.Do(func() { c12BaseTag, c12BaseErr = buildC12Base(t, "base", "sentinel-c12base:test") })
+	if c12BaseErr != nil {
+		skipUnlessCI(t, "C12 (stack): %v", c12BaseErr)
+	}
+	return c12BaseTag
+}
+
+// c12BaseWithPackages is the same host with install.sh's own step1 packages
+// already present. Only for tests whose subject is not step1: a test that
+// asserts on "installing" versus "already installed" must start from the lean
+// base, or it measures a state this image handed it rather than one the script
+// produced.
+func c12BaseWithPackages(t *testing.T) string {
+	t.Helper()
+	c12FullOnce.Do(func() { c12FullTag, c12FullErr = buildC12Base(t, "withpackages", "sentinel-c12base:withpackages") })
+	if c12FullErr != nil {
+		skipUnlessCI(t, "C12 (stack): %v", c12FullErr)
+	}
+	return c12FullTag
+}
+
+func buildC12Base(t *testing.T, target, tag string) (string, error) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 15*time.Minute, dockerBin(), "build", "-q",
+		"--target", target,
+		"-f", filepath.Join(root, "test", "c12base.Dockerfile"),
+		"-t", tag, root)
+	if code != 0 {
+		return "", fmt.Errorf("building the stack-test base image (%s) failed: %s %s", target, out, errOut)
+	}
+	return tag, nil
+}
+
 func startC12Container(t *testing.T, name string) {
 	t.Helper()
+	startC12ContainerFrom(t, name, c12Base(t))
+}
+
+// startC12ContainerFrom is startC12Container with the base image named, for
+// the few tests whose subject is not what the base image contains.
+func startC12ContainerFrom(t *testing.T, name, base string) {
+	t.Helper()
 	root := repoRoot(t)
-	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", base, "true")
 	if code != 0 {
 		skipUnlessCI(t, "C12 (stack): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
 	}
 	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
 	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
 		"-v", root+":/work:ro",
-		"debian:trixie-slim", "sleep", "600")
+		base, "sleep", "600")
 	if code != 0 {
 		skipUnlessCI(t, "C12 (stack): could not start throwaway container: %s", errOut)
 	}
@@ -1431,7 +1493,6 @@ func startC12Container(t *testing.T, name string) {
 	exec_ := func(script string) (string, string, int) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
-	exec_("apt-get update -qq && apt-get install -y -qq systemd curl >/dev/null 2>&1 || true")
 	if out, _, code := exec_("command -v systemctl && command -v curl"); code != 0 {
 		skipUnlessCI(t, "C12 (stack): systemd/curl did not actually install in this environment: %s", out)
 	}
@@ -2927,7 +2988,9 @@ cat > /etc/zfs/zed.d/zed.rc <<'ZED_EOF'
 // "wrote the file anyway and declined to say so".
 func TestContainer_C12_MonitoringPromptDeclineLeavesFileUntouched(t *testing.T) {
 	name := "sentinel-c12-prompt-no"
-	startC12Container(t, name)
+	// This test's subject is the prompt, not package installation: starting
+	// from the package-bearing base keeps a step1 apt-get out of its budget.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
 	exec_ := func(script string) (string, string, int) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
@@ -2964,7 +3027,9 @@ printf '# pre-existing operator file, not ours\n' > /etc/smartd.conf`
 // no.
 func TestContainer_C12_MonitoringPromptConfirmWritesFile(t *testing.T) {
 	name := "sentinel-c12-prompt-yes"
-	startC12Container(t, name)
+	// This test's subject is the prompt, not package installation: starting
+	// from the package-bearing base keeps a step1 apt-get out of its budget.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
 	exec_ := func(script string) (string, string, int) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
