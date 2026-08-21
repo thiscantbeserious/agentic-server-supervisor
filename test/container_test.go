@@ -2592,8 +2592,16 @@ func TestContainer_C12_DryRunVerbAudit(t *testing.T) {
 	}
 	for _, mustAppear := range []string{
 		"step3 /etc/msmtprc: would be updated",
-		"step4 /etc/smartd.conf: would be updated",
-		"step5 /etc/zfs/zed.d/zed.rc: would be updated",
+		// step4/step5 are the opt-in monitoring reconfiguration, declined
+		// by default, --dry-run/--check preview what a "y" answer would
+		// write but must never phrase it as pending work: a real
+		// unattended run would not make this change unless asked (see
+		// contracts/runtime.md R5's "opt-in change that defaults to No
+		// is not drift"). TestContainer_C12_CheckExitCodeMatchesChanged
+		// (below) is the assertion that this distinction also holds for
+		// `changed`/`--check`'s exit code, not just the wording here.
+		"step4 /etc/smartd.conf: available, would be updated if enabled (opt-in, defaults to No, not counted as drift)",
+		"step5 /etc/zfs/zed.d/zed.rc: available, would be updated if enabled (opt-in, defaults to No, not counted as drift)",
 	} {
 		if !strings.Contains(out2, mustAppear) {
 			t.Errorf("FAIL C12 (dry-run verb audit, run 2): missing conditional phrasing %q: %s", mustAppear, out2)
@@ -3428,6 +3436,55 @@ printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test
 		t.Errorf("FAIL: /etc/smartd.conf does not contain the expected managed DEVICESCAN line after confirming: %s", content)
 	}
 	logPass(t, "PASS C12: confirming the monitoring prompt (y) writes smartd.conf")
+}
+
+// TestContainer_C12_CheckExitCodeMatchesChanged: install.sh --check must
+// exit 0 when the only thing left "undone" is the opt-in monitoring
+// change (step4/step5), which defaults to No. This is the exact
+// contradiction the VM E2E job (contracts/runtime.md R6) found on a real
+// host that no container test had ever caught: a real run (no controlling
+// terminal, monitoring declined by default) reported changed=0, converged,
+// and the immediately following --check exited 1 anyway. The cause:
+// confirm_monitoring_change auto-passes under --check purely so the
+// preview machinery has something to render, and that hypothetical "yes"
+// was being counted as changed even though a real unattended run would
+// never make it. An opt-in change that defaults to No is not drift (R5);
+// --check must say so.
+func TestContainer_C12_CheckExitCodeMatchesChanged(t *testing.T) {
+	name := "sentinel-c12-check-matches-changed"
+	// This test's subject is the changed/--check accounting, not package
+	// installation: starting from the package-bearing base keeps a step1
+	// apt-get out of its budget.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	prep := `set -e
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(dockerComposeReadyStub + "\n" + systemctlOKStub + "\n" + prep); code != 0 {
+		t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+	}
+
+	// No pty anywhere in this exec: "no controlling terminal" is the
+	// ordinary default for curl | sudo bash, not a special case, and it
+	// is what the real host that found this bug actually hit.
+	out1, errOut1, code1 := exec_("/work/install.sh --env-file /root/test.env < /dev/null 2>&1")
+	if code1 != 0 {
+		t.Fatalf("FAIL C12 (check matches changed, run 1): exit=%d, want 0: %s %s", code1, out1, errOut1)
+	}
+	if !strings.Contains(out1, "no controlling terminal to ask, defaulted to No") {
+		t.Fatalf("FAIL C12 (check matches changed, run 1): monitoring was not declined for the expected reason: %s", out1)
+	}
+
+	out2, errOut2, code2 := exec_("/work/install.sh --check --env-file /root/test.env < /dev/null 2>&1")
+	if !strings.Contains(out2, "step4 /etc/smartd.conf: available, would be updated if enabled (opt-in, defaults to No, not counted as drift)") {
+		t.Errorf("FAIL C12 (check matches changed, run 2): --check no longer previews the opt-in action, or the wording drifted: %s", out2)
+	}
+	if code2 != 0 {
+		t.Errorf("FAIL C12 (check matches changed, run 2): --check exit=%d, want 0 (a declined-by-default opt-in must not read as drift on an otherwise converged host): %s %s", code2, out2, errOut2)
+	}
+	logPass(t, "PASS C12: --check exits 0 on a converged host even though the opt-in monitoring change is still available")
 }
 
 // TestContainer_C12_MailCredentialsMissingSkipsAllThreeSteps: msmtp
