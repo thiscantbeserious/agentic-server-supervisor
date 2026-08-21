@@ -688,7 +688,7 @@ func TestContainer_C3_ReadOnlySurfaces(t *testing.T) {
 // on the Docker/Podman host itself (common on a Podman Desktop/machine VM)
 // — that flag accommodates THIS dev sandbox's mandatory access control on
 // bind mounts, is not part of any shipped compose/Dockerfile artifact, and
-// bam (plain Debian, no SELinux) does not need it.
+// a plain-Debian rollout host, with no SELinux, does not need it.
 //
 // Falls back to a synthetic POSIX-permission probe (a throwaway gid file,
 // not a real journal) when no real host journal is reachable — a Linux CI
@@ -807,13 +807,13 @@ func TestContainer_C4_SensorsJSON(t *testing.T) {
 		"--entrypoint", "sensors", imageTag, "-j")
 	if code != 0 {
 		if strings.TrimSpace(out) == "{}" {
-			t.Skipf("SKIP C4: sensors -j found no chips in this environment (exit=%d, stderr=%q) — ARCHITECTURE §2.6 unverified point, needs live-host validation (e.g. bam)", code, errOut)
+			t.Skipf("SKIP C4: sensors -j found no chips in this environment (exit=%d, stderr=%q) — ARCHITECTURE §2.6 unverified point, needs a host with real hwmon sensor chips to validate", code, errOut)
 		}
 		t.Fatalf("FAIL C4: sensors -j exit code = %d: %s %s", code, out, errOut)
 	}
 	m := mustJSON(t, out)
 	if len(m) == 0 {
-		t.Skip("SKIP C4: sensors -j returned an empty object — no hwmon sensor chips detected in this environment (ARCHITECTURE §2.6 unverified point; needs live-host validation, e.g. bam)")
+		t.Skip("SKIP C4: sensors -j returned an empty object — no hwmon sensor chips detected in this environment (ARCHITECTURE §2.6 unverified point; needs a host with real hwmon sensor chips to validate)")
 	}
 	entries, err := os.ReadDir("/sys/class/hwmon")
 	if err != nil || len(entries) == 0 {
