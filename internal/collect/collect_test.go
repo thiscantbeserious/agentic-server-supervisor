@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1336,4 +1337,53 @@ func TestKernelPartialDirectoryFailureStaysHealthy(t *testing.T) {
 	if !found {
 		t.Error("expected a collector_errors[] entry naming the failed volatile journal directory")
 	}
+}
+
+// --- sensors: real chip data reaches the facts, not just an empty map ---
+
+// The sensors stub emits "{}" unless SENSORS_FIXTURE points it at a file,
+// and nothing set that variable, so every sensors assertion here ran against
+// an empty object. An empty map unmarshals cleanly whatever the parser does
+// with real input, which made the section's coverage indistinguishable from
+// having none.
+//
+// The chip set in testdata/sensors-hwmon.json is the one the target host
+// actually exposes through /sys/class/hwmon — three NVMe controllers, two
+// JC42 DIMM sensors, the PCH and coretemp. The readings are representative
+// rather than captured, because lm-sensors is not installed on that host
+// until install.sh puts it there; the chip names are what matter for the
+// section, and those are real.
+func TestSensorsChipsReachFacts(t *testing.T) {
+	tr := newTree(t)
+	cfg := newConfig(t, tr)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SENSORS_FIXTURE", filepath.Join(wd, "testdata", "sensors-hwmon.json"))
+
+	f, err := Run(context.Background(), Options{Cfg: cfg, Seq: 1})
+	if err != nil {
+		t.Fatalf("collect.Run: %v", err)
+	}
+	if f.Sensors == nil || f.Sensors.Err != "" {
+		t.Fatalf("sensors section errored: %v", f.Sensors)
+	}
+	if len(f.Sensors.Data.Chips) == 0 {
+		t.Fatal("sensors chips are empty: the fixture never reached the parser, so this test proves nothing about real input")
+	}
+	for _, want := range []string{"coretemp-isa-0000", "nvme-pci-0100", "jc42-i2c-0-1a", "pch_cannonlake-virtual-0"} {
+		if _, ok := f.Sensors.Data.Chips[want]; !ok {
+			t.Errorf("sensors chip %q missing; got %v", want, keysOfChips(f.Sensors.Data.Chips))
+		}
+	}
+}
+
+func keysOfChips(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
