@@ -402,7 +402,13 @@ jobs:
   # comment on that). Push-only is a fixed, visible trigger scope, not a
   # runtime skip, so it stays honest about what does and does not run.
   vm-e2e-omv:
-    needs: test
+    # Depends on the image job rather than only on `test`: both used to hang
+    # off `test` and run side by side, so a cold cache built the same OMV
+    # image twice, concurrently, for about fifteen minutes each. Chaining
+    # them means the image is published once and pulled here. On a warm
+    # cache the dependency costs the seconds vm-omv-image needs to confirm
+    # the content hash is already published.
+    needs: [test, vm-omv-image]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
