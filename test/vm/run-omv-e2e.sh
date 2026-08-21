@@ -52,7 +52,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 if [ "$up" != 1 ]; then
   vm_log "run-omv-e2e: VM never came up, serial console follows:"
-  cat "$WORKDIR/serial.log" >&2 || true
+  tail -n 40 "$WORKDIR/serial.log" >&2 || true
   exit 1
 fi
 ssh_pw() { sshpass -p e2e ssh -p 2224 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 e2e@127.0.0.1 "$@"; }

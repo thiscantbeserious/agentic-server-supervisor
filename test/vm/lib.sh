@@ -51,11 +51,21 @@ vm_boot() {
   args=(-name vm-e2e -m 2560 -smp 2 -accel "$accel" -cpu max
         -drive "file=$disk,if=virtio,format=qcow2"
         -nic "user,hostfwd=tcp::${port}-:22"
-        -serial "file:$seriallog" -display none -daemonize -pidfile "$pidfile")
+        -serial "file:$seriallog" -monitor none -display none
+        -daemonize -pidfile "$pidfile")
   if [ -n "$seed" ]; then
     args+=(-drive "file=$seed,if=virtio,format=raw")
   fi
-  qemu-system-x86_64 "${args[@]}" "$@"
+  # -daemonize forks to the background AFTER startup, it does not stop the
+  # foreground qemu process from inheriting this shell's stdin in the
+  # meantime. In CI stdin is already at EOF (no terminal), and with no
+  # -serial/-monitor target explicitly named neither one takes it, so the
+  # guest's getty asking for input hit that EOF and qemu exited the instant
+  # the login prompt appeared: full boot, no time for vm_wait_ssh to ever
+  # run. -serial file:... and -monitor none above remove both consumers of
+  # stdio; the stdin redirect below is a second, independent guard so a
+  # future flag added here cannot silently reopen the same failure.
+  qemu-system-x86_64 "${args[@]}" "$@" < /dev/null
 }
 
 vm_stop() {

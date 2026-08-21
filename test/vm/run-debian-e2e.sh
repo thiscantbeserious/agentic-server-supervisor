@@ -40,7 +40,7 @@ trap 'vm_stop "$WORKDIR/qemu.pid"' EXIT
 
 if ! vm_wait_ssh 2222 "$WORKDIR/ssh/id_ed25519" e2e 240; then
   vm_log "run-debian-e2e: VM never came up, serial console follows:"
-  cat "$WORKDIR/serial.log" >&2 || true
+  tail -n 40 "$WORKDIR/serial.log" >&2 || true
   exit 1
 fi
 
