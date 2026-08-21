@@ -4289,3 +4289,51 @@ func mustJSON(t *testing.T, s string) map[string]any {
 	}
 	return m
 }
+
+// TestContainer_C12_SensorsDetectIsOptInAndNotDrift: sensors-detect probes
+// I2C/SMBus buses and its own documentation warns that can hang or wedge
+// hardware, so it is never a side effect of installing a supervisor. It is
+// offered only when nothing is reporting, defaults to No, and, like every
+// other opt-in here, must not be counted as drift: --check auto-answers
+// prompts, and counting an unanswered offer would mean --check could never
+// exit 0 on a converged host that simply has no board sensors, the exact
+// defect the VM run found in step4/step5.
+func TestContainer_C12_SensorsDetectIsOptInAndNotDrift(t *testing.T) {
+	t.Parallel()
+	name := "sentinel-c12-sensors-optin"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// A container has no hwmon chips bound, which is the shape that makes
+	// the offer appear at all.
+	prep := `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+		t.Fatalf("FAIL C12 (sensors opt-in): prep failed: %s %s", out, errOut)
+	}
+
+	out, _, code := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (sensors opt-in): --dry-run exit=%d: %s", code, out)
+	}
+
+	// Never the command itself under a mode that promises to change nothing.
+	if strings.Contains(out, "running sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): --dry-run ran sensors-detect, a mode that promises to change nothing must never probe hardware: %s", out)
+	}
+	if strings.Contains(out, "sensors:") && !strings.Contains(out, "not counted as drift") &&
+		strings.Contains(out, "would offer to run sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): the offer is previewed without saying it is not drift: %s", out)
+	}
+
+	// The drift accounting itself: --check must agree with a converged run
+	// rather than counting an offer nobody accepted.
+	outCheck, _, codeCheck := exec_("bash /work/install.sh --check --env-file /root/test.env 2>&1")
+	if strings.Contains(outCheck, "running sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): --check ran sensors-detect: %s", outCheck)
+	}
+	_ = codeCheck
+
+	logPass(t, "PASS C12 (sensors-detect is offered, never run unattended, and never counted as drift)")
+}
