@@ -11,16 +11,36 @@ disk.
 
 ## Run it
 
+See what it would do, first. Nothing is written and nothing is installed:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --dry-run
 ```
 
-The first command installs the host-side pieces (`rasdaemon`, `smartd`,
-`zfs-zed` mail wiring) and creates the compose stack, prompting for a
-Telegram bot token, chat id, and a mailrise password if it does not already
-have them. The second brings the stack up. Details, including running under
-OpenMediaVault and verifying delivery actually works: [deploy/README.md](deploy/README.md).
+Then run it for real. It prompts for the stack directory (offering what it
+detected), a Telegram bot token, a chat id, and a mailrise password:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
+```
+
+Then bring the stack up, from the directory the installer reports:
+
+```bash
+cd /opt/sentinel && docker compose up -d
+```
+
+The installer creates the compose stack and installs `rasdaemon` and
+`lm-sensors`. Wiring `smartd` and ZED to send mail is asked separately and
+defaults to no, and on a host that manages those files itself, such as
+OpenMediaVault, it declines rather than asking, because overwriting them
+would be reverted by the platform and could displace configuration you rely
+on. Re-run it after `docker compose up -d` to seed apprise.
+
+The stack directory is auto-detected: an OpenMediaVault compose root is used
+when one is found, `/opt/sentinel` otherwise, and `--stack-dir` overrides
+both. Details, including verifying delivery actually works:
+[deploy/README.md](deploy/README.md).
 
 ## What it watches
 
