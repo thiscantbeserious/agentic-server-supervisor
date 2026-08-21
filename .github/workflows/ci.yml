@@ -338,7 +338,6 @@ jobs:
   # different tag, full stop.
   vm-omv-image:
     needs: test
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -390,17 +389,23 @@ jobs:
           docker build -t "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}" /tmp/omv-image-ctx
           docker push "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"
 
-  # push-only, same as vm-omv-image, and for a cost reason rather than a
-  # permissions one: this job pulls read-only and is safe to run on a
-  # pull_request, but a pull_request never has a warm image to pull (that
-  # job never runs there), so every PR would build the entire OMV image
-  # locally, the single most expensive path either variant has, on every
-  # push to the PR branch. Letting it run and silently skip when nothing
-  # is published was the other option and was rejected: a job that
-  # quietly does nothing on missing input is the exact failure shape this
-  # whole pair of jobs exists to rule out (see the top of this file's
-  # comment on that). Push-only is a fixed, visible trigger scope, not a
-  # runtime skip, so it stays honest about what does and does not run.
+  # Runs on pull requests as well. The reasoning that kept both OMV jobs
+  # off pull requests assumed a PR could never have a warm image to pull,
+  # which stopped being true once vm-omv-image was allowed to run there
+  # too: it publishes under a content hash, so the pair costs a manifest
+  # probe and a boot whenever that hash is already built.
+  #
+  # It is NOT uniformly cheap, and the expensive case is the likely one.
+  # The hash covers build-omv-image.sh, provision-omv.sh, the cloud image
+  # fetcher and the cloud-init template, so any PR touching those has no
+  # published image and rebuilds from scratch, roughly half an hour, on
+  # its first push. That is paid once per distinct content, not per push,
+  # and it warms the cache for every later run including main's. A PR that
+  # leaves those four files alone pays neither.
+  #
+  # The alternative, letting the job run and skip when nothing is
+  # published, stays rejected: a job that quietly does nothing on missing
+  # input is the failure shape this whole pair exists to rule out.
   vm-e2e-omv:
     # Depends on the image job rather than only on `test`: both used to hang
     # off `test` and run side by side, so a cold cache built the same OMV
@@ -409,7 +414,6 @@ jobs:
     # cache the dependency costs the seconds vm-omv-image needs to confirm
     # the content hash is already published.
     needs: [test, vm-omv-image]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
