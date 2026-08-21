@@ -3149,6 +3149,20 @@ exit 1
 DOCKEREOF
 chmod +x /usr/local/bin/docker`
 
+// systemctlOKStub makes `systemctl enable --now rasdaemon` (step2) and
+// `systemctl restart smartd` (step4) both report success unconditionally.
+// The throwaway container has no real init system, so both calls fail
+// there on every run regardless of anything this file tests — without
+// this stub, TestContainer_C12_AppriseSeed204IsFailure's exit-code
+// assertion would pass for the wrong reason (step2's unrelated failure
+// already sets TRANSIENT_FAIL/exit 75 on its own), proving nothing
+// about the apprise-seed code path it exists to check.
+const systemctlOKStub = `cat > /usr/local/bin/systemctl <<'SYSTEMCTLEOF'
+#!/bin/sh
+exit 0
+SYSTEMCTLEOF
+chmod +x /usr/local/bin/systemctl`
+
 // TestContainer_C12_AppriseSeedRegistersAndRedactsToken: with docker/
 // compose ready and a stub apprise-api answering 200, install.sh must
 // report the Telegram target as registered — and the bot token must
@@ -3173,13 +3187,18 @@ esac
 exit 7
 CURLEOF
 chmod +x /usr/local/bin/curl`
-	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
-		t.Fatalf("FAIL: could not install docker/curl stubs: %s %s", out, errOut)
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub+"\n"+systemctlOKStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl/systemctl stubs: %s %s", out, errOut)
 	}
 
+	// systemctlOKStub removes the throwaway container's own unrelated
+	// systemctl failures (step2/step4 both fail there on every run),
+	// so a genuine registration success must now exit exactly 0 — not
+	// "0 or 75" tolerating noise that would mask a regression in this
+	// code path specifically.
 	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
-	if code != 0 && code != 75 {
-		t.Fatalf("FAIL: install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	if code != 0 {
+		t.Fatalf("FAIL: install.sh exited %d, want 0: %s %s", code, out, errOut)
 	}
 	if !strings.Contains(out, "apprise seed: registered") {
 		t.Errorf("FAIL: apprise seed success was not reported once docker/compose/apprise are all ready: %s", out)
@@ -3212,13 +3231,25 @@ esac
 exit 7
 CURLEOF
 chmod +x /usr/local/bin/curl`
-	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
-		t.Fatalf("FAIL: could not install docker/curl stubs: %s %s", out, errOut)
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub+"\n"+systemctlOKStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl/systemctl stubs: %s %s", out, errOut)
 	}
 
+	// systemctlOKStub removes the throwaway container's own unrelated
+	// systemctl failures (step2/step4 fail there on every run) —
+	// without it, exit 75 would already be guaranteed by environment
+	// noise regardless of what step_apprise_seed does, and the
+	// assertion below would pass for the wrong reason.
 	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
-	if code != 0 && code != 75 {
-		t.Fatalf("FAIL: install.sh exited %d, want 0 or 75: %s %s", code, out, errOut)
+	// apprise ANSWERED and told us the key was not registered — a
+	// present failure of the primary notification path, not the
+	// "stack may not be up yet" case an unreachable apprise reports.
+	// The exit code is what a script or `echo $?` actually reads, so
+	// this must be exit 75 specifically, never 0: the note alone being
+	// right proves the message is honest, not that anything reading
+	// the exit status would find out.
+	if code != 75 {
+		t.Fatalf("FAIL: install.sh exited %d, want 75 — apprise reachable but the seed was rejected (204) must not exit 0: %s %s", code, out, errOut)
 	}
 	if strings.Contains(out, "apprise seed: registered") {
 		t.Errorf("FAIL: a 204 response was reported as a successful registration: %s", out)

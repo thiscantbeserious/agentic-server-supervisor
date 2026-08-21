@@ -1784,13 +1784,28 @@ step_apprise_seed() {
   rm -f "$tmp"
 
   if [ "$curl_rc" -ne 0 ]; then
+    # Not reachable is a normal intermediate state, not a fault: this
+    # step runs before the operator has necessarily brought the stack
+    # up (install.sh never does that itself). No TRANSIENT_FAIL here —
+    # only the two branches below, where apprise DID answer and told
+    # us the registration failed, do that.
     note "apprise seed: could not reach apprise at $endpoint (the stack may not be up yet) — run 'docker compose up -d' in the stack directory, then re-run this script"
     return
   fi
   # N.3.1's rule applies here too: a 204 from apprise-api means the key
-  # was never registered, not that it succeeded quietly.
+  # was never registered, not that it succeeded quietly. Unlike
+  # "unreachable" above, apprise DID answer here — this is a definite,
+  # present failure of the primary notification path, not a stack
+  # that merely isn't up yet, and reporting it via exit 0 would tell
+  # anything reading $? that the run succeeded. TRANSIENT_FAIL (exit
+  # 75) rather than a fresh fatal code: apprise can plausibly still be
+  # mid-startup even though it's already answering HTTP (its own
+  # config store not yet writable), and re-running this script is the
+  # documented remedy either way — the same "retryable" contract exit
+  # 75 already carries for every other step.
   if [ "$status" = "204" ]; then
     note "apprise seed: apprise responded 204 — the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed"
+    TRANSIENT_FAIL=1
     return
   fi
   case "$status" in
@@ -1800,6 +1815,7 @@ step_apprise_seed() {
       ;;
     *)
       note "apprise seed: apprise responded HTTP $status registering the Telegram target — notifications will not be delivered until this is fixed"
+      TRANSIENT_FAIL=1
       ;;
   esac
 }
