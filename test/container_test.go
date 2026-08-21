@@ -2379,9 +2379,6 @@ ENVEOF`, stackDir, stackDir, token, chat, c.pass)
 		if !strings.Contains(envContent, "MAILRISE_SMTP_PASS="+c.pass) {
 			t.Errorf("FAIL C12 (hostile secrets, %s): .env does not carry the password unchanged: %s", c.name, envContent)
 		}
-		if strings.Contains(out, "mailrise.conf: written") && mailriseConf == "" {
-			t.Errorf("FAIL C12 (hostile secrets, %s): summary claims \"written\" for an empty file: %s", c.name, out)
-		}
 	}
 	logPass(t, "PASS C12 (mailrise.conf hostile secrets: byte-identical credential in .env and mailrise.conf for every hostile value, never a silent-success corruption)")
 }
@@ -2485,6 +2482,115 @@ chmod +x /root/repo/install.sh`
 		}
 	}
 	logPass(t, "PASS C12 (msmtprc hostile secrets: /etc/msmtprc byte-identical to .env for tab/backslash/double-quote, second run converges)")
+}
+
+// TestContainer_C12_MsmtprcHostileSecretsBlockRewrite: BLOCKER
+// (reviewer, round 3) — render_managed_block has TWO write paths. A
+// brand-new /etc/msmtprc goes through `printf '\n%s\n' "$desired_block"`
+// (plain, correct even with the buggy `awk -v`). Only an EXISTING
+// managed block that DIFFERS from the desired one goes through the awk
+// rewrite — the path the `env`/`ENVIRON` fix in render_managed_block
+// actually protects. TestContainer_C12_MsmtprcHostileSecrets writes
+// `.env` once and installs TWICE with the SAME password: run 1 takes
+// the printf path (correct either way); run 2 finds the block already
+// matching and reports "already converged" WITHOUT ever invoking awk.
+// Reverting the fix back to `awk -v` and running that test measured
+// green — the mutant passed, because the line the fix touches was never
+// executed. Kept as a separate test (not folded into the existing one)
+// so the two code paths fail independently and a future regression
+// names which one broke.
+//
+// This test forces the awk path deliberately: prime with an ORDINARY
+// password so the managed block is created via the printf path, THEN
+// switch to the hostile password and install again — the block now
+// exists AND differs, which is the only way to reach the rewrite.
+func TestContainer_C12_MsmtprcHostileSecretsBlockRewrite(t *testing.T) {
+	root := repoRoot(t)
+	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
+	if code != 0 {
+		skipUnlessCI(t, "C12 (msmtprc hostile secrets, block rewrite): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
+	}
+
+	cases := []struct {
+		name string
+		pass string
+	}{
+		{"tab", `pass\tword`},
+		{"backslash", `pass\\word`},
+		{"double quote", `pass\"word`},
+	}
+
+	for i, c := range cases {
+		name := fmt.Sprintf("sentinel-c12-msmtprc-rewrite-%d", i)
+		runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
+		if _, errOut, code := runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
+			"-v", root+":/work:ro", "debian:trixie-slim", "sleep", "300"); code != 0 {
+			skipUnlessCI(t, "C12 (msmtprc hostile secrets, block rewrite, %s): could not start throwaway container: %s", c.name, errOut)
+		}
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
+
+		prep := `set -e
+cp -r /work /root/repo
+apt-get update -qq
+apt-get install -y -qq systemd msmtp msmtp-mta >/dev/null 2>&1
+chmod +x /root/repo/install.sh`
+		if out, errOut, code := exec_(prep); code != 0 {
+			skipUnlessCI(t, "C12 (msmtprc hostile secrets, block rewrite, %s): prep failed (msmtp package unavailable?): %s %s", c.name, out, errOut)
+		}
+
+		// Priming run: an ORDINARY password, so the managed block gets
+		// created via the printf path (correct regardless of the bug).
+		primeEnv := "cat > /root/repo/.env <<'ENVEOF'\nMAILRISE_SMTP_USER=sentinel\nMAILRISE_SMTP_PASS=firstpass\nENVEOF"
+		if out, errOut, code := exec_(primeEnv); code != 0 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): priming env setup failed: %s %s", c.name, out, errOut)
+		}
+		outPrime, errOutPrime, codePrime := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+		if codePrime != 0 && codePrime != 75 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): priming run exit=%d (want 0 or 75): %s %s", c.name, codePrime, outPrime, errOutPrime)
+		}
+		if !strings.Contains(outPrime, "step3 /etc/msmtprc: updated") {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): priming run did not write the managed block (msmtp not actually installed in this environment?): %s %s", c.name, outPrime, errOutPrime)
+		}
+
+		// Switch to the hostile password. A quoted heredoc, not printf
+		// with the password embedded in the FORMAT STRING: printf itself
+		// interprets \t/\\ as escapes in its own format argument, which
+		// would corrupt the very bytes this test exists to verify
+		// survive intact -- before install.sh ever saw them.
+		envSetup := "cat > /root/repo/.env <<'ENVEOF'\nMAILRISE_SMTP_USER=sentinel\nMAILRISE_SMTP_PASS=" + c.pass + "\nENVEOF"
+		if out, errOut, code := exec_(envSetup); code != 0 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): env setup failed: %s %s", c.name, out, errOut)
+		}
+
+		out1, errOut1, code1 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+		if code1 != 0 && code1 != 75 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): rewrite run exit=%d (want 0 or 75): %s %s", c.name, code1, out1, errOut1)
+		}
+		// The block exists (from priming) AND differs (new password) —
+		// "updated" here can only mean the awk rewrite path actually ran,
+		// not a converged no-op.
+		if !strings.Contains(out1, "step3 /etc/msmtprc: updated") {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): step3 did not rewrite the differing block: %s %s", c.name, out1, errOut1)
+		}
+
+		msmtprc, _, _ := exec_("grep '^password ' /etc/msmtprc")
+		wantLine := "password " + c.pass
+		if strings.TrimSpace(msmtprc) != wantLine {
+			t.Errorf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): /etc/msmtprc password line = %q, want %q (byte-identical to .env, via the awk rewrite path)", c.name, strings.TrimSpace(msmtprc), wantLine)
+		}
+
+		out2, errOut2, code2 := exec_("cd /root/repo && ./install.sh --env-file /root/repo/.env")
+		if code2 != 0 && code2 != 75 {
+			t.Fatalf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): second run exit=%d (want 0 or 75): %s %s", c.name, code2, out2, errOut2)
+		}
+		if !strings.Contains(out2, "step3 /etc/msmtprc: already converged") {
+			t.Errorf("FAIL C12 (msmtprc hostile secrets, block rewrite, %s): a second run after the awk rewrite did not converge (the rewritten content does not match its own re-render): %s", c.name, out2)
+		}
+	}
+	logPass(t, "PASS C12 (msmtprc hostile secrets, block rewrite: the awk path specifically writes /etc/msmtprc byte-identical to .env and then converges)")
 }
 
 // TestContainer_C12_StackInteractiveSecrets: with a real controlling

@@ -272,8 +272,12 @@ $MARK_END"
       # a literal backslash sequence reaches msmtprc unchanged. `b`/`e`
       # stay as literal script constants (never operator data) but are
       # routed through the same `env`/`ENVIRON` mechanism here too,
-      # rather than leaving them as the one `-v` that would still be
-      # "safe by luck" if this function is ever handed something else.
+      # rather than leaving one `-v` in THIS function "safe by luck" if
+      # it is ever handed something else. Three other `awk -v` sites
+      # remain elsewhere in this script (outside_block/outside_after's
+      # scans, and the pre-existing-`-m`-line comment-out), all carrying
+      # only MARK_BEGIN/MARK_END/DISABLED_MARK — fixed script constants,
+      # never operator data, so left as `-v`.
       env b="$MARK_BEGIN" e="$MARK_END" repl="$desired_block" awk '
         $0==ENVIRON["b"] {if (!seen) {print ENVIRON["repl"]; seen=1} skip=1; next}
         $0==ENVIRON["e"] {if (skip) {skip=0; next}}
