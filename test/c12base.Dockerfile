@@ -16,8 +16,17 @@
 FROM debian:trixie-slim AS base
 
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends systemd curl \
+ && apt-get install -y -qq --no-install-recommends systemd curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+
+# ca-certificates is spelled out explicitly, not left to curl's own
+# dependency chain: it is a Recommends of curl in Debian, not a hard
+# Depends, so --no-install-recommends leaves it out. Any test that
+# exercises install.sh's real HTTPS fetch (Step 0's compose/mailrise
+# download) then gets "curl: (77) error setting certificate file" --
+# a deterministic, every-run failure with no /etc/ssl/certs CA bundle
+# at all, easy to misread as network flakiness because curl's own
+# TLS handshake gets far enough to look like a live connection first.
 
 # A second stage carrying the packages install.sh's own step1 installs.
 #

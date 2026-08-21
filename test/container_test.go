@@ -2671,7 +2671,13 @@ chmod +x /root/repo/install.sh`
 // terminal `read -rs`/`read -r` reads from at /dev/tty.
 func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 	name := "sentinel-c12-interactive-test"
-	startC12Container(t, name)
+	// This test's subject is step0b_secrets' prompting, not package
+	// installation — starting from the package-bearing base keeps
+	// step1's real apt-get off the pty's timing, the same reasoning
+	// the monitoring-prompt tests already use. Reaching step4's own
+	// prompt (answered below) no longer has step1's real install
+	// stacked in front of it.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
 	exec_ := func(script string) (string, string, int) {
 		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
@@ -2690,7 +2696,15 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 	const token = "TESTTOKEN_ABCDEF"
 	const chat = "-100999888"
 	const smtpPass = "test-smtp-secret-value"
-	answers := token + "\n" + chat + "\n" + smtpPass + "\n"
+	// A real mailrise password answered here means MAIL_OK genuinely
+	// becomes 1 once step1 installs msmtp for real — the same
+	// situation a real operator typing these three answers would be
+	// in — so step4 asks a fourth question. A trailing blank Enter
+	// declines it (the documented default), which is what an operator
+	// here to configure notifications, not smartd, would type; this
+	// test's own subject (the three secrets landing correctly) is
+	// unaffected either way.
+	answers := token + "\n" + chat + "\n" + smtpPass + "\n\n"
 	driveCmd := fmt.Sprintf(
 		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install.sh" /tmp/script.log`,
 		shellQuote(answers),
@@ -2742,7 +2756,10 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 // crash-loops mailrise outright.
 func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
 	name := "sentinel-c12-emptytoken-test"
-	startC12Container(t, name)
+	// Same reasoning as TestContainer_C12_StackInteractiveSecrets: this
+	// test's subject is the empty-answer fail-closed behavior, not
+	// package installation.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
 	exec_ := func(script string) (string, string, int) {
 		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
@@ -2755,8 +2772,15 @@ func TestContainer_C12_StackInteractiveEmptyTokenFailsClosed(t *testing.T) {
 
 	// Enter, Enter (empty token, empty chat id), then a real mailrise
 	// password — the shape the reviewer measured against a real pty.
+	// The empty token is this test's whole point (MISSING_ENV_INPUT,
+	// exit 78 checked at the very end of the run, after every step),
+	// but the real password still makes MAIL_OK become 1 independently
+	// of the token being empty — step4 asks a fourth question before
+	// that final exit-78 check is ever reached, so a trailing blank
+	// Enter (the documented default) answers it without touching what
+	// this test actually verifies.
 	const smtpPass = "test-smtp-secret-value"
-	answers := "\n\n" + smtpPass + "\n"
+	answers := "\n\n" + smtpPass + "\n\n"
 	driveCmd := fmt.Sprintf(
 		`printf %s | script -qec "bash -s -- --stack-dir /docker-compose/sentinel < /work/install.sh" /tmp/script2.log`,
 		shellQuote(answers),
@@ -2796,36 +2820,24 @@ func shellQuote(s string) string {
 // an identical sha256 — collapsing is a one-time fixup, not a repeated
 // rewrite.
 func TestContainer_C12_CollapsesDuplicateManagedBlocks(t *testing.T) {
-	root := repoRoot(t)
-	out, errOut, code := runCmd(t, 30*time.Second, dockerBin(), "run", "--rm", "debian:trixie-slim", "true")
-	if code != 0 {
-		skipUnlessCI(t, "C12 (duplicate blocks): cannot run a throwaway debian container in this environment: %s %s", out, errOut)
-	}
-
 	name := "sentinel-c12-dup-test"
-	runCmd(t, 5*time.Second, dockerBin(), "rm", "-f", name)
-	_, errOut, code = runCmd(t, 60*time.Second, dockerBin(), "run", "-d", "--name", name,
-		"-v", root+":/work:ro",
-		"debian:trixie-slim", "sleep", "600")
-	if code != 0 {
-		skipUnlessCI(t, "C12 (duplicate blocks): could not start throwaway container: %s", errOut)
-	}
-	defer runCmd(t, 10*time.Second, dockerBin(), "rm", "-f", "-t", "0", name)
-
+	// This test's subject is the collapse-on-duplicate-blocks logic,
+	// not package installation: starting from the package-bearing base
+	// (the same one the two monitoring-prompt tests use) keeps step1's
+	// apt-get out of its budget and off the pty's timing entirely.
+	startC12ContainerFrom(t, name, c12BaseWithPackages(t))
 	exec_ := func(script string) (string, string, int) {
-		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	if out, _, code := exec_("command -v script"); code != 0 {
+		skipUnlessCI(t, "C12 (duplicate blocks): the `script` utility is not available in this environment: %s", out)
 	}
 
 	const beginMark = "# >>> agentic-server-supervisor (managed) >>>"
 	const endMark = "# <<< agentic-server-supervisor (managed) <<<"
 
 	prep := `set -e
-cp -r /work /root/repo
-apt-get update -qq
-apt-get install -y -qq systemd >/dev/null 2>&1 || true
-groupadd -g 7777 systemd-journal 2>/dev/null || true
-printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/repo/.env
-chmod +x /root/repo/install.sh
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env
 cat > /etc/smartd.conf <<'SMARTD_EOF'
 ` + beginMark + `
 DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /usr/share/smartmontools/smartd-runner
@@ -2834,7 +2846,7 @@ DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /
 DEVICESCAN -a -o on -S on -n standby,q -W 4,45,55 -m stale@example.com -M exec /usr/share/smartmontools/smartd-runner
 ` + endMark + `
 SMARTD_EOF`
-	if out, errOut, code := exec_(prep); code != 0 {
+	if out, errOut, code := exec_(dockerComposeReadyStub + "\n" + systemctlOKStub + "\n" + prep); code != 0 {
 		skipUnlessCI(t, "C12 (duplicate blocks): throwaway container prep failed: %s %s", out, errOut)
 	}
 
@@ -2852,15 +2864,15 @@ SMARTD_EOF`
 
 	// step4 now asks before touching smartd.conf at all (main's
 	// explicit "no flag — ask, defaulting to no"), so collapsing the
-	// duplicate blocks needs a real pty answering yes — the same
-	// `script` pattern TestContainer_C12_StackInteractiveSecrets uses,
-	// not the plain no-pty exec_ this test used before that gate
-	// existed.
-	if out, _, code := exec_("command -v script"); code != 0 {
-		skipUnlessCI(t, "C12 (duplicate blocks): the `script` utility is not available in this environment: %s", out)
-	}
+	// duplicate blocks needs a real pty answering yes. A single simple
+	// command through the pty (absolute path, no compound "cd &&"),
+	// the exact shape the two monitoring-prompt tests below use and
+	// confirmed to actually deliver the answer to
+	// confirm_monitoring_change's read — a "cd DIR && ./relative"
+	// form left the captured output as just the pty's own echo of the
+	// piped "y" rather than install.sh's real output.
 	runConfirmed := func() (string, string, int) {
-		return exec_(`printf 'y\n' | script -qec "cd /root/repo && ./install.sh --env-file /root/repo/.env" /tmp/script.log`)
+		return exec_(`printf 'y\n' | script -qec "bash /work/install.sh --env-file /root/test.env" /tmp/script.log`)
 	}
 
 	out1, errOut1, code1 := runConfirmed()
