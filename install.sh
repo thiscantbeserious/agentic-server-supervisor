@@ -1940,11 +1940,25 @@ step4() {
   did_update=0
   if render_managed_block "$file" "$preamble" "$SMARTD_LINE" 0644; then
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
-      note "step4 /etc/smartd.conf: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
+      change_desc="collapsed ${RENDER_COLLAPSED} managed blocks into 1"
     else
-      note "step4 /etc/smartd.conf: $(verb_phrase "updated" "would be updated")"
+      change_desc="updated"
     fi
-    changed=$((changed+1))
+    if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      # confirm_monitoring_change returned 0 here only to produce this
+      # preview, a real run only reaches this render after the operator
+      # actually answered yes; the default is No. Counting the
+      # hypothetical "yes" as drift would mean --check can never exit 0
+      # on any host where monitoring is declined, which is the default,
+      # a permanent false positive against a genuinely converged system
+      # (contracts/runtime.md R5). Printed as an available action the
+      # operator can opt into, not as pending work, and never added to
+      # `changed`.
+      note "step4 /etc/smartd.conf: available, would be $change_desc if enabled (opt-in, defaults to No, not counted as drift)"
+    else
+      note "step4 /etc/smartd.conf: $change_desc"
+      changed=$((changed+1))
+    fi
     did_update=1
   else
     note "step4 /etc/smartd.conf: already converged"
@@ -2008,11 +2022,24 @@ ZED_NOTIFY_VERBOSE=1'
 
   if render_managed_block "$file" "" "$body" 0644; then
     if [ "$RENDER_COLLAPSED" -gt 0 ]; then
-      note "step5 $file: $(verb_phrase "collapsed ${RENDER_COLLAPSED} managed blocks into 1" "would collapse ${RENDER_COLLAPSED} managed blocks into 1")"
+      change_desc="collapsed ${RENDER_COLLAPSED} managed blocks into 1"
     else
-      note "step5 $file: $(verb_phrase "updated" "would be updated")"
+      change_desc="updated"
     fi
-    changed=$((changed+1))
+    if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+      # Same reasoning as step4's identical branch: this preview only
+      # exists because confirm_monitoring_change returns 0 under
+      # --check/--dry-run to render what a 'y' would write, a real run
+      # only gets here after the operator actually said yes, and the
+      # default is No. Not counted as drift, for the same reason: a
+      # declined-by-default opt-in is not "this differs from what the
+      # tool would make it", so it must not stop --check from ever
+      # exiting 0 on a converged, monitoring-declined host.
+      note "step5 $file: available, would be $change_desc if enabled (opt-in, defaults to No, not counted as drift)"
+    else
+      note "step5 $file: $change_desc"
+      changed=$((changed+1))
+    fi
     if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
       after_hash="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
       if [ "$before_hash" != "$after_hash" ]; then
