@@ -1,0 +1,17 @@
+#cloud-config
+# NoCloud seed for both VM variants. __SSH_PUBKEY__ is substituted by the
+# calling script (a fresh keypair generated per run, never committed,
+# never reused between runs).
+users:
+  - name: e2e
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - __SSH_PUBKEY__
+ssh_pwauth: false
+package_update: false
+growpart:
+  mode: auto
+  devices: ["/"]
+runcmd:
+  - [ systemctl, enable, --now, ssh ]

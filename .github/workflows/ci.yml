@@ -8,6 +8,7 @@ on:
       - "internal/**"
       - "deploy/**"
       - "test/**"
+      - "install.sh"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/ci.yml"
@@ -17,6 +18,7 @@ on:
       - "internal/**"
       - "deploy/**"
       - "test/**"
+      - "install.sh"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/ci.yml"
@@ -253,6 +255,180 @@ jobs:
           AGY_SHA512_ARM64: ${{ vars.AGY_SHA512_ARM64 }}
           SENTINEL_REAL_AGY: "1"
         run: go test -tags container -v -timeout 25m ./test/...
+
+  # install.sh runs as root on a real host and configures it, apt
+  # dependency resolution, systemd, real packages. None of that exists
+  # inside a container build, so no execution of this script anywhere has
+  # ever reached its exit-0 success path, and container-only testing once
+  # let msmtp-mta's apt conflict resolution remove postfix and, with it,
+  # openmediavault and ten plugins, on a real host. These two jobs boot an
+  # actual kernel under QEMU and run install.sh against it for real.
+  #
+  # Kept off the `container` matrix deliberately: that matrix is scoped to
+  # architecture (native runner per arch, C1's whole reason for existing),
+  # these jobs are scoped to host platform (plain Debian vs. OpenMediaVault)
+  # and always run amd64, folding them in would make one matrix answer two
+  # unrelated questions.
+  #
+  # KVM acceleration is used when the runner offers it and TCG (software
+  # emulation) otherwise; test/vm/lib.sh's vm_detect_accel logs which was
+  # used and why, so an unexpectedly slow run is explained by its own log,
+  # not left a mystery. Neither job may skip: a job that quietly does
+  # nothing when /dev/kvm is unavailable is the exact failure shape this
+  # project has already been bitten by once (T7's original single-runner
+  # QEMU design, contracts/runtime.md R6), and would be worse here, this
+  # job's entire purpose is the thing that has never actually run.
+  vm-e2e-debian:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Install QEMU + cloud-init tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage openssh-client
+
+      # The Debian cloud image download is the only thing this variant
+      # could usefully cache, and actions/cache is branch-scoped: a
+      # feature branch cannot read a cache written on another branch (only
+      # the default branch's own cache is visible everywhere). That
+      # scoping is exactly why the OMV base image below is NOT cached this
+      # way and goes to GHCR instead, but this download is cheap (a single
+      # pinned-URL fetch, no provisioning), so paying it again per branch
+      # on a cache miss is not worth a second GHCR publishing path. Kept
+      # deliberately simple: this variant's whole point is staying cheap.
+      - name: Cache the Debian cloud base image
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: /tmp/vm-debian-cache/debian-base.qcow2
+          key: debian-cloud-image-${{ hashFiles('test/vm/fetch-debian-cloud-image.sh') }}
+
+      - name: Run the plain-Debian install.sh E2E
+        run: |
+          mkdir -p /tmp/vm-debian-cache
+          if [ -f /tmp/vm-debian-cache/debian-base.qcow2 ]; then
+            echo "debian cloud image: cache hit"
+          else
+            echo "debian cloud image: cache miss, will download"
+          fi
+          bash test/vm/run-debian-e2e.sh /tmp/vm-work-debian
+
+  # The valuable half of this pair: a real OMV host is the only place the
+  # removal cascade, the platform config markers, and the compose-root
+  # absolute-symlink layout can be checked against reality instead of a
+  # fixture someone wrote from memory. Split into two jobs so the
+  # expensive, GHCR-publishing half never runs anywhere a PR's own token
+  # could reach it.
+  #
+  # Image tag is a content hash of everything that determines what ends up
+  # on the provisioned disk (the provisioning script + the pinned Debian
+  # base image fetch script), never a moving tag like `latest`, for the
+  # same reason every action in this workflow is pinned by commit SHA
+  # rather than by a tag that can move underneath a consumer. A stale
+  # image answering to the same name as a fresh one is worse than no cache
+  # at all, this is what makes that impossible: a changed script is a
+  # different tag, full stop.
+  vm-omv-image:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Install QEMU tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage openssh-client
+
+      - id: tag
+        run: echo "tag=$(cat test/vm/provision-omv.sh test/vm/fetch-debian-cloud-image.sh test/vm/cloud-init-user-data.tmpl | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/omv-base" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this content hash is already published
+        id: probe
+        run: |
+          if docker pull "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "vm-omv-image: cache HIT, ${{ steps.tag.outputs.tag }} already published, nothing to build"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "vm-omv-image: cache MISS, ${{ steps.tag.outputs.tag }} not found, building from scratch"
+          fi
+
+      - name: Build the OMV base image (cache miss only)
+        if: steps.probe.outputs.hit != 'true'
+        run: bash test/vm/build-omv-image.sh /tmp/omv-base.qcow2 /tmp/vm-work-omv-build
+
+      - name: Package and publish the base image (cache miss only)
+        if: steps.probe.outputs.hit != 'true'
+        run: |
+          mkdir -p /tmp/omv-image-ctx
+          cp /tmp/omv-base.qcow2 /tmp/omv-image-ctx/base.qcow2
+          printf 'FROM scratch\nCOPY base.qcow2 /base.qcow2\n' > /tmp/omv-image-ctx/Dockerfile
+          docker build -t "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}" /tmp/omv-image-ctx
+          docker push "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"
+
+  vm-e2e-omv:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Install QEMU tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage openssh-client sshpass
+
+      - id: tag
+        run: echo "tag=$(cat test/vm/provision-omv.sh test/vm/fetch-debian-cloud-image.sh test/vm/cloud-init-user-data.tmpl | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      # Read-only login: this job never holds packages:write, so even a
+      # compromised step in it cannot publish anything under this
+      # project's name. Publishing is vm-omv-image's job alone, and that
+      # job never runs on a pull_request.
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/omv-base" >> "$GITHUB_OUTPUT"
+
+      - name: Pull the cached OMV base image, build locally on a cold cache
+        run: |
+          if docker pull "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"; then
+            echo "vm-e2e-omv: cache HIT, ${{ steps.tag.outputs.tag }}"
+            docker create --name omv-base-extract "${{ steps.image.outputs.name }}:${{ steps.tag.outputs.tag }}"
+            docker cp omv-base-extract:/base.qcow2 /tmp/omv-base.qcow2
+            docker rm omv-base-extract
+          else
+            echo "vm-e2e-omv: cache MISS, ${{ steps.tag.outputs.tag }} not published yet (first run on this content, or a pull_request that changed the provisioning script). Building locally for THIS run only; this job holds no publish permission, so the shared cache is warmed by the next push to main via vm-omv-image, not by this job."
+            sudo apt-get install -y --no-install-recommends qemu-system-x86
+            bash test/vm/build-omv-image.sh /tmp/omv-base.qcow2 /tmp/vm-work-omv-build
+          fi
+
+      - name: Run the OpenMediaVault install.sh E2E
+        run: bash test/vm/run-omv-e2e.sh /tmp/omv-base.qcow2 /tmp/vm-work-omv-run
 
   # Built per architecture, on a runner native to it, and pushed by
   # digest rather than by tag, no tag exists yet for a single-arch
