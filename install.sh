@@ -34,6 +34,12 @@ STACK_DIR=""
 LAYOUT=""
 COMPOSE_NAME=""
 ENV_NAME=""
+# Set to 1 only when resolve_stack_dir found 2+ compose-root candidates
+# under --check/--dry-run and (correctly) refused to pick one — the run
+# block below reads this to skip step0b_secrets/step6 rather than
+# preview a plan against the unrelated default ./.env, the same
+# "state left stale past an early return" shape RENDER_COLLAPSED had.
+STACK_UNRESOLVED=0
 
 usage() {
   cat <<EOF
@@ -305,6 +311,28 @@ strip_quotes() {
     fi
   fi
   printf '%s' "$v"
+}
+
+# replace_token TEMPLATE TOKEN VALUE — every literal occurrence of TOKEN
+# in TEMPLATE replaced with VALUE, printed to stdout. Deliberately NOT
+# bash's own "${template//TOKEN/VALUE}" pattern substitution: that was
+# measured to have the SAME pitfall sed's s/// has, just less
+# documented — bash 5.2's own replacement text treats an unescaped '&'
+# as "the matched text" too. Reproduced directly:
+# x="hello WORLD bye"; echo "${x//WORLD/A&B}" prints "hello AWORLDB bye",
+# not "hello A&B bye". This function uses only prefix/suffix REMOVAL
+# (${var%%pat*}, ${var#*pat}) and plain "$value" concatenation — neither
+# operation has any "replacement text" concept, so no character VALUE
+# contains can ever be treated as special. VALUE is used exactly once
+# per occurrence via ordinary variable interpolation, which is always
+# 100% literal in bash.
+replace_token() {
+  local __tpl="$1" __token="$2" __value="$3" __result="" __rest="$1"
+  while [[ "$__rest" == *"$__token"* ]]; do
+    __result="${__result}${__rest%%"$__token"*}${__value}"
+    __rest="${__rest#*"$__token"}"
+  done
+  printf '%s' "${__result}${__rest}"
 }
 
 # --- stack creation (curl | sudo bash, nothing copied onto the host first) ---
@@ -654,15 +682,30 @@ invoking_home() {
 compose_root_looks_omv() {
   local root="$1" d base
   [ -d "$root" ] || return 1
-  for d in "$root"/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
+  # Capped at 200 entries via `find ... | head`, which stops reading the
+  # directory (SIGPIPE, once head has its 200 lines) rather than
+  # scanning it in full. A bash glob ("$root"/*/) cannot do this: glob
+  # expansion enumerates and sorts EVERY entry before the loop below
+  # could even start, so a `break` inside the loop body only bounds the
+  # cheap part — the expensive part (stat'ing every child of a wide
+  # share) would already be done. Measured: 255ms warm/overlayfs for a
+  # 23,019-entry directory with the unbounded glob; on a large,
+  # cold-cache pool this is what turns the FIRST thing an operator ever
+  # runs into a multi-second stall on an ordinary wide share
+  # (Downloads, Backup) that was never an OMV compose root to begin
+  # with. A real OMV compose root is recognisable from a handful of
+  # children, so 200 is generous headroom, not a tight fit — not
+  # exhaustive (a root whose first 200 entries are all non-stack
+  # clutter would be missed), the same "not exhaustive" trade-off the
+  # whole candidate scan already documents, one level deeper.
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
     base="$(basename "$d")"
     if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ] \
        && [ "$(readlink "${d}/compose.yml")" = "${base}.yml" ]; then
       return 0
     fi
-  done
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 200)
   return 1
 }
 
@@ -739,10 +782,40 @@ omv_confdbadm_compose_root() {
     '['*|'{'*) ;;
     *) return 1 ;;
   esac
-  path="$(printf '%s' "$cfg" \
-    | grep -B2 "\"uuid\"[[:space:]]*:[[:space:]]*\"${ref}\"" \
-    | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
+  # Flattened to one line first, then matched as a single flat `{...}`
+  # OBJECT containing our uuid — not a line-adjacency `grep -B2` between
+  # separately-matched "uuid" and "path" lines. A `-B2` window silently
+  # assumes "path" sits within two lines AFTER "uuid" in the source
+  # text; real `omv-confdbadm read` output was not confirmed to be
+  # formatted that way (root access to check was declined), and if it
+  # pretty-prints with "path" before "uuid", or more than two lines
+  # apart, `-B2` never matches at all — this signal would silently stay
+  # "unknown" forever on a real host, exactly the class of bug a
+  # showcase-only test fixture cannot catch. Matching within one flat
+  # object is both order- and distance-independent for the one shape
+  # that matters (sharedfolder entries are flat records, no nested
+  # braces), and `[^{}]*` stops at the first `}` so it cannot span
+  # multiple array entries by accident.
+  local flat obj
+  flat="$(printf '%s' "$cfg" | tr '
+' ' ')"
+  obj="$(printf '%s' "$flat" | grep -o "{[^{}]*}" | grep "\"uuid\"[[:space:]]*:[[:space:]]*\"${ref}\"" | head -n1)"
+  [ -n "$obj" ] || return 1
+  path="$(printf '%s' "$obj" | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/.*"([^"]*)"$/\1/')"
   [ -n "$path" ] || return 1
+
+  # Defense in depth beyond the JSON-shape guard above: even a value
+  # that legitimately starts with '{'/'[' and parses cleanly must still
+  # look like a real shared-folder mount, not an arbitrary string
+  # (a future omv-confdbadm error mode that emits well-formed JSON
+  # instead of a Python traceback is not something this script can rule
+  # out). A compose root is never rooted under one of these system
+  # directories on any real host.
+  case "$path" in
+    /|/usr*|/lib*|/bin*|/sbin*|/etc*|/proc*|/sys*|/dev*|/run*|/boot*) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
   printf '%s' "$path"
 }
 
@@ -779,14 +852,19 @@ candidate_compose_roots() {
 # apart by besides the bare path.
 count_existing_stacks() {
   local root="$1" d base n=0
-  for d in "$root"/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"
+  # Same bounded find|head as compose_root_looks_omv, same reason — a
+  # bash glob would enumerate the whole directory before this loop
+  # could even start counting. Only reached for candidates already
+  # confirmed structurally OMV-shaped (the ambiguous-menu display), so
+  # lower-frequency than that scan, but no reason to reintroduce the
+  # unbounded cost here.
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
     base="$(basename "$d")"
     if [ -f "${d}/${base}.yml" ] && [ -L "${d}/compose.yml" ]; then
       n=$((n+1))
     fi
-  done
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 200)
   printf '%d' "$n"
 }
 
@@ -921,6 +999,7 @@ CANDS
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     note "stack directory: ambiguous — $count possible OMV compose roots found (see stderr for the list); pass --stack-dir to choose"
     changed=$((changed+1))
+    STACK_UNRESOLVED=1
     return
   fi
 
@@ -1112,14 +1191,44 @@ step0b_secrets() {
   fi
 
   if fetch_repo_file "deploy/mailrise/mailrise.conf.example" "REPLACE_BOT_TOKEN"; then
+    # replace_token, not sed and not bash's own "${tpl//pat/rep}": both
+    # were measured to treat an unescaped '&' in the replacement text as
+    # "the matched text", not literal data — sed's s/// documents this;
+    # bash's own pattern substitution has the identical behavior far
+    # less documented (reproduced directly: x="hello WORLD bye";
+    # echo "${x//WORLD/A&B}" prints "hello AWORLDB bye"). sed's `/`
+    # delimiter collision was the other half of the original bug: a
+    # password containing one crashed sed outright and left a
+    # ZERO-BYTE mailrise.conf that this script still reported as
+    # "written". replace_token uses only prefix/suffix removal and
+    # plain variable interpolation — no replacement-text concept at
+    # all, so no character in a token/chat id/password can ever be
+    # treated as special.
+    local tpl
+    tpl="$(cat "$FETCHED_TMP")"
+    rm -f "$FETCHED_TMP"
+    tpl="$(replace_token "$tpl" REPLACE_BOT_TOKEN "$token")"
+    tpl="$(replace_token "$tpl" REPLACE_CHAT_ID "$chat")"
+    tpl="$(replace_token "$tpl" REPLACE_SMTP_USER "$smtp_user")"
+    tpl="$(replace_token "$tpl" REPLACE_SMTP_PASS "$smtp_pass")"
+
     local rendered
     rendered="$(mktemp)"
-    sed -e "s/REPLACE_BOT_TOKEN/${token}/g" \
-        -e "s/REPLACE_CHAT_ID/${chat}/g" \
-        -e "s/REPLACE_SMTP_USER/${smtp_user}/g" \
-        -e "s/REPLACE_SMTP_PASS/${smtp_pass}/g" \
-        "$FETCHED_TMP" > "$rendered"
-    rm -f "$FETCHED_TMP"
+    printf '%s\n' "$tpl" > "$rendered"
+
+    # Fail-closed regardless of substitution mechanism: a value that
+    # itself contained the literal text "REPLACE_" (contrived, but
+    # cheaper to reject than to reason about) or any other unexpected
+    # substitution gap must never be written and reported as done —
+    # that is a stack that "installs successfully" and cannot deliver a
+    # single notification.
+    if grep -q 'REPLACE_' "$rendered"; then
+      echo "$PROG: rendered mailrise.conf still contains an unreplaced REPLACE_ token — refusing to write it" >&2
+      TRANSIENT_FAIL=1
+      rm -f "$rendered"
+      return
+    fi
+
     local mailrise_path="${STACK_DIR}/mailrise/mailrise.conf"
     if write_file_if_differs "$mailrise_path" 0644 "$rendered"; then
       note "stack mailrise.conf: $(verb_phrase "written" "would be written") (mode 0644 — see deploy/README.md, NOT 0600)"
@@ -1543,7 +1652,19 @@ step6() {
 
 if [ "$ENV_FILE_EXPLICIT" -ne 1 ]; then
   step0a_layout
-  step0b_secrets
+  # STACK_UNRESOLVED (set only by resolve_stack_dir's ambiguous
+  # --check/--dry-run branch) means ENV_FILE is still whatever it
+  # defaulted to (./.env) rather than a real stack's env file — running
+  # step0b_secrets here would preview "would write 11 field(s) to
+  # ./.env", a plan against a file the ambiguity report already said
+  # this run is not proceeding with. Skipped, not silently: the
+  # ambiguity note is already in the summary, this just keeps the rest
+  # of it from reading like a coherent plan around that one line.
+  if [ "$STACK_UNRESOLVED" -ne 1 ]; then
+    step0b_secrets
+  else
+    note "stack env: skipped — no stack directory was resolved (see the ambiguity report above)"
+  fi
 fi
 
 step1
@@ -1554,7 +1675,14 @@ step2
 step3
 step4
 step5
-step6
+# Same STACK_UNRESOLVED gate as step0b_secrets above, for the same
+# reason: step6 upserts JOURNAL_GID into ENV_FILE, and with no stack
+# directory resolved that is still the unrelated ./.env default.
+if [ "$STACK_UNRESOLVED" -ne 1 ]; then
+  step6
+else
+  note "step6 JOURNAL_GID: skipped — no stack directory was resolved (see the ambiguity report above)"
+fi
 
 echo "$PROG summary:"
 for l in "${report_lines[@]}"; do

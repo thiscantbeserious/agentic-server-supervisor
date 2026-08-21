@@ -1711,6 +1711,16 @@ chmod +x /usr/local/bin/omv-confdbadm`
 // get picked), per the rule this project keeps re-learning: a test that
 // only checks the chosen path proves nothing about whether the scan
 // found the right candidates.
+//
+// rootUUID and rootOpt are chosen so that NEITHER is a substring of the
+// other (reviewer-caught defect: an earlier version used "/docker-compose"
+// and ".../docker-compose", so both strings.Contains checks passed
+// whether or not "/docker-compose" itself was ever scanned — confirmed
+// by mutating candidate_compose_roots to glob "/docker-compose-x"
+// instead and watching every assertion still hold). Assertions below
+// anchor on the numbered-menu format ") <path> (" specifically, not a
+// bare substring match, so a differently-named directory cannot satisfy
+// them by accident either.
 func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
 	name := "sentinel-c12-candidates-ambiguous-test"
 	startC12Container(t, name)
@@ -1718,51 +1728,92 @@ func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
 		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
 
-	const rootA = "/docker-compose"
-	const rootB = "/srv/dev-disk-by-uuid-second/docker-compose"
-	for _, root := range []string{rootA, rootB} {
+	// candidate_compose_roots scans /srv/dev-disk-by-uuid-*/* BEFORE
+	// /opt/* (fixed pattern order), so rootUUID is always candidate 1
+	// and rootOpt always candidate 2 — asserted explicitly below rather
+	// than assumed, so a reordering of candidate_compose_roots would
+	// fail this test loudly instead of silently picking the wrong one.
+	const rootUUID = "/srv/dev-disk-by-uuid-second/docker-compose"
+	const rootOpt = "/opt/manual-compose-root"
+	for _, root := range []string{rootUUID, rootOpt} {
 		exec_("mkdir -p " + root + "/existingstack && " +
 			"printf 'services: {}\\n' > " + root + "/existingstack/existingstack.yml && " +
 			"ln -sfn existingstack.yml " + root + "/existingstack/compose.yml")
 	}
+	menuLine := func(path string) string { return ") " + path + " (" }
 
 	// --dry-run: never prompts, must report the ambiguity AND name both
-	// candidates — a preview that silently picks one, or that hides the
-	// second candidate, is worse than one that shows the ambiguity.
+	// candidates in the numbered menu — a preview that silently picks
+	// one, or that hides the second candidate, is worse than one that
+	// shows the ambiguity.
 	outDry, _, codeDry := exec_("/work/install.sh --dry-run 2>&1")
 	if codeDry != 0 {
 		t.Fatalf("FAIL C12 (stack dir candidates ambiguous): --dry-run exit=%d: %s", codeDry, outDry)
 	}
-	for _, want := range []string{rootA, rootB} {
+	for _, want := range []string{menuLine(rootUUID), menuLine(rootOpt)} {
 		if !strings.Contains(outDry, want) {
-			t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run output does not name candidate %q: %s", want, outDry)
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run menu missing %q: %s", want, outDry)
 		}
+	}
+	if !strings.Contains(outDry, "  1) "+rootUUID) || !strings.Contains(outDry, "  2) "+rootOpt) {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run menu numbering not as expected (1=%s, 2=%s): %s", rootUUID, rootOpt, outDry)
+	}
+	if !strings.Contains(outDry, "2 possible OMV compose roots") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run does not report the candidate count: %s", outDry)
 	}
 	if !strings.Contains(outDry, "ambiguous") && !strings.Contains(outDry, "multiple possible") {
 		t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run does not flag the ambiguity in its output: %s", outDry)
 	}
 
+	// DEFECT 4 (reviewer, house defect repeated: state computed past an
+	// early return — same shape as RENDER_COLLAPSED): with no stack
+	// directory resolved, step0b_secrets and step6 must not preview a
+	// plan against the unrelated ./.env default — that reads as "here
+	// is what I will do" when the correct message is "I stopped".
+	// "in ./.env" legitimately appears in steps 3-5's skip reasons
+	// (compute_mail_status genuinely reads the ./.env default and
+	// reports it has no credentials — honest, and orthogonal to
+	// step0b_secrets/step6) — the specific phrasings that would mean a
+	// PLAN was previewed against it are what must never appear.
+	for _, mustNotAppear := range []string{
+		"would write 11 field(s) to ./.env",
+		"JOURNAL_GID: would set to",
+	} {
+		if strings.Contains(outDry, mustNotAppear) {
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run previews a plan against the stale ./.env default (%q found) despite refusing to resolve a stack directory: %s", mustNotAppear, outDry)
+		}
+	}
+	for _, wantSkip := range []string{
+		"stack env: skipped",
+		"step6 JOURNAL_GID: skipped",
+	} {
+		if !strings.Contains(outDry, wantSkip) {
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): --dry-run does not report %q when no stack directory was resolved: %s", wantSkip, outDry)
+		}
+	}
+
 	// A real run with no controlling terminal and no --stack-dir must
 	// refuse outright (exit 78, the same code the zero-terminal/
 	// zero-candidate case already uses) and name both candidates in the
-	// refusal — never guess which one the operator meant.
+	// numbered refusal — never guess which one the operator meant.
 	outReal, errOutReal, codeReal := exec_("/work/install.sh 2>&1")
 	if codeReal != 78 {
 		t.Fatalf("FAIL C12 (stack dir candidates ambiguous): real run exit=%d, want 78: %s %s", codeReal, outReal, errOutReal)
 	}
-	for _, want := range []string{rootA, rootB} {
+	for _, want := range []string{menuLine(rootUUID), menuLine(rootOpt)} {
 		if !strings.Contains(outReal, want) {
-			t.Errorf("FAIL C12 (stack dir candidates ambiguous): real-run refusal does not name candidate %q: %s", want, outReal)
+			t.Errorf("FAIL C12 (stack dir candidates ambiguous): real-run refusal missing %q: %s", want, outReal)
 		}
 	}
-	if out, _, _ := exec_("test -e " + rootA + "/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
+	if out, _, _ := exec_("test -e " + rootUUID + "/sentinel && echo EXISTS || echo ABSENT"); !strings.Contains(out, "ABSENT") {
 		t.Errorf("FAIL C12 (stack dir candidates ambiguous): a stack directory was created despite refusing to choose")
 	}
 
-	// Interactive: a real terminal choosing "2" must land under the
-	// SECOND candidate specifically (not silently default to the
-	// first) — proves the numbered choice is wired to the right entry,
-	// not just that pressing a key unblocks the prompt.
+	// Interactive: a real terminal choosing "2" must land under rootOpt
+	// SPECIFICALLY (candidate 2 by the fixed scan order asserted above),
+	// not silently default to candidate 1 — proves the numbered choice
+	// is wired to the right entry, not just that pressing a key unblocks
+	// the prompt.
 	if out, _, code := exec_("command -v script"); code != 0 {
 		skipUnlessCI(t, "C12 (stack dir candidates ambiguous): the `script` utility is not available in this environment: %s", out)
 	}
@@ -1784,10 +1835,13 @@ func TestContainer_C12_StackDirCandidatesAmbiguous(t *testing.T) {
 	if codeI != 78 {
 		t.Fatalf("FAIL C12 (stack dir candidates ambiguous, interactive): exit=%d, want 78 (secrets prompts hit EOF after the directory choice): %s %s", codeI, outI, errOutI)
 	}
-	if !strings.Contains(outI, "stack directory: "+rootB+"/sentinel") {
-		t.Errorf("FAIL C12 (stack dir candidates ambiguous, interactive): choosing \"2\" did not select %s: %s", rootB, outI)
+	if !strings.Contains(outI, "stack directory: "+rootOpt+"/sentinel") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous, interactive): choosing \"2\" did not select %s: %s", rootOpt, outI)
 	}
-	logPass(t, "PASS C12 (stack dir candidates ambiguous: never guessed, both candidates named, numbered choice wired correctly)")
+	if strings.Contains(outI, "stack directory: "+rootUUID+"/sentinel") {
+		t.Errorf("FAIL C12 (stack dir candidates ambiguous, interactive): choosing \"2\" wrongly selected candidate 1 (%s): %s", rootUUID, outI)
+	}
+	logPass(t, "PASS C12 (stack dir candidates ambiguous: never guessed, both candidates named in the numbered menu, numbered choice wired correctly)")
 }
 
 // TestContainer_C12_StackDirCandidatesNone: nothing structurally
@@ -1859,6 +1913,30 @@ SystemExit: Failed to load the configuration database`
 			name: "non-JSON stdout, exit 0 (a hypothetical future failure mode the exit-status check alone would not catch)",
 			stub: "#!/bin/sh\necho 'warning: something unrelated happened'\nexit 0\n",
 		},
+		{
+			// Reviewer's exact adversarial reproduction against the
+			// pre-hardening code: a traceback-SHAPED blob (never starts
+			// with '{' or '[') that nonetheless embeds a real-looking
+			// "sharedfolderref" key and, further down, a well-formed
+			// {"path": "/usr/lib/python3/dist-packages", "uuid": "..."}
+			// object — exactly the kind of content a naive line-based
+			// grep could scrape a Python library path out of and hand
+			// back as a "detected" compose root, rc=0. The JSON-shape
+			// guard (cfg must START with '{'/'[') is what stops this:
+			// the overall stdout still starts with "Traceback ...", so
+			// the whole answer is rejected before either grep pattern
+			// ever runs, regardless of what text appears later in it.
+			name: "traceback shape with embedded fake sharedfolderref/path/uuid JSON, exit 0",
+			stub: "#!/bin/sh\ncat <<'TB'\n" +
+				`Traceback (most recent call last):
+  File "/usr/sbin/omv-confdbadm", line 76, in <module>
+    main()
+  "sharedfolderref": "11111111-1111-1111-1111-111111111111"
+  File "/usr/lib/python3/dist-packages/openmediavault/config/database.py", line 388, in _load
+    {"path": "/usr/lib/python3/dist-packages", "uuid": "11111111-1111-1111-1111-111111111111"}
+SystemExit: Failed to load the configuration database` +
+				"\nTB\nexit 0\n",
+		},
 	}
 
 	for _, c := range cases {
@@ -1888,6 +1966,107 @@ SystemExit: Failed to load the configuration database`
 		}
 	}
 	logPass(t, "PASS C12 (omv-confdbadm fails ugly: traceback on stdout or stderr, or non-JSON success output, all degrade to unknown)")
+}
+
+// TestContainer_C12_OmvConfdbadmSecondCallFailureChecked: the first
+// omv-confdbadm call (conf.service.compose) can succeed cleanly while
+// the second (conf.system.sharedfolder, resolving the uuid to a path)
+// fails — a real, distinct failure mode (e.g. a database lock, a
+// concurrent OMV UI edit) from the "not root at all" case the other
+// test covers. Both calls' exit status must be checked independently;
+// reviewer flagged this as unverified after 61e6eba.
+func TestContainer_C12_OmvConfdbadmSecondCallFailureChecked(t *testing.T) {
+	name := "sentinel-c12-confdbadm-secondcall-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("mkdir -p /usr/sbin")
+
+	stub := `#!/bin/sh
+if [ "$2" = "conf.service.compose" ]; then
+  printf '{"sharedfolderref":"11111111-1111-1111-1111-111111111111"}\n'
+  exit 0
+elif [ "$2" = "conf.system.sharedfolder" ]; then
+  echo "Traceback (most recent call last): second call failed" >&2
+  exit 1
+fi
+`
+	if out, errOut, code := exec_("cat > /usr/sbin/omv-confdbadm <<'STUB'\n" + stub + "STUB\nchmod +x /usr/sbin/omv-confdbadm"); code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm second call failure): stub setup failed: %s %s", out, errOut)
+	}
+
+	// No structural candidate anywhere, and the config lookup's second
+	// call always fails — the only correct outcome is the plain
+	// /opt/sentinel fallback, never a guessed path.
+	out, _, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm second call failure): --dry-run exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "stack directory: /opt/sentinel") {
+		t.Errorf("FAIL C12 (omv-confdbadm second call failure): expected the conventional /opt/sentinel fallback when the second call fails, got: %s", out)
+	}
+	if strings.Contains(out, "layout: omv") {
+		t.Errorf("FAIL C12 (omv-confdbadm second call failure): a failed second call must never produce an omv layout: %s", out)
+	}
+	logPass(t, "PASS C12 (omv-confdbadm second call failure: checked independently, degrades to unknown)")
+}
+
+// TestContainer_C12_OmvConfdbadmRealisticPrettyPrintedJSON: the earlier
+// config-fallback test's stub emits {"uuid":...,"path":...} on ONE
+// line — the only shape a line-adjacency `grep -B2` can match. Real
+// `omv-confdbadm read` output was not confirmed to be formatted that
+// way (root access to check was declined on the live host), so this
+// drives the parser against a DELIBERATELY harder, still-plausible
+// shape instead: pretty-printed, multi-line, with "path" appearing
+// BEFORE "uuid" in the same object and several lines apart — the shape
+// the flattened single-object match (order- and distance-independent)
+// exists to handle, and the shape the original line-adjacency grep
+// could not have matched at all.
+func TestContainer_C12_OmvConfdbadmRealisticPrettyPrintedJSON(t *testing.T) {
+	name := "sentinel-c12-confdbadm-prettyprint-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+	exec_("mkdir -p /usr/sbin")
+
+	const realRoot = "/srv/dev-disk-by-uuid-realprettyprint/docker-compose"
+	stub := `#!/bin/sh
+if [ "$2" = "conf.service.compose" ]; then
+  cat <<'JSON'
+{
+    "enabled": true,
+    "sharedfolderref": "11111111-1111-1111-1111-111111111111"
+}
+JSON
+elif [ "$2" = "conf.system.sharedfolder" ]; then
+  cat <<'JSON'
+[
+    {
+        "enabled": true,
+        "path": "` + realRoot + `",
+        "reldirpath": "docker-compose/",
+        "uuid": "11111111-1111-1111-1111-111111111111"
+    }
+]
+JSON
+fi
+`
+	if out, errOut, code := exec_("mkdir -p " + realRoot + " && cat > /usr/sbin/omv-confdbadm <<'STUB'\n" + stub + "STUB\nchmod +x /usr/sbin/omv-confdbadm"); code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm pretty-printed): stub setup failed: %s %s", out, errOut)
+	}
+
+	// realRoot has no siblings (structural detection is inconclusive),
+	// so only a correctly parsed config answer can produce omv here.
+	out, _, code := exec_("/work/install.sh --dry-run 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (omv-confdbadm pretty-printed): --dry-run exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "stack directory: "+realRoot+"/sentinel") || !strings.Contains(out, "layout: omv") {
+		t.Errorf("FAIL C12 (omv-confdbadm pretty-printed): pretty-printed, path-before-uuid JSON was not parsed correctly: %s", out)
+	}
+	logPass(t, "PASS C12 (omv-confdbadm pretty-printed: order- and distance-independent parsing confirmed against a harder, still-plausible shape)")
 }
 
 // TestContainer_C12_DryRunVerbAudit: every "note" line that describes an
@@ -2067,6 +2246,101 @@ func TestContainer_C12_StackMutualExclusion(t *testing.T) {
 		t.Fatalf("FAIL C12 (stack mutual exclusion): exit=%d, want 64: %s %s", code, out, errOut)
 	}
 	logPass(t, "PASS C12 (stack mutual exclusion: --env-file + --stack-dir rejected)")
+}
+
+// TestContainer_C12_MailriseConfHostileSecrets: BLOCKER — mailrise.conf
+// was rendered with `sed -e "s/REPLACE_X/${value}/g"`, and sed's
+// replacement text is not literal: `/` collides with the s///
+// delimiter (the expression itself breaks), and `&` means "the whole
+// match" (spliced into the substitution, silently corrupting the
+// credential). Measured against a real run before the fix: a password
+// containing `/` crashed sed and left a ZERO-BYTE mailrise.conf that
+// the summary still reported as "written"; a password containing `&`
+// produced no error at all (exit 0) while mailrise.conf held
+// "sentinel: SecretREPLACE_SMTP_PASSPass" instead of the real password
+// — the .env and mailrise.conf copies of the SAME credential silently
+// disagreeing, which is exactly what makes mailrise reject AUTH from
+// the supervisor, smartd and ZED while `sentinel health` stays green.
+//
+// The fix takes sed out of this substitution entirely (bash
+// `${var//pat/rep}`, whose replacement text has no delimiter or `&`
+// semantics) and adds a fail-closed post-condition (no leftover
+// REPLACE_ token survives to be written). This test is deliberately
+// NOT an escaping test — escaping is a blocklist someone always finds
+// a gap in — it exercises the actual invariant: the credential in the
+// stack's env file and the credential rendered into mailrise.conf must
+// be byte-identical, for values containing every character the
+// original bug depended on plus the ones most likely to reveal a
+// sibling bug in the same substitution mechanism.
+func TestContainer_C12_MailriseConfHostileSecrets(t *testing.T) {
+	name := "sentinel-c12-hostile-secrets-test"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 90*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	longValue := strings.Repeat("x-long-secret-", 15) // 210 chars
+	cases := []struct {
+		name string
+		pass string
+	}{
+		{"slash", "p/a/s/s"},
+		{"ampersand", "Secret&Pass"},
+		{"slash and ampersand together (the exact reported repro)", "p/a$s&word"},
+		{"backslash", `back\slash\pass`},
+		{"dollar", "dollar$sign$pass"},
+		{"backtick", "back`tick`pass"},
+		{"double quote", `double"quote"pass`},
+		{"single quote", "single'quote'pass"},
+		{"spaces", "pass with spaces in it"},
+		{"leading dash", "-leading-dash-pass"},
+		{"long value", longValue},
+		{"kitchen sink", "p/a$s&w`d\"q'uo te-x" + longValue},
+	}
+
+	for i, c := range cases {
+		stackDir := fmt.Sprintf("/opt/hostile%d", i)
+		token := fmt.Sprintf("TOKEN%d", i)
+		chat := fmt.Sprintf("-100%d", i)
+		envSetup := fmt.Sprintf(`mkdir -p %s && cat > %s/.env <<'ENVEOF'
+TELEGRAM_BOT_TOKEN=%s
+TELEGRAM_CHAT_ID=%s
+MAILRISE_SMTP_USER=sentinel
+MAILRISE_SMTP_PASS=%s
+ENVEOF`, stackDir, stackDir, token, chat, c.pass)
+		if out, errOut, code := exec_(envSetup); code != 0 {
+			t.Fatalf("FAIL C12 (hostile secrets, %s): env setup failed: %s %s", c.name, out, errOut)
+		}
+
+		out, errOut, code := exec_("/work/install.sh --stack-dir " + stackDir + " 2>&1")
+		if code != 0 && code != 75 {
+			t.Fatalf("FAIL C12 (hostile secrets, %s): exit=%d (want 0 or 75): %s %s", c.name, code, out, errOut)
+		}
+
+		mailriseConf, _, _ := exec_("cat " + stackDir + "/mailrise/mailrise.conf 2>&1")
+		if mailriseConf == "" {
+			t.Errorf("FAIL C12 (hostile secrets, %s): mailrise.conf is empty: %s", c.name, out)
+			continue
+		}
+		if strings.Contains(mailriseConf, "REPLACE_") {
+			t.Errorf("FAIL C12 (hostile secrets, %s): mailrise.conf still contains an unreplaced REPLACE_ token: %s", c.name, mailriseConf)
+		}
+		// The actual invariant: byte-identical between the two places
+		// this credential now lives, not merely "some substitution
+		// happened". This is what neither of the reviewer's two
+		// reproduced runs had.
+		if !strings.Contains(mailriseConf, c.pass) {
+			t.Errorf("FAIL C12 (hostile secrets, %s): mailrise.conf does not contain the password byte-for-byte %q: %s", c.name, c.pass, mailriseConf)
+		}
+		envContent, _, _ := exec_("cat " + stackDir + "/.env 2>&1")
+		if !strings.Contains(envContent, "MAILRISE_SMTP_PASS="+c.pass) {
+			t.Errorf("FAIL C12 (hostile secrets, %s): .env does not carry the password unchanged: %s", c.name, envContent)
+		}
+		if strings.Contains(out, "mailrise.conf: written") && mailriseConf == "" {
+			t.Errorf("FAIL C12 (hostile secrets, %s): summary claims \"written\" for an empty file: %s", c.name, out)
+		}
+	}
+	logPass(t, "PASS C12 (mailrise.conf hostile secrets: byte-identical credential in .env and mailrise.conf for every hostile value, never a silent-success corruption)")
 }
 
 // TestContainer_C12_StackInteractiveSecrets: with a real controlling
