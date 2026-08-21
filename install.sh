@@ -515,32 +515,15 @@ prompt_with_default() {
 # case `stty -g` fails (returns empty, skipped): masking best-effort,
 # never letting a masking failure block capturing the value correctly.
 prompt_secret() {
-  local val="" ch stty_orig=""
+  local val=""
   printf '%s' "$1" > /dev/tty
-  stty_orig="$(stty -g < /dev/tty 2>/dev/null)"
-  if [ -n "$stty_orig" ]; then
-    stty -echo < /dev/tty 2>/dev/null
-  fi
-  while IFS= read -r -s -n 1 ch < /dev/tty; do
-    if [ -z "$ch" ]; then
-      break
-    fi
-    case "$ch" in
-      $'\x7f' | $'\x08')
-        if [ -n "$val" ]; then
-          val="${val%?}"
-          printf '\b \b' > /dev/tty
-        fi
-        ;;
-      *)
-        val="${val}${ch}"
-        printf '*' > /dev/tty
-        ;;
-    esac
-  done
-  if [ -n "$stty_orig" ]; then
-    stty "$stty_orig" < /dev/tty 2>/dev/null
-  fi
+  # read -rs, not a character-at-a-time loop echoing asterisks. The masked
+  # version lost characters on a pty under CI: the first prompt read
+  # correctly, the next two lost their input and the script then waited for
+  # input that never came until the harness killed it. Feedback while typing
+  # is worth having, but not at the cost of a credential arriving truncated,
+  # and this value is written into two files that must match byte for byte.
+  IFS= read -rs val < /dev/tty
   printf '\n' > /dev/tty
   printf '%s' "$val"
 }
