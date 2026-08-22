@@ -2251,6 +2251,22 @@ omv_rpc_bin() {
   command -v omv-rpc 2>/dev/null
 }
 
+# omv_admin_user, the name omv-rpc will accept as an administrator. It
+# grants OMV_ROLE_ADMINISTRATOR only when the name given to -u matches the
+# platform's configured web administrator, and OMV_ROLE_USER to anything
+# else, so a hardcoded "admin" is refused with "Invalid context role" on
+# every host that renamed it. Read from the platform's own defaults, which
+# this script already sources for the new-object uuid, and only falls back
+# to the same literal omv-rpc itself falls back to.
+omv_admin_user() {
+  local name=""
+  if [ -r /etc/default/openmediavault ]; then
+    name="$(grep -E '^[[:space:]]*OMV_WEBGUI_ADMINUSER_NAME=' /etc/default/openmediavault 2>/dev/null | tail -n1 | cut -d= -f2-)"
+    name="$(strip_quotes "$name")"
+  fi
+  printf '%s' "${name:-admin}"
+}
+
 # step7 points OpenMediaVault's own notification email at mailrise, which is
 # the delivery path on a host where msmtp has no role at all: OMV already
 # mails through the transport it installed, mailrise already carries a route
@@ -2284,9 +2300,27 @@ step7() {
     return
   fi
 
-  cur="$("$bin" -u admin "EmailNotification" "get" '{}' 2>/dev/null)"
+  local admin err errfile
+  admin="$(omv_admin_user)"
+
+  # omv-rpc's contract, from its own source: on success the bare response
+  # object goes to stdout and it exits 0; on failure a
+  # {"response":null,"error":{...}} wrapper goes to STDERR and it exits 1.
+  # So the exit status is the signal and stderr carries the reason, and the
+  # first version of this discarded both, reporting every failure as the
+  # same generic "could not read the current settings". On a real host that
+  # turned a one-word fix into a round trip to diagnose. A diagnostic that
+  # hides the diagnosis is worse than none.
+  errfile="$(mktemp)" || return
+  if ! cur="$("$bin" -u "$admin" "EmailNotification" "get" '{}' 2>"$errfile")"; then
+    err="$(tr '\n' ' ' < "$errfile" | cut -c1-300)"
+    rm -f "$errfile"
+    note "step7 platform notification email: skipped, omv-rpc refused the read as '$admin'${err:+: $err}"
+    return
+  fi
+  rm -f "$errfile"
   if [ -z "$cur" ]; then
-    note "step7 platform notification email: skipped, could not read the current settings"
+    note "step7 platform notification email: skipped, omv-rpc returned nothing for the current settings"
     return
   fi
 
@@ -2340,7 +2374,7 @@ step7() {
 
   # stdout is discarded rather than shown: the call echoes the stored object
   # back, password included.
-  if out="$("$bin" -u admin "EmailNotification" "set" "$payload" 2>&1 >/dev/null)"; then
+  if out="$("$bin" -u "$admin" "EmailNotification" "set" "$payload" 2>&1 >/dev/null)"; then
     note "step7 platform notification email: pointed at mailrise on ${MAILRISE_HOST}:${MAILRISE_PORT}, addressed to omv@mailrise.xyz"
     changed=$((changed+1))
   else

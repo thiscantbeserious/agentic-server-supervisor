@@ -4436,8 +4436,22 @@ func TestContainer_C12_PlatformNotificationEmail(t *testing.T) {
 	// other call, so a write can be asserted on by what was attempted rather
 	// than by trusting the summary line to describe itself honestly.
 	rpcStub := func(getJSON string) string {
-		return `mkdir -p /usr/sbin && cat > /usr/sbin/omv-rpc <<'STUB'
+		// Models omv-rpc's real contract: the bare object on stdout with
+		// exit 0 on success, and the {"response":null,"error":{...}} wrapper
+		// on STDERR with exit 1 on failure. It also enforces the same role
+		// rule the real binary does, granting administrator only to the name
+		// in OMV_WEBGUI_ADMINUSER_NAME, which is what caught a hardcoded
+		// "admin" being refused as "Invalid context role" on a real host.
+		return `mkdir -p /usr/sbin /etc/default
+printf 'OMV_WEBGUI_ADMINUSER_NAME="webadmin"\n' > /etc/default/openmediavault
+cat > /usr/sbin/omv-rpc <<'STUB'
 #!/bin/sh
+user=""
+if [ "$1" = "-u" ]; then user="$2"; fi
+if [ "$user" != "webadmin" ]; then
+  echo '{"response":null,"error":{"code":0,"message":"Invalid context role."}}' >&2
+  exit 1
+fi
 for a in "$@"; do last="$a"; done
 if [ "$last" = "{}" ]; then
   cat <<'JSON'
@@ -4598,5 +4612,39 @@ chmod +x /usr/sbin/omv-rpc`
 			t.Errorf("FAIL: step7 reported missing credentials that are present in the env file: %s", out)
 		}
 		logPass(t, "PASS C12 (platform notification email: independent of msmtp)")
+	})
+
+	t.Run("reports why omv-rpc refused instead of hiding it", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-notify-refused"
+		startC12Container(t, name)
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		// A stub that refuses everything, the way the real binary refuses a
+		// caller whose -u name is not the configured web administrator.
+		prep := `mkdir -p /usr/sbin && cat > /usr/sbin/omv-rpc <<'STUB'
+#!/bin/sh
+echo '{"response":null,"error":{"code":0,"message":"Invalid context role."}}' >&2
+exit 1
+STUB
+chmod +x /usr/sbin/omv-rpc
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+		if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+
+		out, _, _ := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+		if !strings.Contains(out, "omv-rpc refused the read") {
+			t.Errorf("FAIL: a refused read was not reported as a refusal: %s", out)
+		}
+		// The reason has to survive into the summary. The first version of
+		// this step discarded stderr and reported every failure identically,
+		// which on a real host meant the cause could not be read off the run
+		// that hit it.
+		if !strings.Contains(out, "Invalid context role") {
+			t.Errorf("FAIL: the reason omv-rpc gave was swallowed: %s", out)
+		}
+		logPass(t, "PASS C12 (platform notification email: a refused read reports why)")
 	})
 }
