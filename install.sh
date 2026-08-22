@@ -873,6 +873,36 @@ compose_root_looks_omv() {
   return 1
 }
 
+# port_answers BIND PORT, true when something is already listening there.
+# A bash /dev/tcp connect rather than ss or lsof: neither is guaranteed on a
+# minimal host, and this asks the question that actually matters, whether a
+# connection to the address the container would publish on succeeds. A
+# listener on 0.0.0.0 answers on 127.0.0.1 too, so it is caught; one bound
+# only to a different interface does not block this bind and is correctly
+# ignored.
+port_answers() {
+  (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null
+}
+
+# apprise_default_port BIND, the first port in a bounded range that nothing
+# answers on. Published ports are first-come on a host running more than one
+# compose project, and 8000 is a popular choice: on the target host
+# restic-rest-server already held it, so a hardcoded default meant the
+# container could not bind and the seed posted its credentials to whoever
+# had. Chosen once and written to the env file, never re-picked, so a
+# service that appears later cannot silently move sentinel's port.
+#
+# Bounded, and it says so when the range is exhausted rather than searching
+# forever or returning something it has not checked.
+apprise_default_port() {
+  local bind="$1" p
+  for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008 8009; do
+    port_answers "$bind" "$p" || { printf '%s' "$p"; return 0; }
+  done
+  printf '8000'
+  return 1
+}
+
 # omv_confdbadm_bin, locates the omv-confdbadm binary without trusting
 # a bare name on PATH: it lives at /usr/sbin/omv-confdbadm, not
 # /usr/bin, and a normal user's PATH does not include /usr/sbin at all.
@@ -1514,6 +1544,19 @@ step0b_secrets() {
   set_env_default MAILRISE_SMTP_USER "$smtp_user"
   set_env_default MAILRISE_SMTP_PASS "$smtp_pass"
   set_env_default APPRISE_BIND "127.0.0.1"
+  # Published host port, discovered rather than assumed. Not reserved, and
+  # first-come on a host running more than one compose project. Only the
+  # DEFAULT is discovered: set_env_default leaves an existing value alone,
+  # so a port already recorded here stays put and an operator's own choice
+  # is never second-guessed.
+  local apprise_bind apprise_port
+  apprise_bind="$(env_var_value "$ENV_FILE" APPRISE_BIND)"; [ -n "$apprise_bind" ] || apprise_bind="127.0.0.1"
+  if apprise_port="$(apprise_default_port "$apprise_bind")"; then
+    [ "$apprise_port" = "8000" ] || note "apprise port: 8000 is already in use on $apprise_bind, using $apprise_port instead"
+  else
+    note "apprise port: every port from 8000 to 8009 is in use on $apprise_bind, defaulting to 8000; set APPRISE_PORT in $ENV_FILE to a free one or apprise will not start"
+  fi
+  set_env_default APPRISE_PORT "$apprise_port"
   set_env_default MAILRISE_BIND "127.0.0.1"
   set_env_default APPRISE_PUID "1000"
   set_env_default APPRISE_PGID "1000"
@@ -2470,12 +2513,14 @@ report_sensors() {
 # `docker compose up -d`) and that re-running this script afterward is
 # what completes it.
 step_apprise_seed() {
-  local bind key token chat endpoint
+  local bind port key token chat endpoint status_url
   bind="$(env_var_value "$ENV_FILE" APPRISE_BIND)"; [ -n "$bind" ] || bind="127.0.0.1"
+  port="$(env_var_value "$ENV_FILE" APPRISE_PORT)"; [ -n "$port" ] || port="8000"
   key="$(env_var_value "$ENV_FILE" APPRISE_KEY)"; [ -n "$key" ] || key="sentinel"
   token="$(env_var_value "$ENV_FILE" TELEGRAM_BOT_TOKEN)"
   chat="$(env_var_value "$ENV_FILE" TELEGRAM_CHAT_ID)"
-  endpoint="http://${bind}:8000/add/${key}"
+  endpoint="http://${bind}:${port}/add/${key}"
+  status_url="http://${bind}:${port}/status"
 
   if [ -z "$token" ] || [ -z "$chat" ]; then
     note "apprise seed: skipped, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not both set in $ENV_FILE yet"
@@ -2489,6 +2534,24 @@ step_apprise_seed() {
 
   if [ "$DOCKER_OK" -ne 1 ] || [ "$COMPOSE_OK" -ne 1 ]; then
     note "apprise seed: skipped, docker/compose not ready (see docker preflight above); install docker, run 'docker compose up -d' in the stack directory, then re-run this script to seed apprise"
+    return
+  fi
+
+  # Who is listening is established BEFORE the token is sent. A published
+  # port is first-come on a host that runs more than one compose project,
+  # and this one is not reserved: on the target host another project's
+  # container already held 8000, so this posted "tgram://TOKEN/CHAT_ID" to
+  # a stranger, which answered 401 and may well have logged the body. The
+  # only thing that made it survivable was that the token was already being
+  # rotated for an unrelated reason.
+  #
+  # /status is apprise-api's own endpoint, the one the compose file's
+  # healthcheck already uses, so this asks the service to identify itself
+  # rather than guessing from a port number. It does not prove the instance
+  # is OURS, another apprise on the same port would pass, but it does rule
+  # out handing a credential to something that is not apprise at all.
+  if ! curl -fsS --max-time 5 -o /dev/null "$status_url" 2>/dev/null; then
+    note "apprise seed: skipped, nothing identifying itself as apprise answered $status_url, so the Telegram credentials were NOT sent. If the stack is up, check whether another service already holds port ${port} (ss -ltnp) and set APPRISE_PORT in $ENV_FILE to a free one"
     return
   fi
 

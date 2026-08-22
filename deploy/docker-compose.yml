@@ -119,7 +119,7 @@ services:
       - apprise-config:/config
     ports:
       # LAN-bound, never 0.0.0.0: this endpoint can send messages as you.
-      - "${APPRISE_BIND:-127.0.0.1}:8000:8000"
+      - "${APPRISE_BIND:-127.0.0.1}:${APPRISE_PORT:-8000}:8000"
     networks: [sentinel-net]
     healthcheck:
       # /status is served by apprise-api itself; no shell, no $$ interpolation.

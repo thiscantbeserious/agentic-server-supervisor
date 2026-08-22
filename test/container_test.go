@@ -4035,6 +4035,9 @@ for a in "$@"; do
   prev="$a"
 done
 case "$*" in
+  # The seed identifies the listener before sending the token. In this
+  # scenario apprise is up, so its own /status endpoint answers.
+  *"/status"*) exit 0 ;;
   *"/add/"*) : > "$out"; printf '%s' "200"; exit 0 ;;
 esac
 exit 7
@@ -4080,6 +4083,10 @@ for a in "$@"; do
   prev="$a"
 done
 case "$*" in
+  # apprise is up and identifies itself; the 204 below is what this test is
+  # actually about, a registration that reports success while storing
+  # nothing.
+  *"/status"*) exit 0 ;;
   *"/add/"*) : > "$out"; printf '%s' "204"; exit 0 ;;
 esac
 exit 7
@@ -4646,5 +4653,162 @@ printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test
 			t.Errorf("FAIL: the reason omv-rpc gave was swallowed: %s", out)
 		}
 		logPass(t, "PASS C12 (platform notification email: a refused read reports why)")
+	})
+}
+
+// TestContainer_C12_AppriseSeedVerifiesEndpointBeforeSending: a published
+// port is first-come on a host running more than one compose project, and
+// this one is not reserved. On the target host another project's container
+// already held 8000, so the seed posted "tgram://TOKEN/CHAT_ID" to a
+// stranger, which answered 401 and may well have logged the body.
+//
+// The credential must not leave the host until something identifies itself
+// as apprise on /status, the endpoint the compose file's own healthcheck
+// already uses.
+func TestContainer_C12_AppriseSeedVerifiesEndpointBeforeSending(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		statusCode string
+		wantSent   bool
+		wantPhrase string
+	}{
+		{
+			name:       "no apprise on the port",
+			statusCode: "1", // curl -f fails, as it would against a 401 or a stranger
+			wantSent:   false,
+			wantPhrase: "were NOT sent",
+		},
+		{
+			name:       "apprise answers status",
+			statusCode: "0",
+			wantSent:   true,
+			wantPhrase: "apprise seed",
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			name := "sentinel-c12-apprise-verify-" + strings.ReplaceAll(c.name, " ", "-")
+			startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+
+			// The stub separates the two calls the seed makes: the identity
+			// probe against /status, and the registration that carries the
+			// token. Whatever reaches /add is recorded verbatim, so the test
+			// asserts on what actually left the host rather than on the
+			// summary's description of it.
+			curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+for a in "$@"; do last="$a"; done
+case "$last" in
+  */status)
+    exit ` + c.statusCode + `
+    ;;
+esac
+cat >> /root/add-body 2>/dev/null
+echo "$@" >> /root/add-args
+printf '200'
+exit 0
+CURLEOF
+chmod +x /usr/local/bin/curl`
+			if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
+				t.Fatalf("FAIL: could not install stubs: %s %s", out, errOut)
+			}
+
+			out, _, _ := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+
+			body, _, _ := c12AppriseExec(t, name, "cat /root/add-body 2>/dev/null || true")
+			args, _, _ := c12AppriseExec(t, name, "cat /root/add-args 2>/dev/null || true")
+			sent := strings.Contains(body, "SECRETTOK1") || strings.Contains(args, "SECRETTOK1")
+
+			if sent != c.wantSent {
+				t.Errorf("FAIL: token sent = %v, want %v. body=%q args=%q summary=%s", sent, c.wantSent, body, args, out)
+			}
+			if !strings.Contains(out, c.wantPhrase) {
+				t.Errorf("FAIL: want %q in the summary: %s", c.wantPhrase, out)
+			}
+			if !c.wantSent {
+				// The reason has to name the port, since the fix is to move
+				// off it and nothing else in the output says which one failed.
+				if !strings.Contains(out, "APPRISE_PORT") {
+					t.Errorf("FAIL: the refusal does not say how to change the port: %s", out)
+				}
+				// And it must never print the token while explaining itself.
+				if strings.Contains(out, "SECRETTOK1") {
+					t.Errorf("FAIL: the token appeared in install.sh output: %s", out)
+				}
+			}
+			logPass(t, "PASS C12 (apprise seed verifies the endpoint: %s)", c.name)
+		})
+	}
+}
+
+// TestContainer_C12_AppriseePortDiscovery: apprise's published port is not
+// reserved, and on a host running more than one compose project it is
+// first-come. On the target host restic-rest-server already held 8000, so a
+// hardcoded default meant the container could not bind and the seed posted
+// its credentials to whatever had.
+//
+// Two properties, and the second matters as much as the first: an occupied
+// port is skipped, and a port already recorded in the env file is never
+// re-picked, so a service appearing later cannot silently move sentinel.
+func TestContainer_C12_AppriseePortDiscovery(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips a port something is already listening on", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-port-occupied"
+		startC12Container(t, name)
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		if out, _, code := exec_("command -v nc"); code != 0 {
+			skipUnlessCI(t, "C12 (port discovery): nc is not available in this image: %s", out)
+		}
+		// A real listener on 8000, the way restic-rest-server holds it.
+		if out, errOut, code := exec_(systemctlOKStub + "\nnohup nc -l -k 127.0.0.1 8000 >/dev/null 2>&1 & sleep 1; echo started"); code != 0 {
+			t.Fatalf("FAIL: could not start a listener: %s %s", out, errOut)
+		}
+
+		out, _, code := exec_("bash /work/install.sh --dry-run --stack-dir /root/stack 2>&1")
+		if code != 0 && code != 75 && code != 78 {
+			t.Fatalf("FAIL: --dry-run exit=%d: %s", code, out)
+		}
+		if !strings.Contains(out, "8000 is already in use") {
+			t.Errorf("FAIL: an occupied 8000 was not reported: %s", out)
+		}
+		if !strings.Contains(out, "using 8001 instead") {
+			t.Errorf("FAIL: discovery did not move to the next free port: %s", out)
+		}
+		logPass(t, "PASS C12 (apprise port discovery: an occupied port is skipped)")
+	})
+
+	t.Run("never re-picks a port already recorded", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-port-recorded"
+		startC12Container(t, name)
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		// An operator's own choice, or an earlier run's. Either way it stands,
+		// even though nothing is listening on 8000 and discovery would
+		// otherwise have picked it.
+		prep := `mkdir -p /root/stack && printf 'APPRISE_PORT=9317\n' > /root/stack/.env`
+		if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+
+		out, _, _ := exec_("bash /work/install.sh --dry-run --env-file /root/stack/.env 2>&1")
+		if strings.Contains(out, "is already in use") {
+			t.Errorf("FAIL: discovery ran even though a port was already recorded: %s", out)
+		}
+		after, _, _ := exec_("grep '^APPRISE_PORT=' /root/stack/.env")
+		if !strings.Contains(after, "9317") {
+			t.Errorf("FAIL: a recorded port was overwritten: %s", after)
+		}
+		logPass(t, "PASS C12 (apprise port discovery: a recorded port is left alone)")
 	})
 }

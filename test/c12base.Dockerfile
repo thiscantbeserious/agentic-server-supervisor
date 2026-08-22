@@ -16,8 +16,15 @@
 FROM debian:trixie-slim AS base
 
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends systemd curl ca-certificates \
+ && apt-get install -y -qq --no-install-recommends systemd curl ca-certificates netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
+
+# netcat-openbsd exists so a test can hold a port open. install.sh picks
+# apprise's published port by connecting to candidates and taking the first
+# that does not answer, and without something able to LISTEN there is no way
+# to assert it skips an occupied one: bash's /dev/tcp is a client only. The
+# alternative was verifying that path by hand on a developer machine, which
+# is worth what the last such check was worth.
 
 # ca-certificates is spelled out explicitly, not left to curl's own
 # dependency chain: it is a Recommends of curl in Debian, not a hard
