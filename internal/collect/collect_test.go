@@ -56,8 +56,13 @@ const procNetHeader = "  sl  local_address rem_address   st tx_queue rx_queue tr
 func newTree(t *testing.T) tree {
 	t.Helper()
 	tr := tree{
-		journalDir:    t.TempDir(),
-		journalVolDir: t.TempDir(),
+		// Journal directories, so they have to look like journal
+		// directories: journal.Dirs() now requires at least one .journal
+		// file, because Docker creates the source of a bind mount when it
+		// is missing and an empty directory is not a journal that failed to
+		// be read, it is not a journal.
+		journalDir:    journalTestDir(t),
+		journalVolDir: journalTestDir(t),
 		hostProc:      t.TempDir(),
 		hostRoot:      t.TempDir(),
 		hostRasdaemon: t.TempDir(),
@@ -1386,4 +1391,16 @@ func keysOfChips(m map[string]any) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// journalTestDir returns a temp directory shaped like a journal directory.
+// The file's contents do not matter; the stubbed journalctl reads the
+// fixtures placed alongside it.
+func journalTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "system.journal"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

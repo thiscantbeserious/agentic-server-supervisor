@@ -197,6 +197,18 @@ RUN apt-get update && \
 RUN groupadd --gid 10001 sentinel && \
     useradd --uid 10001 --gid 10001 --home-dir /home/sentinel --create-home --shell /usr/sbin/nologin sentinel
 
+# /state exists in the IMAGE, owned by the user the container runs as, even
+# though the compose file mounts a volume over it. That is the entire point:
+# Docker initialises a fresh named volume from the image's directory, taking
+# its ownership and mode with it. Without this the mountpoint does not exist
+# in the image, so the volume is created root-owned, the container runs as
+# 10001, and every tick fails with "state dir not writable" on a filesystem
+# nothing in the container can chown, because the rest of it is read_only.
+#
+# It cost a full deployment to learn: the supervisor ran for twenty minutes
+# on the target host without completing a single tick.
+RUN mkdir -p /state && chown 10001:10001 /state && chmod 0700 /state
+
 COPY --from=builder --chown=root:root --chmod=0555 /out/sentinel /usr/local/bin/sentinel
 COPY --from=builder --chown=root:root --chmod=0555 /out/agy /usr/local/bin/agy
 

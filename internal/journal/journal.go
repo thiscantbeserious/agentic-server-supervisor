@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,18 +75,50 @@ type DirError struct {
 func (e *DirError) Error() string { return e.Dir + ": " + e.Err.Error() }
 func (e *DirError) Unwrap() error { return e.Err }
 
-// Dirs returns the subset of paths that exist as directories.
+// Dirs returns the subset of paths that are journal directories: they
+// exist, and they contain at least one .journal file, which systemd stores
+// one level down under a machine-id directory.
+//
+// Existence alone is not enough, and the difference is not theoretical. A
+// host with persistent journal storage has no /run/log/journal, but the
+// compose file bind-mounts it anyway and Docker CREATES the source as an
+// empty directory when it is missing. That empty directory then looks like
+// a journal to a plain stat, journalctl is run against it, and it answers
+// "No journal files were found." with a non-zero status. The section
+// survives, since another directory succeeded, but every tick on every
+// such host carries a collector error that describes nothing wrong.
+//
+// A directory with no journal files in it is not a journal that failed to
+// be read. It is not a journal.
 func Dirs(paths ...string) []string {
 	var out []string
 	for _, p := range paths {
 		if p == "" {
 			continue
 		}
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			out = append(out, p)
+		fi, err := os.Stat(p)
+		if err != nil || !fi.IsDir() {
+			continue
 		}
+		if !hasJournalFiles(p) {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
+}
+
+// hasJournalFiles reports whether dir holds any .journal file, directly or
+// one level down. Both layouts are checked rather than assuming the
+// machine-id subdirectory: journalctl accepts either, and a directory
+// handed over by --directory is not required to be laid out the way
+// /var/log/journal is.
+func hasJournalFiles(dir string) bool {
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.journal")); len(matches) > 0 {
+		return true
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "*", "*.journal"))
+	return len(matches) > 0
 }
 
 // Run execs journalctl once per dir, decodes the JSON stream, normalizes,

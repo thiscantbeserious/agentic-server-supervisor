@@ -637,6 +637,28 @@ jobs:
           # established, kept as the form known to work.
           docker run --rm --entrypoint /bin/sh "$IMAGE" -c '/usr/local/bin/agy --version'
 
+          # A FRESH named volume over /state, as the unprivileged user the
+          # compose file runs this image as, read-only root filesystem and
+          # all. Docker initialises a new volume from the image's directory
+          # and takes its ownership with it, so this passes only while
+          # /state exists in the image owned by 10001.
+          #
+          # Without it the volume is created root-owned, every tick fails
+          # with "state dir not writable", and nothing in a read_only
+          # container can repair it. That shipped, and was found by reading
+          # the logs of a real deployment that had not completed a single
+          # tick in twenty minutes. Every check above passed the whole time:
+          # they run the image WITHOUT the volume that production gives it.
+          VOL="smoke-state-${{ matrix.arch }}-$$"
+          docker volume create "$VOL" >/dev/null
+          if ! docker run --rm --read-only --user 10001:10001 -v "$VOL":/state \
+                 --entrypoint /bin/sh "$IMAGE" -c 'touch /state/.writable && rm /state/.writable'; then
+            echo "/state is not writable by the user this image runs as; a fresh volume would land root-owned" >&2
+            docker volume rm "$VOL" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker volume rm "$VOL" >/dev/null
+
       - name: Export this architecture's digest
         if: github.event_name != 'pull_request'
         run: |
