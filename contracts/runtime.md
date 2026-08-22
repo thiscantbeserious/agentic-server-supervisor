@@ -123,7 +123,9 @@ sentinel health
    - `/tmp` writable, at least one of `$HOST_JOURNAL_DIR` / `$HOST_JOURNAL_VOLATILE_DIR` readable and non-empty, `$HOST_PROC/uptime` readable, any miss ⇒ `ERROR` naming the exact path ⇒ exit `78`.
    There is no prompt/schema path check: both are embedded.
 3. Assert `/usr/local/bin` is not writable (proves `read_only: true` took effect). Writable ⇒ `WARN`, continue, never block ticks on a lint.
-4. Seed agy home: `MkdirAll($AGY_HOME, 0700)`, copy `$AGY_SECRET_DIR` **recursively** into `$AGY_HOME/.gemini` (directories `0700`, regular files `0600`, symlinks skipped), `os.Setenv("HOME", $AGY_HOME)`. Missing or empty secret dir ⇒ `WARN runtime agy credentials absent, analysis will fall back`, continue: the raw-alert path must survive without the LLM.
+4. Seed agy home: `MkdirAll($AGY_HOME, 0700)`, copy `$AGY_SECRET_DIR` **recursively** into `$AGY_HOME/.gemini` (directories `0700`, regular files `0600`, symlinks skipped, **files already present at the destination are left alone**), `os.Setenv("HOME", $AGY_HOME)`. Missing or empty secret dir ⇒ `WARN runtime agy credentials absent, analysis will fall back`, continue: the raw-alert path must survive without the LLM.
+
+   Bootstrap only, never re-imposed: agy owns `$AGY_HOME` once it runs. It refreshes its OAuth token there, and keeps `antigravity-cli/conversation_summaries.db` and `antigravity-cli/brain/` there. Copying the host tree over that on every start would replace a refreshed token with the host's older one, where no agy runs to keep it current, and would delete accumulated memory on a restart. Re-seeding after the operator authenticates again on the host is therefore explicit: remove `$AGY_HOME/.gemini` and restart.
 
    Recursive, and into `.gemini`, because that is agy's actual layout: every top-level entry of `~/.gemini` is a directory (`antigravity-cli/`, `config/`) and the credential is `antigravity-cli/antigravity-oauth-token`. The earlier "regular files only, into `$AGY_HOME`" wording described a flat credential file that does not exist, so an implementation obeying it copied nothing and, because the directory was not empty, warned about nothing.
 

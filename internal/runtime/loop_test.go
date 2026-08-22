@@ -278,3 +278,67 @@ func TestSeedAgyHome_CopiesCredentialTree(t *testing.T) {
 		}
 	}
 }
+
+// TestSeedAgyHome_DoesNotClobberContainerState pins that seeding
+// bootstraps and never re-imposes.
+//
+// seedAgyHome runs on every container start, and agy owns $AGY_HOME once
+// it is running: it refreshes its OAuth token there, and writes
+// conversation_summaries.db and antigravity-cli/brain/ (its memory) there.
+// Copying the host tree over that on each start would silently replace a
+// refreshed token with the older one from the host, where no agy runs to
+// keep it current, and would delete accumulated memory on a restart.
+//
+// Bootstrapping is still needed, so files MISSING at the destination are
+// still copied: a crash halfway through the first seed must be able to
+// complete on the next start.
+func TestSeedAgyHome_DoesNotClobberContainerState(t *testing.T) {
+	secret := t.TempDir()
+	home := filepath.Join(t.TempDir(), "agy-home")
+
+	cliDir := filepath.Join(secret, "antigravity-cli")
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// What the host holds: the token as it was when the operator logged in.
+	if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte("STALE-HOST-TOKEN"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "settings.json"), []byte(`{"seeded":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// What the container already has: a refreshed token and memory that
+	// exist only here.
+	destCLI := filepath.Join(home, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(destCLI, "brain"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destCLI, "antigravity-oauth-token"), []byte("REFRESHED-IN-CONTAINER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destCLI, "brain", "memory.bin"), []byte("ACCUMULATED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seedAgyHome(&config.Config{AgyHome: home, AgySecretDir: secret}, &capturingWarner{})
+
+	tok, err := os.ReadFile(filepath.Join(destCLI, "antigravity-oauth-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tok) != "REFRESHED-IN-CONTAINER" {
+		t.Errorf("token = %q, want the container's refreshed one: seeding replaced a current token with the host's older copy", tok)
+	}
+	mem, err := os.ReadFile(filepath.Join(destCLI, "brain", "memory.bin"))
+	if err != nil {
+		t.Fatalf("agy's memory did not survive a restart: %v", err)
+	}
+	if string(mem) != "ACCUMULATED" {
+		t.Errorf("memory = %q, want ACCUMULATED", mem)
+	}
+	// Bootstrapping still has to work for what is genuinely missing.
+	if _, err := os.Stat(filepath.Join(destCLI, "settings.json")); err != nil {
+		t.Errorf("a file absent from the destination was not seeded: %v", err)
+	}
+}

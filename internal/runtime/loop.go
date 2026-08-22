@@ -209,6 +209,18 @@ func copyTree(src, dst string) error {
 		case !d.Type().IsRegular():
 			return nil
 		default:
+			// Bootstrap only. agy owns $AGY_HOME once it runs: it
+			// refreshes its token there and keeps
+			// conversation_summaries.db and antigravity-cli/brain/
+			// there. Re-copying the host tree on every start would
+			// replace a refreshed token with the older host copy,
+			// where no agy runs to keep it current, and would delete
+			// accumulated memory on a restart. What is missing is
+			// still copied, so a first seed interrupted halfway
+			// completes on the next start.
+			if _, serr := os.Stat(target); serr == nil {
+				return nil
+			}
 			return copyFile(path, target)
 		}
 	})
