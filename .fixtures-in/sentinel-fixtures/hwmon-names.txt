@@ -1,8 +1,0 @@
-# produced by: sh -c for d in /sys/class/hwmon/hwmon*; do [ -r "$d/name" ] && echo "$(basename "$d")=$(cat "$d/name")"; done
-hwmon0=nvme
-hwmon1=nvme
-hwmon2=nvme
-hwmon3=pch_cannonlake
-hwmon4=jc42
-hwmon5=jc42
-hwmon6=coretemp
