@@ -105,19 +105,36 @@ func historyProjectionLines(hist []report.Report) []string {
 	return lines
 }
 
-func newestHistory(hist []report.Report) *report.Report {
-	if len(hist) == 0 {
-		return nil
+// newestEligible walks hist (oldest first) from the end backward and
+// returns the newest entry that is not a degraded fallback tick. A
+// degraded entry never looked at the world, so it carries no information
+// about whether a finding open before it is still open, "compare against
+// it anyway" is indistinguishable from "assume nothing changed" for every
+// finding the outage didn't touch, exactly the #39 defect. The second
+// return value is true when hist was non-empty but every entry in it was
+// degraded, the walk-back's residual limit (contracts/analyze.md §6 step
+// 7): the caller logs that case, it is the one where the orphaning this
+// fix targets can still happen.
+func newestEligible(hist []report.Report) (*report.Report, bool) {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if !isDegraded(hist[i]) {
+			return &hist[i], false
+		}
 	}
-	return &hist[len(hist)-1]
+	return nil, len(hist) > 0
 }
 
-// computeResolved returns which of the previous report's findings are gone
-// this tick, as their 16-hex dedup.Key (contracts/analyze.md §6 step 7,
-// CONTRACTS.md C5/C6). Computed in Go, overwriting whatever the model
-// emitted: set arithmetic over data we already hold does not belong in a
-// probabilistic component. Only the newest report is compared, anything
-// older was already announced resolved.
+func isDegraded(r report.Report) bool {
+	return r.Meta != nil && r.Meta.Degraded
+}
+
+// computeResolved returns which of the previous eligible report's findings
+// are gone this tick, as their 16-hex dedup.Key (contracts/analyze.md §6
+// step 7, CONTRACTS.md C5/C6). Computed in Go, overwriting whatever the
+// model emitted: set arithmetic over data we already hold does not belong
+// in a probabilistic component. newest is chosen by newestEligible, the
+// newest entry that is not a degraded fallback tick, never unconditionally
+// the newest entry, a degraded entry was skipped over on the way here.
 //
 // Keys, not evidence: evidence used to be truncated to 80 runes because
 // findings have no headline of their own, which made two alerts agreeing
