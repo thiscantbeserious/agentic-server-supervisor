@@ -1352,12 +1352,13 @@ func TestKernelPartialDirectoryFailureStaysHealthy(t *testing.T) {
 // with real input, which made the section's coverage indistinguishable from
 // having none.
 //
-// The chip set in testdata/sensors-hwmon.json is the one the target host
-// actually exposes through /sys/class/hwmon, three NVMe controllers, two
-// JC42 DIMM sensors, the PCH and coretemp. The readings are representative
-// rather than captured, because lm-sensors is not installed on that host
-// until install.sh puts it there; the chip names are what matter for the
-// section, and those are real.
+// testdata/sensors-hwmon.json is now `sensors -j` captured from the target
+// host, not written from an idea of what that host exposes. The difference
+// was not cosmetic: the hand-written version asserted nvme-pci-0100 and
+// jc42-i2c-0-1b, neither of which exists there. The real controllers are
+// nvme-pci-0200/0300/0400 and the DIMM sensors are jc42-i2c-0-18 and
+// jc42-i2c-0-1a. A fixture invented alongside the parser agrees with the
+// parser and with nothing else.
 func TestSensorsChipsReachFacts(t *testing.T) {
 	tr := newTree(t)
 	cfg := newConfig(t, tr)
@@ -1377,7 +1378,7 @@ func TestSensorsChipsReachFacts(t *testing.T) {
 	if len(f.Sensors.Data.Chips) == 0 {
 		t.Fatal("sensors chips are empty: the fixture never reached the parser, so this test proves nothing about real input")
 	}
-	for _, want := range []string{"coretemp-isa-0000", "nvme-pci-0100", "jc42-i2c-0-1a", "pch_cannonlake-virtual-0"} {
+	for _, want := range []string{"coretemp-isa-0000", "nvme-pci-0200", "jc42-i2c-0-18", "jc42-i2c-0-1a", "pch_cannonlake-virtual-0"} {
 		if _, ok := f.Sensors.Data.Chips[want]; !ok {
 			t.Errorf("sensors chip %q missing; got %v", want, keysOfChips(f.Sensors.Data.Chips))
 		}
@@ -1403,4 +1404,75 @@ func journalTestDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// TestCapturedHostJournalsReachFacts runs the collector over journal output
+// captured from the target host, rather than over lines written to match
+// what the parser already does.
+//
+// Every fixture in this package began as something plausible somebody typed.
+// That is how a sensors fixture came to name two chips the host does not
+// have, and how journal directories came to be empty temp dirs, a shape no
+// real journal directory has. Invented input agrees with the parser by
+// construction and proves nothing about the machine being watched.
+//
+// smartd on that host emits roughly two hundred lines per boot about drives
+// it opened and attributes it cannot monitor, all PRIORITY 6, and zed emits
+// pool_import events at boot. Both are the ordinary, high-volume traffic the
+// section has to survive, which is exactly what a hand-written fixture never
+// contains.
+func TestCapturedHostJournalsReachFacts(t *testing.T) {
+	tr := newTree(t)
+	cfg := newConfig(t, tr)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(wd, "testdata", "real")
+	for _, name := range []string{"smart.jsonl", "zed.jsonl", "kernel.jsonl"} {
+		b, err := os.ReadFile(filepath.Join(real, name))
+		if err != nil {
+			t.Fatalf("captured fixture %s unreadable: %v", name, err)
+		}
+		mustWrite(t, filepath.Join(tr.journalDir, name), string(b))
+	}
+	t.Setenv("SENSORS_FIXTURE", filepath.Join(wd, "testdata", "sensors-hwmon.json"))
+
+	f, err := Run(context.Background(), Options{Cfg: cfg, Seq: 1})
+	if err != nil {
+		t.Fatalf("collect.Run: %v", err)
+	}
+
+	for _, c := range []struct {
+		name string
+		err  string
+		n    int
+	}{
+		{"smart", f.Smart.Err, len(f.Smart.Data.Entries)},
+		{"zfs", f.ZFS.Err, len(f.ZFS.Data.Events)},
+		{"kernel", f.Kernel.Err, len(f.Kernel.Data.Entries)},
+	} {
+		if c.err != "" {
+			t.Errorf("%s section errored on captured host output: %s", c.name, c.err)
+		}
+		if c.n == 0 {
+			t.Errorf("%s section is empty: the captured journal never reached the parser", c.name)
+		}
+	}
+
+	// The scrubbing must not have destroyed the fields the parser reads.
+	// An earlier version of capture-fixtures.sh replaced every 16-digit
+	// journal timestamp with the literal "GUID", which would leave these
+	// entries parseable and worthless.
+	for _, e := range f.Smart.Data.Entries {
+		if e.TS == "" {
+			t.Fatalf("captured smartd entry has no timestamp, scrubbing ate __REALTIME_TIMESTAMP: %+v", e)
+		}
+		if e.Identifier != "smartd" {
+			t.Fatalf("captured smartd entry has identifier %q, want smartd: %+v", e.Identifier, e)
+		}
+	}
+	if !strings.Contains(f.ZFS.Data.Events[0].Message, "pool") {
+		t.Errorf("first captured zed event does not mention a pool: %q", f.ZFS.Data.Events[0].Message)
+	}
 }
