@@ -300,13 +300,21 @@ jobs:
           go-version-file: go.mod
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
+      - name: Load the pinned agy release
+        # deploy/agy-pin.env is the ONLY place AGY_VERSION/AGY_URL_*/
+        # AGY_SHA512_* are defined (see that file for why agy is pinned
+        # at all). GITHUB_ENV makes each line a real process env var for
+        # every later step in this job, which is all the go test step
+        # below needs, no per-step env: mapping required.
+        run: cat deploy/agy-pin.env >> "$GITHUB_ENV"
+
       - name: go test -tags container -race
-        # AGY_URL_*/AGY_SHA512_* from repository variables, never
-        # hardcoded here, same values the build job's build-args use.
-        # Set, they make buildSentinelImage() build this job's test
-        # image from the REAL vendor artifact instead of the synthetic
-        # fixture, for every case in this run, not only the ones gated
-        # on SENTINEL_REAL_AGY.
+        # AGY_URL_*/AGY_SHA512_* come from the step above, same values
+        # the build job's build-args use (deploy/agy-pin.env). Set, they
+        # make buildSentinelImage() build this job's test image from the
+        # REAL vendor artifact instead of the synthetic fixture, for
+        # every case in this run, not only the ones gated on
+        # SENTINEL_REAL_AGY.
         #
         # SENTINEL_REAL_AGY=1 additionally runs TestContainer_RealAgyBuild,
         # which downloads and builds against the real tarball directly
@@ -320,10 +328,6 @@ jobs:
         # whoever owns that secret. It stays gated and uncovered by
         # this job.
         env:
-          AGY_URL_AMD64: ${{ vars.AGY_URL_AMD64 }}
-          AGY_SHA512_AMD64: ${{ vars.AGY_SHA512_AMD64 }}
-          AGY_URL_ARM64: ${{ vars.AGY_URL_ARM64 }}
-          AGY_SHA512_ARM64: ${{ vars.AGY_SHA512_ARM64 }}
           SENTINEL_REAL_AGY: "1"
         # -parallel 4: every TestContainer_* now calls t.Parallel (see
         # test/container_test.go's package comment). 4 matches this
@@ -591,6 +595,12 @@ jobs:
         id: image
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
 
+      - name: Load the pinned agy release
+        # deploy/agy-pin.env is the ONLY place AGY_VERSION/AGY_URL_*/
+        # AGY_SHA512_* are defined; GITHUB_ENV makes each line available
+        # to the build-args below through the env context.
+        run: cat deploy/agy-pin.env >> "$GITHUB_ENV"
+
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
@@ -607,11 +617,11 @@ jobs:
           # single-architecture image even transiently.
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           build-args: |
-            AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}
-            AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}
-            AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}
-            AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}
-            AGY_VERSION=${{ vars.AGY_VERSION }}
+            AGY_URL_AMD64=${{ env.AGY_URL_AMD64 }}
+            AGY_SHA512_AMD64=${{ env.AGY_SHA512_AMD64 }}
+            AGY_URL_ARM64=${{ env.AGY_URL_ARM64 }}
+            AGY_SHA512_ARM64=${{ env.AGY_SHA512_ARM64 }}
+            AGY_VERSION=${{ env.AGY_VERSION }}
             VERSION=${{ github.sha }}
           cache-from: type=gha,scope=build-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
