@@ -169,10 +169,20 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w", errAgyTimeout)
 	}
+	// Checked BEFORE runErr, because agy exits 0 when it has no
+	// credentials. Measured on the target host:
+	//
+	//	Error: authentication required. Run 'agy' to log in, then retry.
+	//	{"status":"ERROR","error":"authentication failed or timed out",...}
+	//	exit 0
+	//
+	// Guarding this behind runErr != nil made the branch unreachable and
+	// sent an unauthenticated run downstream as malformed output, so the
+	// operator saw a schema fault where the truth was "log in".
+	if isAgyAuthFailure(agyErr.String()) || isAgyAuthFailure(out.String()) {
+		return nil, fmt.Errorf("%w: stderr %d bytes", errAgyUnauth, agyErr.Len())
+	}
 	if runErr != nil {
-		if isAgyAuthFailure(agyErr.String()) {
-			return nil, fmt.Errorf("%w: stderr %d bytes", errAgyUnauth, agyErr.Len())
-		}
 		return nil, fmt.Errorf("%w: %v (stderr %d bytes)", errAgyFailed, runErr, agyErr.Len())
 	}
 	return out.Bytes(), nil
@@ -181,9 +191,14 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 // isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
 // text itself is never logged, log lines must not carry subprocess output,
 // only this in-process check reads it.
-func isAgyAuthFailure(stderr string) bool {
-	return strings.Contains(stderr, "Authentication required") ||
-		strings.Contains(stderr, "accounts.google.com/o/oauth2")
+func isAgyAuthFailure(s string) bool {
+	// Case-insensitive: the binary writes "authentication required", the
+	// matcher was written for "Authentication required", and the mismatch
+	// meant the phrase never matched the phrase.
+	l := strings.ToLower(s)
+	return strings.Contains(l, "authentication required") ||
+		strings.Contains(l, "authentication failed or timed out") ||
+		strings.Contains(l, "accounts.google.com/o/oauth2")
 }
 
 // minimalAgyEnv builds the minimal env passed to agy: PATH, HOME(=AGY_HOME),
