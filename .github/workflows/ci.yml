@@ -260,8 +260,14 @@ jobs:
           docker logs e2e-apprise 2>&1 | tail -100 || true
           docker logs e2e-mailrise 2>&1 | tail -100 || true
 
-  # The C1-C13 container suite, run once per architecture on a runner
+  # The C1-C13 integration suite, run once per architecture on a runner
   # NATIVE to it, never both inside one job, never under emulation.
+  #
+  # Named for what it does rather than for how it does it: containers are
+  # the mechanism, integration is the point. Every other job here is named
+  # for its subject (lint, test, e2e, build), and "container" invited the
+  # reading that this is a check ON the container image, which is the
+  # build job's smoke step, not this.
   # Architecture is the matrix's job, not this suite's or the runner's:
   # test/container_test.go takes its own arch from runtime.GOARCH, which
   # is exactly the platform this job's runner actually is.
@@ -276,7 +282,7 @@ jobs:
   # several minutes and downloads real artifacts over the network; no
   # reason to spend that on a push where `go vet` or a unit test is
   # already broken.
-  container:
+  integration:
     needs: [test, changes]
     if: needs.changes.outputs.code == 'true'
     strategy:
@@ -286,7 +292,7 @@ jobs:
           - { platform: linux/amd64, arch: amd64, runner: ubuntu-24.04 }
           - { platform: linux/arm64, arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
@@ -294,7 +300,7 @@ jobs:
           go-version-file: go.mod
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - name: go test -tags container
+      - name: go test -tags container -race
         # AGY_URL_*/AGY_SHA512_* from repository variables, never
         # hardcoded here, same values the build job's build-args use.
         # Set, they make buildSentinelImage() build this job's test
@@ -326,7 +332,15 @@ jobs:
         # each start a full Debian container with an apt-get install
         # inside, so going well past the CPU count risks piling up
         # memory and daemon contention instead of buying real overlap.
-        run: go test -tags container -parallel 4 -v -timeout 25m ./test/...
+        #
+        # -race because this is the only suite where the Go test process
+        # itself is concurrent: every TestContainer_* runs under
+        # t.Parallel and they share helpers, temp dirs and the docker
+        # client. A data race here corrupts one case's evidence with
+        # another's, which reads as a flake rather than as a bug, and this
+        # job has produced exactly one unexplained flake that both
+        # architectures hit in the same run.
+        run: go test -tags container -race -parallel 4 -v -timeout 40m ./test/...
 
   # install.sh runs as root on a real host and configures it, apt
   # dependency resolution, systemd, real packages. None of that exists
@@ -741,7 +755,7 @@ jobs:
     # the publish, not just report on it afterward.
     # Every job here must stay unconditional: a skipped dependency skips this
     # job too, which would leave a green run with no manifest list published.
-    needs: [build, container, e2e, lint]
+    needs: [build, integration, e2e, lint]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
