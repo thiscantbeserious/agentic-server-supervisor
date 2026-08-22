@@ -37,7 +37,7 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 		return nil, reason, err
 	}
 
-	logger.Info("triage invalid, retrying")
+	logger.Info("triage invalid, retrying", "error", err)
 	correction, cerr := buildCorrection(err.Error())
 	if cerr != nil {
 		return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
@@ -114,14 +114,22 @@ func classifyAgyErr(err error) string {
 }
 
 // buildFallback wraps Fallback with re-validation and the log line
-// operators grep for during an outage.
-func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, logger *slog.Logger) *report.Report {
+// operators grep for during an outage. cause is the concrete error that
+// drove this tick to a fallback (a parse/validate error, a missing binary,
+// a timeout, ...); every call site already holds one, since Run only ever
+// calls buildFallback alongside a non-nil error return. Logging it here,
+// not just the reason code, is what makes an invalid_json/schema_invalid
+// occurrence self-diagnosing: the reason code alone cannot distinguish a
+// wrapped answer from a truncated one from a schema violation, and C7
+// permits it, cause is the validator's own message, never prompt or facts
+// content or agy stdout.
+func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, cause error, logger *slog.Logger) *report.Report {
 	rep := Fallback(cfg, seq, reason, f)
 	if raw, err := json.Marshal(rep); err == nil {
 		if v, verr := report.Validate(raw); verr == nil {
 			rep = v
 		}
 	}
-	logger.Warn("fallback report built", "reason", reason)
+	logger.Warn("fallback report built", "reason", reason, "error", cause)
 	return rep
 }

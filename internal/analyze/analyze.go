@@ -111,7 +111,8 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	// but the alternative is a nil-pointer panic on the first call below,
 	// treat it the same as agy being missing rather than crashing.
 	if d.RunAgy == nil {
-		return buildFallback(cfg, o.Seq, "agy_missing", o.Facts, logger), errors.New("analyze: Deps.RunAgy is nil")
+		runAgyNilErr := errors.New("analyze: Deps.RunAgy is nil")
+		return buildFallback(cfg, o.Seq, "agy_missing", o.Facts, runAgyNilErr, logger), runAgyNilErr
 	}
 
 	// internal_error (not agy_failed) below: these paths fail before agy
@@ -119,7 +120,8 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	// a 3am reader to check agy's health for a fault that is ours.
 	nonce, err := newNonce()
 	if err != nil {
-		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: nonce: %w", err)
+		wrapped := fmt.Errorf("analyze: nonce: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, wrapped, logger), wrapped
 	}
 
 	// The resolved set is output-only: it needs this tick's findings, which
@@ -156,7 +158,8 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 
 	triagePrompt, err := buildTriagePrompt(cfg, o.Facts, histLines, nonce)
 	if err != nil {
-		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: assemble triage: %w", err)
+		wrapped := fmt.Errorf("analyze: assemble triage: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, wrapped, logger), wrapped
 	}
 
 	promptPath := filepath.Join(cfg.TmpDir, fmt.Sprintf("sentinel-prompt-%d.txt", pid))
@@ -164,10 +167,12 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 	cleanup = append(cleanup, promptPath, schemaPath)
 
 	if err := os.WriteFile(promptPath, []byte(triagePrompt), 0o600); err != nil {
-		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write prompt: %w", err)
+		wrapped := fmt.Errorf("analyze: write prompt: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, wrapped, logger), wrapped
 	}
 	if err := os.WriteFile(schemaPath, report.SchemaJSON, 0o600); err != nil {
-		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, logger), fmt.Errorf("analyze: write schema: %w", err)
+		wrapped := fmt.Errorf("analyze: write schema: %w", err)
+		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, wrapped, logger), wrapped
 	}
 
 	rep, reason, err := runTriage(ctx, o, d, promptPath, schemaPath, triagePrompt, logger)
@@ -176,7 +181,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 			// A shutdown is not an analyzer failure: author no report.
 			return nil, err
 		}
-		return buildFallback(cfg, o.Seq, reason, o.Facts, logger), err
+		return buildFallback(cfg, o.Seq, reason, o.Facts, err, logger), err
 	}
 
 	// Inject keys, meta and resolved; drop any model-supplied

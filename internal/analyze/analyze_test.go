@@ -530,6 +530,74 @@ func TestRun_BrokenJSON_RetryThenFallback(t *testing.T) {
 	}
 }
 
+// TestRun_BrokenJSON_RetryLogsValidatorError closes a real diagnostic gap:
+// runTriage held the concrete parse/validate error and discarded it, so
+// "triage invalid, retrying" gave a 3am reader no way to tell a wrapped
+// answer from a truncated one from a schema violation. The retry log line
+// must carry that error's text.
+func TestRun_BrokenJSON_RetryLogsValidatorError(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub("not json", "not json")}
+
+	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d); err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	line := findLogLine(t, buf.String(), "triage invalid, retrying")
+	if !strings.Contains(line, "error=") {
+		t.Fatalf("retry log line carries no error attribute: %q", line)
+	}
+	if strings.Contains(line, "error=\"\"") || strings.HasSuffix(strings.TrimSpace(line), "error=") {
+		t.Fatalf("retry log line's error attribute is empty: %q", line)
+	}
+}
+
+// TestRun_BrokenJSON_FallbackLogsValidatorError is the fallback-side half
+// of the same gap: "fallback report built" carried only the reason code,
+// never the validator's own message, the one piece of evidence that would
+// have told an operator whether agy wrapped its answer in prose, truncated
+// it, or violated a schema constraint (repro'd live: agy's own multi-turn
+// self-correction concatenates prior turns into "response", not a fence or
+// truncation issue at all, and only the discarded validator error says so).
+func TestRun_BrokenJSON_FallbackLogsValidatorError(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub("not json", "still not json")}
+
+	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d); err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	line := findLogLine(t, buf.String(), "fallback report built")
+	if !strings.Contains(line, "reason=invalid_json") {
+		t.Fatalf("fallback log line missing reason=invalid_json: %q", line)
+	}
+	if !strings.Contains(line, "error=") {
+		t.Fatalf("fallback log line carries no error attribute: %q", line)
+	}
+	if strings.Contains(line, "error=\"\"") || strings.HasSuffix(strings.TrimSpace(line), "error=") {
+		t.Fatalf("fallback log line's error attribute is empty: %q", line)
+	}
+}
+
+// findLogLine returns the single line of captured output containing want,
+// failing the test if there is not exactly one, so a guard cannot silently
+// pass by matching zero lines.
+func findLogLine(t *testing.T, output, want string) string {
+	t.Helper()
+	var matches []string
+	for _, l := range strings.Split(output, "\n") {
+		if strings.Contains(l, want) {
+			matches = append(matches, l)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one log line containing %q, got %d: %s", want, len(matches), output)
+	}
+	return matches[0]
+}
+
 func TestRun_BrokenJSON_RetrySucceeds(t *testing.T) {
 	cfg := newTestConfig(t)
 	rec := &agyRecorder{}
