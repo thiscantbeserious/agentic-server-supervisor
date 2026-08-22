@@ -342,3 +342,68 @@ func TestSeedAgyHome_DoesNotClobberContainerState(t *testing.T) {
 		t.Errorf("a file absent from the destination was not seeded: %v", err)
 	}
 }
+
+// TestSeedAgyHome_WritesToolDenyPolicy pins that the container imposes its
+// own tool policy on agy, overriding whatever the operator's desktop
+// settings say.
+//
+// agy is an agent, not a completion API: mid-analysis it decides to run
+// shell commands. In --print mode there is nobody to approve them, so the
+// turn dies and the envelope comes back status ERROR with an empty
+// response, which the report parser then reports as invalid JSON.
+// Measured on the target host:
+//
+//	error: permission check failed for command "ls -la":
+//	       user denied permission to run command: ls -la
+//
+// With a deny rule configured, the same prompt returns status SUCCESS and a
+// valid report: the model answers instead of reaching for a shell.
+//
+// This is also the security property the project already claims elsewhere.
+// The analyzer's input is attacker-controlled log text; a tool call it can
+// be talked into is a prompt injection with a shell on the end of it. The
+// policy is therefore written unconditionally, not merged in only when
+// absent, and not left to whatever settings.json the host happened to have.
+func TestSeedAgyHome_WritesToolDenyPolicy(t *testing.T) {
+	secret := t.TempDir()
+	home := filepath.Join(t.TempDir(), "agy-home")
+	cliDir := filepath.Join(secret, "antigravity-cli")
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The operator's own settings, carrying a key worth preserving and no
+	// permission block at all.
+	if err := os.WriteFile(filepath.Join(cliDir, "settings.json"),
+		[]byte(`{"enableTelemetry":false,"trustedWorkspaces":["/home/doh"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	seedAgyHome(&config.Config{AgyHome: home, AgySecretDir: secret}, &capturingWarner{})
+
+	raw, err := os.ReadFile(filepath.Join(home, ".gemini", "antigravity-cli", "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json missing from AGY_HOME: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("settings.json is not valid JSON: %v", err)
+	}
+	perm, ok := got["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("no permission block written; settings = %s", raw)
+	}
+	deny, ok := perm["deny"].([]any)
+	if !ok || len(deny) == 0 {
+		t.Fatalf("no deny rules written; permission = %v", perm)
+	}
+	var denied string
+	for _, d := range deny {
+		denied += d.(string) + " "
+	}
+	if !strings.Contains(denied, "run_command(*)") {
+		t.Errorf("shell execution is not denied; deny = %v", deny)
+	}
+	if got["enableTelemetry"] != false {
+		t.Errorf("the operator's other settings were discarded; got %v", got)
+	}
+}
