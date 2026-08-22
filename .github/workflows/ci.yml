@@ -303,10 +303,15 @@ jobs:
       - name: Load the pinned agy release
         # deploy/agy-pin.env is the ONLY place AGY_VERSION/AGY_URL_*/
         # AGY_SHA512_* are defined (see that file for why agy is pinned
-        # at all). GITHUB_ENV makes each line a real process env var for
-        # every later step in this job, which is all the go test step
-        # below needs, no per-step env: mapping required.
-        run: cat deploy/agy-pin.env >> "$GITHUB_ENV"
+        # at all). $GITHUB_ENV's file-command format accepts only bare
+        # KEY=value lines and fails the step outright on anything else,
+        # so the comments that file exists to carry cannot be piped into
+        # it directly; deploy/agy-pin-load.sh filters and validates
+        # first (run it standalone to check the pin file without a
+        # runner). GITHUB_ENV then makes each line a real process env
+        # var for every later step in this job, which is all the go
+        # test step below needs, no per-step env: mapping required.
+        run: deploy/agy-pin-load.sh
 
       - name: go test -tags container -race
         # AGY_URL_*/AGY_SHA512_* come from the step above, same values
@@ -596,10 +601,12 @@ jobs:
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
 
       - name: Load the pinned agy release
-        # deploy/agy-pin.env is the ONLY place AGY_VERSION/AGY_URL_*/
-        # AGY_SHA512_* are defined; GITHUB_ENV makes each line available
-        # to the build-args below through the env context.
-        run: cat deploy/agy-pin.env >> "$GITHUB_ENV"
+        # deploy/agy-pin-load.sh filters and validates deploy/agy-pin.env
+        # before it reaches $GITHUB_ENV (see the container-test job's
+        # copy of this step for why a bare cat cannot be used here).
+        # GITHUB_ENV makes each line available to the build-args below
+        # through the env context.
+        run: deploy/agy-pin-load.sh
 
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
