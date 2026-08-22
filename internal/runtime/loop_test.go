@@ -407,3 +407,57 @@ func TestSeedAgyHome_WritesToolDenyPolicy(t *testing.T) {
 		t.Errorf("the operator's other settings were discarded; got %v", got)
 	}
 }
+
+// TestSeedAgyHome_UnreadableFileDoesNotAbortSeed pins that one file the
+// container cannot read does not cost it the credential.
+//
+// The mounted tree is agy's whole state directory, not a credential store:
+// caches, a conversation database, a bundled browser helper. Its files are
+// owned by the operator, and only some carry a group the container shares,
+// so an unreadable cache entry is normal. Aborting the walk on it meant a
+// file with no bearing on authentication could stop the token from being
+// seeded, which is what happened on the target host:
+//
+//	could not seed agy credentials, analysis will fall back
+//	error=open /run/secrets/agy/antigravity-cli/cache/last_conversations.json: permission denied
+func TestSeedAgyHome_UnreadableFileDoesNotAbortSeed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test depends on")
+	}
+	secret := t.TempDir()
+	home := filepath.Join(t.TempDir(), "agy-home")
+
+	cliDir := filepath.Join(secret, "antigravity-cli")
+	cacheDir := filepath.Join(cliDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Sorts before the token, so an aborting walk never reaches it.
+	unreadable := filepath.Join(cacheDir, "last_conversations.json")
+	if err := os.WriteFile(unreadable, []byte("{}"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "zz-token-sorts-last"), []byte("TOKEN"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &capturingWarner{}
+	seedAgyHome(&config.Config{AgyHome: home, AgySecretDir: secret}, w)
+
+	got, err := os.ReadFile(filepath.Join(home, ".gemini", "antigravity-cli", "zz-token-sorts-last"))
+	if err != nil {
+		t.Fatalf("a readable credential was not seeded because another file was unreadable: %v", err)
+	}
+	if string(got) != "TOKEN" {
+		t.Errorf("seeded content = %q, want TOKEN", got)
+	}
+	var named bool
+	for _, m := range w.msgs {
+		if strings.Contains(m, "unreadable") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the skipped file was not reported; warnings were %v", w.msgs)
+	}
+}

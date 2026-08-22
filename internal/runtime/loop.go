@@ -181,10 +181,14 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 	}
 
 	dst := filepath.Join(cfg.AgyHome, ".gemini")
-	if err := copyTree(cfg.AgySecretDir, dst); err != nil {
-		// Partial copies are worse than none: agy would report an auth
-		// failure whose cause is this, not the credential.
+	if skipped, err := copyTree(cfg.AgySecretDir, dst); err != nil {
 		logger.Warn("runtime could not seed agy credentials, analysis will fall back", "error", err)
+	} else if len(skipped) > 0 {
+		// Named, not silent: if the token was among them the operator
+		// needs to know which file to make readable, and if it was not
+		// then this is noise about a cache entry and says so.
+		logger.Warn("runtime skipped unreadable files while seeding agy credentials",
+			"count", len(skipped), "files", strings.Join(skipped, ","))
 	}
 	if err := writeAgyToolPolicy(dst); err != nil {
 		logger.Warn("runtime could not write agy tool policy", "error", err)
@@ -248,8 +252,9 @@ func writeAgyToolPolicy(geminiDir string) error {
 // The source is a read-only mount, so nothing here writes back to it.
 // Symlinks are skipped rather than followed, a credential mount is not a
 // place to chase links out of.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+func copyTree(src, dst string) ([]string, error) {
+	var skipped []string
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -276,9 +281,25 @@ func copyTree(src, dst string) error {
 			if _, serr := os.Stat(target); serr == nil {
 				return nil
 			}
-			return copyFile(path, target)
+			// A file the container cannot read must not cost it the
+			// credential. This mount is agy's whole state directory,
+			// caches and a conversation database included, owned by
+			// the operator with only some files carrying a group the
+			// container shares. On the target host an unreadable
+			// cache entry aborted the walk before the token was
+			// reached.
+			if cerr := copyFile(path, target); cerr != nil {
+				if errors.Is(cerr, fs.ErrPermission) {
+					rel, _ := filepath.Rel(src, path)
+					skipped = append(skipped, rel)
+					return nil
+				}
+				return cerr
+			}
+			return nil
 		}
 	})
+	return skipped, err
 }
 
 // copyFile streams src to dst at mode 0600, creating the parent.
