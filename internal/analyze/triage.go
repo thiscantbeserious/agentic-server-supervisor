@@ -6,6 +6,7 @@
 package analyze
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,7 +38,7 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 		return nil, reason, err
 	}
 
-	logger.Info("triage invalid, retrying")
+	logger.Info("triage invalid, retrying", "error", err)
 	correction, cerr := buildCorrection(err.Error())
 	if cerr != nil {
 		return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
@@ -83,14 +84,29 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	// response, or zero input_tokens is a dropped prompt (agy_empty), not
 	// a model that legitimately said nothing. Only after this check does
 	// normalisation/decoding touch the model's own answer.
-	response, everr := decodeAgyEnvelope(out)
+	response, structuredOutput, everr := decodeAgyEnvelope(out)
 	if everr != nil {
 		return nil, "agy_empty", fmt.Errorf("analyze: agy attempt %d: %w", attempt, everr)
+	}
+
+	// structured_output, when present, is agy's own schema-validated
+	// result: prefer it over response, which a newer agy can pollute by
+	// concatenating every internal self-correction turn into one string
+	// (found live 2026-08-22, contracts/analyze.md §6 step 4). Still run
+	// it through report.Validate, no exemption for having come from the
+	// cleaner field. Absent, empty, or invalid ⇒ fall through to response
+	// unchanged, the path an agy without this field always takes.
+	if trimmed := bytes.TrimSpace(structuredOutput); len(trimmed) > 0 {
+		if rep, verr := report.Validate(trimmed); verr == nil {
+			logger.Info("triage", "attempt", attempt, "via", "structured_output")
+			return rep, "", nil
+		}
 	}
 
 	normalized := normalizeAgyOutput([]byte(response))
 	rep, verr := report.Validate(normalized)
 	if verr == nil {
+		logger.Info("triage", "attempt", attempt, "via", "response")
 		return rep, "", nil
 	}
 	reason := "invalid_json"
@@ -114,14 +130,22 @@ func classifyAgyErr(err error) string {
 }
 
 // buildFallback wraps Fallback with re-validation and the log line
-// operators grep for during an outage.
-func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, logger *slog.Logger) *report.Report {
+// operators grep for during an outage. cause is the concrete error that
+// drove this tick to a fallback (a parse/validate error, a missing binary,
+// a timeout, ...); every call site already holds one, since Run only ever
+// calls buildFallback alongside a non-nil error return. Logging it here,
+// not just the reason code, is what makes an invalid_json/schema_invalid
+// occurrence self-diagnosing: the reason code alone cannot distinguish a
+// wrapped answer from a truncated one from a schema violation, and C7
+// permits it, cause is the validator's own message, never prompt or facts
+// content or agy stdout.
+func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, cause error, logger *slog.Logger) *report.Report {
 	rep := Fallback(cfg, seq, reason, f)
 	if raw, err := json.Marshal(rep); err == nil {
 		if v, verr := report.Validate(raw); verr == nil {
 			rep = v
 		}
 	}
-	logger.Warn("fallback report built", "reason", reason)
+	logger.Warn("fallback report built", "reason", reason, "error", cause)
 	return rep
 }
