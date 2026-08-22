@@ -2796,7 +2796,7 @@ func TestContainer_C12_MailriseConfHostileSecrets(t *testing.T) {
 
 	for i, c := range cases {
 		stackDir := fmt.Sprintf("/opt/hostile%d", i)
-		token := fmt.Sprintf("TOKEN%d", i)
+		token := fmt.Sprintf("12345678%d:TOKEN%d", i, i)
 		chat := fmt.Sprintf("-100%d", i)
 		envSetup := fmt.Sprintf(`mkdir -p %s && cat > %s/.env <<'ENVEOF'
 TELEGRAM_BOT_TOKEN=%s
@@ -3080,7 +3080,7 @@ func TestContainer_C12_StackInteractiveSecrets(t *testing.T) {
 		"printf 'services: {}\\n' > /docker-compose/existingstack/existingstack.yml && " +
 		"ln -sfn existingstack.yml /docker-compose/existingstack/compose.yml")
 
-	const token = "TESTTOKEN_ABCDEF"
+	const token = "123456789:TESTTOKEN_ABCDEF"
 	const chat = "-100999888"
 	const smtpPass = "test-smtp-secret-value"
 	// A real mailrise password answered here means MAIL_OK genuinely
@@ -3931,7 +3931,7 @@ func c12AppriseExec(t *testing.T, name, script string) (string, string, int) {
 func TestContainer_C12_DockerPreflightMissingIsWarningNotFatal(t *testing.T) {
 	t.Parallel()
 	name := "sentinel-c12-docker-missing"
-	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=123456789:SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
 	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
 	if code != 0 && code != 75 {
@@ -4023,7 +4023,7 @@ chmod +x /usr/local/bin/systemctl`
 func TestContainer_C12_AppriseSeedRegistersAndRedactsToken(t *testing.T) {
 	t.Parallel()
 	name := "sentinel-c12-apprise-ok"
-	const token = "SECRETTOK1REDACTME"
+	const token = "123456789:SECRETTOK1REDACTME"
 	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN="+token+"\nTELEGRAM_CHAT_ID=555")
 
 	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
@@ -4072,7 +4072,7 @@ chmod +x /usr/local/bin/curl`
 func TestContainer_C12_AppriseSeed204IsFailure(t *testing.T) {
 	t.Parallel()
 	name := "sentinel-c12-apprise-204"
-	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=123456789:SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
 	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
 #!/bin/sh
@@ -4087,7 +4087,7 @@ case "$*" in
   # actually about, a registration that reports success while storing
   # nothing.
   *"/status"*) exit 0 ;;
-  *"/add/"*) : > "$out"; printf '%s' "204"; exit 0 ;;
+  *"/add/"*) printf 'Failed to load Apprise configuration.' > "$out"; printf '%s' "204"; exit 0 ;;
 esac
 exit 7
 CURLEOF
@@ -4118,7 +4118,14 @@ chmod +x /usr/local/bin/curl`
 	if !strings.Contains(out, "204") || !strings.Contains(out, "NOT registered") {
 		t.Errorf("FAIL: the 204 response was not surfaced as the specific known apprise-api silent-failure it is: %s", out)
 	}
-	logPass(t, "PASS C12 apprise seed: 204 reported as failure")
+	// The reason apprise gave has to reach the summary. Three failures in
+	// this script were reported as a bare "it did not work" while the
+	// explanation sat in a file deleted a line later, each costing a round
+	// trip to recover something the run already had in hand.
+	if !strings.Contains(out, "Failed to load Apprise configuration") {
+		t.Errorf("FAIL: apprise's own response body was discarded instead of reported: %s", out)
+	}
+	logPass(t, "PASS C12 apprise seed: 204 reported as failure, with apprise's reason")
 }
 
 // TestContainer_C12_AppriseSeedDryRunNoNetworkCall: --dry-run must not
@@ -4130,7 +4137,7 @@ chmod +x /usr/local/bin/curl`
 func TestContainer_C12_AppriseSeedDryRunNoNetworkCall(t *testing.T) {
 	t.Parallel()
 	name := "sentinel-c12-apprise-dryrun"
-	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=123456789:SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
 	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
 #!/bin/sh
@@ -4693,7 +4700,7 @@ func TestContainer_C12_AppriseSeedVerifiesEndpointBeforeSending(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			name := "sentinel-c12-apprise-verify-" + strings.ReplaceAll(c.name, " ", "-")
-			startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=SECRETTOK1\nTELEGRAM_CHAT_ID=555")
+			startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_BOT_TOKEN=123456789:SECRETTOK1\nTELEGRAM_CHAT_ID=555")
 
 			// The stub separates the two calls the seed makes: the identity
 			// probe against /status, and the registration that carries the
@@ -4811,4 +4818,156 @@ func TestContainer_C12_AppriseePortDiscovery(t *testing.T) {
 		}
 		logPass(t, "PASS C12 (apprise port discovery: a recorded port is left alone)")
 	})
+}
+
+// TestContainer_C12_AppriseSeedRejectsMalformedToken: hand-editing the env
+// file on the target host left two bot tokens concatenated, so the seed
+// posted a URL apprise could not parse and answered 400 for. That is a
+// confusing way to learn about a typo, and it puts a malformed credential
+// on the wire to find out. The shape is checked first, and nothing is sent.
+func TestContainer_C12_AppriseSeedRejectsMalformedToken(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		token string
+		want  string
+	}{
+		{"two tokens joined", "8759680967:XXXXXaNfG1Ovz8759680967:AAE1bQLaNfG1Ovz", "more than one colon"},
+		{"no colon at all", "8759680967AAE1bQLaNfG1Ovz", "has no colon"},
+		{"whitespace inside", "8759680967:AAE1b QLaNfG1Ovz", "contains whitespace"},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			name := "sentinel-c12-bad-token-" + strings.ReplaceAll(c.name, " ", "-")
+			startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=u\nMAILRISE_SMTP_PASS=p\nTELEGRAM_BOT_TOKEN="+c.token+"\nTELEGRAM_CHAT_ID=555")
+
+			// Records anything that reaches the network, so "nothing was
+			// sent" is asserted against what happened rather than against
+			// the summary's account of it.
+			curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+for a in "$@"; do last="$a"; done
+case "$last" in
+  */status) exit 0 ;;
+esac
+cat >> /root/sent 2>/dev/null
+echo "$*" >> /root/sent
+printf '200'
+exit 0
+CURLEOF
+chmod +x /usr/local/bin/curl`
+			if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub); code != 0 {
+				t.Fatalf("FAIL: could not install stubs: %s %s", out, errOut)
+			}
+
+			out, _, _ := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+			if !strings.Contains(out, c.want) {
+				t.Errorf("FAIL: want %q in the summary: %s", c.want, out)
+			}
+			sent, _, _ := c12AppriseExec(t, name, "cat /root/sent 2>/dev/null || true")
+			if strings.Contains(sent, "/add/") {
+				t.Errorf("FAIL: a malformed token was sent to apprise anyway: %s", sent)
+			}
+			logPass(t, "PASS C12 (apprise seed rejects a malformed token: %s)", c.name)
+		})
+	}
+}
+
+// TestContainer_C12_CaptureFixturesScrubsRealIdentifiers runs
+// capture-fixtures.sh end to end against stubbed tools that emit a known
+// serial in every shape it has ever leaked in, and asserts the serial does
+// not survive.
+//
+// This exists because the scrubber has leaked three times and each fix was
+// "verified" by exercising a piece of it in isolation. The last round eval'd
+// the scrub function with a hand-built identifier list, which proved the
+// substitution works and never noticed that the function producing that list
+// was not defined in the script at all. The call site shipped, the error was
+// swallowed, and a capture carrying every drive serial reported itself clean.
+//
+// Running the whole script is the only check that could have caught that, so
+// it is the check that exists now.
+func TestContainer_C12_CaptureFixturesScrubsRealIdentifiers(t *testing.T) {
+	t.Parallel()
+	name := "sentinel-c12-capture-fixtures"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// One serial, emitted in every shape that has leaked: smartctl's
+	// "Serial Number", smartd's "S/N:", a by-id path, and smartd's state
+	// FILE NAME, which is the shape the last round missed.
+	const serial = "ZVTAQSTVFAKE"
+	stubs := `mkdir -p /usr/local/bin
+cat > /usr/local/bin/lsblk <<'EOF'
+#!/bin/sh
+echo ` + serial + `
+EOF
+cat > /usr/local/bin/smartctl <<'EOF'
+#!/bin/sh
+case "$*" in
+  *--scan*) echo "/dev/sda -d sat" ;;
+  *-i*) printf 'Serial Number:    ` + serial + `\nLU WWN Device Id: 5 000c50 0e6d9650a\n' ;;
+  *) printf 'Serial Number:    ` + serial + `\nUser Capacity:    1.000.204.886.016 bytes [1,00 TB]\n' ;;
+esac
+EOF
+cat > /usr/local/bin/journalctl <<'EOF'
+#!/bin/sh
+printf '{"__REALTIME_TIMESTAMP":"1787335231109512","MESSAGE":"Device: /dev/disk/by-id/ata-ST18000NM003D-3DL103_` + serial + ` [SAT], S/N:` + serial + `, state written to /var/lib/smartmontools/smartd.ST18000NM003D_3DL103-` + serial + `.ata.state"}\n'
+EOF
+cat > /usr/local/bin/sensors <<'EOF'
+#!/bin/sh
+echo "{}"
+EOF
+cat > /usr/local/bin/zpool <<'EOF'
+#!/bin/sh
+echo "  pool: tank"
+EOF
+cat > /usr/local/bin/ras-mc-ctl <<'EOF'
+#!/bin/sh
+echo "no errors"
+EOF
+cat > /usr/local/bin/docker <<'EOF'
+#!/bin/sh
+echo "[]"
+EOF
+chmod +x /usr/local/bin/lsblk /usr/local/bin/smartctl /usr/local/bin/journalctl /usr/local/bin/sensors /usr/local/bin/zpool /usr/local/bin/ras-mc-ctl /usr/local/bin/docker
+mkdir -p /dev/disk/by-id && : > "/dev/disk/by-id/ata-ST18000NM003D-3DL103_` + serial + `"`
+	if out, errOut, code := exec_(stubs); code != 0 {
+		t.Fatalf("FAIL: could not install stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := exec_("bash /work/capture-fixtures.sh /tmp/fx 2>&1")
+	combined := out + errOut
+
+	// The failure that shipped: a function called but never defined. bash
+	// reports it and carries on, so nothing else notices.
+	if strings.Contains(combined, "command not found") {
+		t.Fatalf("FAIL: capture-fixtures.sh called something that does not exist: %s", combined)
+	}
+	if code != 0 {
+		t.Fatalf("FAIL: capture-fixtures.sh exited %d: %s", code, combined)
+	}
+	if !strings.Contains(combined, "hardware identifier(s) will be replaced by value") {
+		t.Errorf("FAIL: the script did not report collecting identifiers: %s", combined)
+	}
+
+	// The whole point: the serial must not survive, in ANY of the shapes.
+	found, _, _ := exec_("grep -rlF " + serial + " /tmp/fx 2>/dev/null || true")
+	if strings.TrimSpace(found) != "" {
+		leaked, _, _ := exec_("grep -rhoF -m3 " + serial + " /tmp/fx | head -3")
+		t.Errorf("FAIL: the serial survived scrubbing in %s (%s)", strings.TrimSpace(found), strings.TrimSpace(leaked))
+	}
+
+	// And data that must NOT be destroyed, which earlier versions mangled.
+	kept, _, _ := exec_("cat /tmp/fx/smartd-journal.jsonl 2>/dev/null || true")
+	if !strings.Contains(kept, "1787335231109512") {
+		t.Errorf("FAIL: journal timestamps were clobbered, they are what the parsers read: %s", kept)
+	}
+	logPass(t, "PASS C12 (capture-fixtures.sh removes real identifiers end to end)")
 }
