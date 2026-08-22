@@ -2225,6 +2225,129 @@ step6() {
   changed=$((changed+1))
 }
 
+# json_escape STRING, the escaping a JSON string value needs for the values
+# this script actually carries: a backslash and a double quote. Backslash
+# first, so the backslash introduced by escaping a quote is not escaped
+# again. Newlines cannot occur, every value here is read from a line of the
+# env file, and a control character would have had to survive that.
+#
+# Written out rather than delegated to python3: the rest of this script has
+# no interpreter dependency, and a step that quietly does nothing where
+# python3 is absent is a step whose only failure mode is silence. A password
+# with a quote or a backslash in it is not hypothetical, msmtprc already
+# mangled one, which is why TestContainer_C12_MsmtprcHostileSecrets exists.
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# --- step 7: this platform's own notification email ------------------------
+
+# omv_rpc_bin, the same treatment omv_confdbadm_bin gets and for the same
+# reason: the binary lives in /usr/sbin, which is not on every PATH this
+# script might be invoked with, so the absolute path is tried first rather
+# than trusting a bare name to resolve.
+omv_rpc_bin() {
+  [ -x /usr/sbin/omv-rpc ] && { printf '%s' /usr/sbin/omv-rpc; return 0; }
+  command -v omv-rpc 2>/dev/null
+}
+
+# step7 points OpenMediaVault's own notification email at mailrise, which is
+# the delivery path on a host where msmtp has no role at all: OMV already
+# mails through the transport it installed, mailrise already carries a route
+# for it (omv@mailrise.xyz), and steps 3-5 correctly decline to touch the
+# files OMV generates. Without this, the hardware alerting path that has to
+# work while the supervisor is down is documented and never wired.
+#
+# Written through OMV's own RPC rather than by editing a file, which is the
+# whole difference from steps 4 and 5: those would edit configuration OMV
+# regenerates and be reverted, while this asks OMV to store the setting, the
+# same call its web interface makes.
+#
+# It NEVER overwrites. A host already mailing somewhere is a host whose
+# operator chose that, and quietly redirecting every notification it sends
+# to a Telegram bot is the worst thing this script could do without asking.
+# Existing settings are reported and left exactly as they are.
+step7() {
+  local bin cur enabled server
+  bin="$(omv_rpc_bin)"
+  if [ -z "$bin" ]; then
+    return
+  fi
+  # Credentials, NOT MAIL_OK. MAIL_OK additionally requires msmtp to be
+  # installed, and on exactly the hosts this step exists for msmtp is
+  # correctly not installed at all: the platform holds mail-transport-agent
+  # and mails through its own transport. Gating on MAIL_OK would skip this
+  # step for want of a package it does not use, and report the reason as
+  # missing credentials that are sitting right there.
+  if [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+    note "step7 platform notification email: skipped, MAILRISE_SMTP_USER/MAILRISE_SMTP_PASS missing or empty in $ENV_FILE"
+    return
+  fi
+
+  cur="$("$bin" -u admin "EmailNotification" "get" '{}' 2>/dev/null)"
+  if [ -z "$cur" ]; then
+    note "step7 platform notification email: skipped, could not read the current settings"
+    return
+  fi
+
+  # "enable" is a JSON boolean, not a string, so the string-field helper
+  # used everywhere else does not see it.
+  enabled="$(printf '%s' "$cur" | tr '\n' ' ' | grep -o '"enable"[[:space:]]*:[[:space:]]*[a-z]*' | head -n1 | sed -E 's/.*:[[:space:]]*//')"
+  server="$(omv_json_field "$cur" server)"
+
+  if [ "$enabled" = "true" ] || [ -n "$server" ]; then
+    note "step7 platform notification email: already configured (server '${server:-unset}', enabled ${enabled:-unknown}), left untouched. Point it at ${MAILRISE_HOST}:${MAILRISE_PORT} addressed to omv@mailrise.xyz yourself if you want these alerts in Telegram too"
+    return
+  fi
+
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    note "step7 platform notification email: unset, would offer to point it at mailrise on ${MAILRISE_HOST}:${MAILRISE_PORT} addressed to omv@mailrise.xyz (opt-in, defaults to No, not counted as drift)"
+    return
+  fi
+
+  if ! confirm_monitoring_change "step7: point this platform's notification email at mailrise (${MAILRISE_HOST}:${MAILRISE_PORT}, addressed to omv@mailrise.xyz)? This routes EVERY notification this platform sends, not only SMART and ZFS, to the Telegram target in your mailrise config."; then
+    note "step7 platform notification email: not configured, $CONFIRM_REASON. Hardware alerts stay on this host until its notification settings name a mail server"
+    return
+  fi
+
+  local hn payload out
+  hn="$(hostname -f 2>/dev/null || hostname)"
+
+  # The port is interpolated unquoted as a JSON number, so it is checked to
+  # be digits rather than trusted: --mailrise-port takes whatever it is
+  # given, and anything else here would be injected into the document
+  # rather than rejected by it.
+  case "$MAILRISE_PORT" in
+    ''|*[!0-9]*)
+      note "step7 platform notification email: skipped, --mailrise-port '$MAILRISE_PORT' is not a number"
+      return
+      ;;
+  esac
+
+  # Built field by field against rpc.emailnotification.set rather than by
+  # handing back what "get" returned: Compose.get returns properties
+  # Compose.set rejects outright, and nothing says this service differs.
+  payload="{\"enable\":true"
+  payload="${payload},\"server\":\"$(json_escape "$MAILRISE_HOST")\""
+  payload="${payload},\"port\":${MAILRISE_PORT}"
+  payload="${payload},\"tls\":\"none\""
+  payload="${payload},\"sender\":\"$(json_escape "sentinel@${hn}")\""
+  payload="${payload},\"authenable\":true"
+  payload="${payload},\"username\":\"$(json_escape "$SMTP_USER")\""
+  payload="${payload},\"password\":\"$(json_escape "$SMTP_PASS")\""
+  payload="${payload},\"primaryemail\":\"omv@mailrise.xyz\""
+  payload="${payload},\"secondaryemail\":\"\"}"
+
+  # stdout is discarded rather than shown: the call echoes the stored object
+  # back, password included.
+  if out="$("$bin" -u admin "EmailNotification" "set" "$payload" 2>&1 >/dev/null)"; then
+    note "step7 platform notification email: pointed at mailrise on ${MAILRISE_HOST}:${MAILRISE_PORT}, addressed to omv@mailrise.xyz"
+    changed=$((changed+1))
+  else
+    note "step7 platform notification email: failed to store the settings${out:+ ($out)}"
+  fi
+}
+
 # --- sensors readiness ---------------------------------------------------
 
 # report_sensors, says whether `sensors` currently sees anything, because
@@ -2435,6 +2558,7 @@ fi
 # optional extra: the operator answers the monitoring questions the run
 # exists for, then decides about hardware probing. It also needs step1's
 # packages already installed to have anything to report.
+step7
 report_sensors
 
 # Same STACK_UNRESOLVED gate: with no stack directory resolved, ENV_FILE

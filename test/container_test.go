@@ -4416,3 +4416,187 @@ printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test
 
 	logPass(t, "PASS C12 (msmtprc is not written when no msmtp reader exists)")
 }
+
+// TestContainer_C12_PlatformNotificationEmail: step7 points the platform's
+// own notification email at mailrise, which is the delivery path on a host
+// where msmtp has no role at all.
+//
+// Every branch here was verified once by hand, by mutating install.sh and
+// watching the failure. That proves the assertions bite on the day it is
+// done and nothing afterwards, which is worth exactly as much as the
+// sensors test that passed against a function that did not exist. These
+// cover the same ground permanently.
+func TestContainer_C12_PlatformNotificationEmail(t *testing.T) {
+	t.Parallel()
+
+	const unsetJSON = `{"enable": false, "server": "", "port": 25, "tls": "none", "sender": "", "authentication": {"enable": false, "username": "", "password": ""}, "primaryemail": "", "secondaryemail": ""}`
+	const configuredJSON = `{"enable": true, "server": "smtp.example.org", "port": 587, "tls": "starttls", "sender": "nas@example.org", "primaryemail": "admin@example.org", "secondaryemail": ""}`
+
+	// rpcStub answers "get" with the supplied document and records every
+	// other call, so a write can be asserted on by what was attempted rather
+	// than by trusting the summary line to describe itself honestly.
+	rpcStub := func(getJSON string) string {
+		return `mkdir -p /usr/sbin && cat > /usr/sbin/omv-rpc <<'STUB'
+#!/bin/sh
+for a in "$@"; do last="$a"; done
+if [ "$last" = "{}" ]; then
+  cat <<'JSON'
+` + getJSON + `
+JSON
+  exit 0
+fi
+printf '%s\n' "$*" >> /tmp/omv-rpc-writes
+exit 0
+STUB
+chmod +x /usr/sbin/omv-rpc`
+	}
+
+	t.Run("previews the offer and does not count it as drift", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-notify-unset"
+		startC12Container(t, name)
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		prep := rpcStub(unsetJSON) + "\n" + `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+		if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+
+		out, _, code := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+		if code != 0 {
+			t.Fatalf("FAIL: --dry-run exit=%d: %s", code, out)
+		}
+		if strings.Contains(out, "command not found") {
+			t.Fatalf("FAIL: install.sh called something that does not exist: %s", out)
+		}
+		if !strings.Contains(out, "would offer to point it at mailrise") {
+			t.Errorf("FAIL: the offer was not previewed: %s", out)
+		}
+		if !strings.Contains(out, "not counted as drift") {
+			t.Errorf("FAIL: an opt-in previewed without saying it is not drift is what makes --check unable to exit 0 on a converged host: %s", out)
+		}
+		if w, _, _ := exec_("cat /tmp/omv-rpc-writes 2>/dev/null || true"); strings.TrimSpace(w) != "" {
+			t.Errorf("FAIL: --dry-run wrote through omv-rpc: %s", w)
+		}
+		logPass(t, "PASS C12 (platform notification email: offered, previewed, not drift)")
+	})
+
+	t.Run("never overwrites an existing configuration", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-notify-configured"
+		// Same base and stubs as the other prompt test in this file: an
+		// interactive run needs docker to look ready and the packages
+		// present, or install.sh stops somewhere earlier than step7.
+		startC12ContainerFrom(t, name, c12BaseWithPackages(t))
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		if out, _, code := exec_("command -v script"); code != 0 {
+			skipUnlessCI(t, "C12 (notify configured): the `script` utility is not available: %s", out)
+		}
+		prep := rpcStub(configuredJSON) + "\n" + `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+		if out, errOut, code := exec_(dockerComposeReadyStub + "\n" + systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+
+		// Answering yes to everything, which is the hostile case: a host
+		// already mailing somewhere must be left alone even then, because
+		// silently redirecting every notification it sends to a Telegram bot
+		// is the worst thing this script could do.
+		out, _, _ := exec_(`printf 'y\ny\ny\ny\n' | script -qec "bash /work/install.sh --env-file /root/test.env" /tmp/s.log`)
+		if !strings.Contains(out, "already configured") {
+			t.Errorf("FAIL: an existing configuration was not reported as left alone: %s", out)
+		}
+		if !strings.Contains(out, "smtp.example.org") {
+			t.Errorf("FAIL: the summary does not name the server it deferred to: %s", out)
+		}
+		w, _, _ := exec_("cat /tmp/omv-rpc-writes 2>/dev/null || true")
+		if strings.TrimSpace(w) != "" {
+			t.Errorf("FAIL: install.sh overwrote a configuration its operator chose, even after answering yes: %s", w)
+		}
+		logPass(t, "PASS C12 (platform notification email: existing settings survive an unconditional yes)")
+	})
+
+	t.Run("writes the right payload when accepted", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-notify-write"
+		startC12ContainerFrom(t, name, c12BaseWithPackages(t))
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		if out, _, code := exec_("command -v script"); code != 0 {
+			skipUnlessCI(t, "C12 (notify write): the `script` utility is not available: %s", out)
+		}
+		// A password carrying both characters JSON has to escape. msmtprc
+		// mangled one of these once, which is what
+		// TestContainer_C12_MsmtprcHostileSecrets exists for; the same value
+		// now has to survive a second serialisation.
+		prep := rpcStub(unsetJSON) + "\n" + `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=pa"ss\\word\n' > /root/test.env`
+		if out, errOut, code := exec_(dockerComposeReadyStub + "\n" + systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+
+		out, _, _ := exec_(`printf 'y\ny\ny\ny\n' | script -qec "bash /work/install.sh --env-file /root/test.env" /tmp/s.log`)
+		if !strings.Contains(out, "pointed at mailrise") {
+			t.Fatalf("FAIL: accepting the offer did not store the settings: %s", out)
+		}
+		w, _, _ := exec_("cat /tmp/omv-rpc-writes 2>/dev/null || true")
+		if !strings.Contains(w, "EmailNotification set") {
+			t.Fatalf("FAIL: no write reached omv-rpc after accepting: %s", w)
+		}
+		for _, want := range []string{
+			`"enable":true`,
+			`"server":"127.0.0.1"`,
+			`"port":8025`,
+			`"tls":"none"`,
+			`"authenable":true`,
+			`"username":"testuser"`,
+			`"primaryemail":"omv@mailrise.xyz"`,
+		} {
+			if !strings.Contains(w, want) {
+				t.Errorf("FAIL: stored payload is missing %s: %s", want, w)
+			}
+		}
+		// The escaping itself: a literal quote and backslash must reach the
+		// document escaped, not raw and not doubled into something else.
+		if !strings.Contains(w, `"password":"pa\"ss\\word"`) {
+			t.Errorf("FAIL: a password containing a quote and a backslash was not escaped correctly for JSON: %s", w)
+		}
+		// And the password must never be echoed back into the summary.
+		if strings.Contains(out, `pa"ss`) {
+			t.Errorf("FAIL: the password appeared in install.sh output: %s", out)
+		}
+		logPass(t, "PASS C12 (platform notification email: accepted write carries a correctly escaped payload)")
+	})
+
+	t.Run("does not depend on msmtp being installed", func(t *testing.T) {
+		t.Parallel()
+		name := "sentinel-c12-notify-no-msmtp"
+		startC12Container(t, name)
+		exec_ := func(script string) (string, string, int) {
+			return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+		}
+		// This is the shape of the target host: the platform holds
+		// mail-transport-agent, so install.sh correctly installs no msmtp at
+		// all, which drives MAIL_OK to 0. Gating step7 on MAIL_OK would skip
+		// it for want of a package it never uses, and report the reason as
+		// missing credentials that are sitting in the env file.
+		prep := rpcStub(unsetJSON) + "\n" + `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+		if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+			t.Fatalf("FAIL: prep failed: %s %s", out, errOut)
+		}
+		if out, _, code := exec_("dpkg-query -W -f='${Status}' msmtp 2>/dev/null"); code == 0 && strings.Contains(out, "install ok installed") {
+			t.Skip("msmtp is installed in this base image, this case needs it absent")
+		}
+
+		out, _, _ := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+		if !strings.Contains(out, "would offer to point it at mailrise") {
+			t.Errorf("FAIL: step7 did not run with msmtp absent, which is the only shape it exists for: %s", out)
+		}
+		if strings.Contains(out, "step7 platform notification email: skipped, MAILRISE_SMTP_USER") {
+			t.Errorf("FAIL: step7 reported missing credentials that are present in the env file: %s", out)
+		}
+		logPass(t, "PASS C12 (platform notification email: independent of msmtp)")
+	})
+}
