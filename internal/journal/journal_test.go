@@ -44,6 +44,20 @@ func writeFixture(t *testing.T, dir, name, content string) {
 	}
 }
 
+// journalDir returns a temp directory that looks like a journal directory,
+// which now means it contains a .journal file. A bare empty directory is
+// not one: Docker creates the source of a bind mount when it is missing, so
+// a host with no /run/log/journal gets an empty directory that would
+// otherwise be run against journalctl on every tick and answer "No journal
+// files were found." The file's contents are irrelevant, the stub reads the
+// fixtures next to it.
+func journalDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFixture(t, dir, "system.journal", "")
+	return dir
+}
+
 // C16: TestJournalNormalization, PRIORITY as string and number, MESSAGE
 // as string and byte array, missing SYSLOG_IDENTIFIER -> "-", missing
 // _SYSTEMD_UNIT -> null, unparseable __REALTIME_TIMESTAMP -> dropped;
@@ -51,8 +65,8 @@ func writeFixture(t *testing.T, dir, name, content string) {
 // ascending.
 func TestJournalNormalization(t *testing.T) {
 	withStubPath(t)
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
+	dir1 := journalDir(t)
+	dir2 := journalDir(t)
 
 	// dir1: kernel-filtered records (-k -p err key)
 	writeFixture(t, dir1, "kernel.jsonl", `
@@ -165,7 +179,7 @@ func TestJournalNormalization(t *testing.T) {
 }
 
 func TestDirsFiltersToExistingDirectories(t *testing.T) {
-	dir := t.TempDir()
+	dir := journalDir(t)
 	file := filepath.Join(dir, "notadir")
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -186,7 +200,7 @@ func TestRunNoJournalDirs(t *testing.T) {
 
 func TestRunExcludeTransport(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	writeFixture(t, dir, "services.jsonl", `
 {"__REALTIME_TIMESTAMP":"1755250304000000","PRIORITY":"3","SYSLOG_IDENTIFIER":"smbd","_TRANSPORT":"syslog","MESSAGE":"Failed to start Samba"}
 {"__REALTIME_TIMESTAMP":"1755250305000000","PRIORITY":"3","SYSLOG_IDENTIFIER":"kernel","_TRANSPORT":"kernel","MESSAGE":"kernel line"}
@@ -205,9 +219,9 @@ func TestRunExcludeTransport(t *testing.T) {
 }
 
 func TestRunCommandNotFound(t *testing.T) {
-	dir := t.TempDir()
+	dir := journalDir(t)
 	t.Setenv("PATH", dir) // no journalctl on PATH
-	journalDir := t.TempDir()
+	journalDir := journalDir(t)
 	_, _, _, err := Run(context.Background(), Query{Dirs: []string{journalDir}})
 	if err == nil {
 		t.Fatal("Run() expected an error when journalctl is missing")
@@ -216,7 +230,7 @@ func TestRunCommandNotFound(t *testing.T) {
 
 func TestRunTimeout(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	writeFixture(t, dir, ".sleep", "5")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -228,7 +242,7 @@ func TestRunTimeout(t *testing.T) {
 
 func TestRunExitErrorCarriesStderr(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	writeFixture(t, dir, ".stderr", "permission denied by test stub\n")
 	writeFixture(t, dir, ".exit", "1")
 	_, _, _, err := Run(context.Background(), Query{Dirs: []string{dir}})
@@ -251,7 +265,7 @@ func TestRunExitErrorCarriesStderr(t *testing.T) {
 // this test times out instead of failing cleanly.
 func TestRunRecordCapDrainsPastPipeBuffer(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	// 1000 records of ~200 bytes each (~200 KB total) comfortably exceeds a
 	// 64 KB pipe buffer on every platform this runs on, so a broken
 	// drain-to-EOF path reproduces the deadlock this test guards against
@@ -290,7 +304,7 @@ func TestRunRecordCapDrainsPastPipeBuffer(t *testing.T) {
 // emerg (priority 0); it must be the one still present.
 func TestRunRecordCapKeepsNewest(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	base := int64(1755250000000000)
 	var records []map[string]any
 	for i := 0; i < 25; i++ {
@@ -344,7 +358,7 @@ func TestRunRecordCapKeepsNewest(t *testing.T) {
 // must survive.
 func TestRunRecordCapEvictsProtectedLastNotNever(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	base := int64(1755250000000000)
 	var records []map[string]any
 	// oldest record is the one true emerg (protected); everything after
@@ -392,7 +406,7 @@ func TestRunRecordCapEvictsProtectedLastNotNever(t *testing.T) {
 // holds), and the newest protected entries are the survivors.
 func TestRunRecordCapHasHardCeilingEvenWhenAllProtected(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	base := int64(1755250000000000)
 	const total = 30
 	var records []map[string]any
@@ -437,7 +451,7 @@ func TestRunRecordCapHasHardCeilingEvenWhenAllProtected(t *testing.T) {
 // found this, and well under 1s linear.
 func TestRunRecordCapAllProtectedStaysLinear(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	base := int64(1755250000000000)
 	const total = 40000
 	var buf bytes.Buffer
@@ -487,7 +501,7 @@ func TestRunRecordCapAllProtectedStaysLinear(t *testing.T) {
 // services this query actually cares about.
 func TestRunRecordCapCountsOnlyKeptRecords(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	base := int64(1755250000000000)
 	var records []map[string]any
 	for i := 0; i < 20; i++ {
@@ -530,7 +544,7 @@ func TestRunRecordCapCountsOnlyKeptRecords(t *testing.T) {
 // record must fail the query, not return a short, clean-looking slice.
 func TestRunDecodeErrorFailsTheQuery(t *testing.T) {
 	withStubPath(t)
-	dir := t.TempDir()
+	dir := journalDir(t)
 	writeFixture(t, dir, "kernel.jsonl",
 		`{"__REALTIME_TIMESTAMP":"1755250304000000","PRIORITY":"0","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"emerg line"}
 {this is not valid json at all
@@ -549,8 +563,8 @@ func TestRunDecodeErrorFailsTheQuery(t *testing.T) {
 // directory's failure, reported as a warning naming that directory.
 func TestRunPartialDirectoryFailureKeepsOtherDirsEntries(t *testing.T) {
 	withStubPath(t)
-	goodDir := t.TempDir()
-	badDir := t.TempDir()
+	goodDir := journalDir(t)
+	badDir := journalDir(t)
 	writeFixture(t, goodDir, "kernel.jsonl",
 		`{"__REALTIME_TIMESTAMP":"1755250304000000","PRIORITY":"3","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"from the good dir"}
 `)
@@ -573,8 +587,8 @@ func TestRunPartialDirectoryFailureKeepsOtherDirsEntries(t *testing.T) {
 
 func TestRunAllDirectoriesFail(t *testing.T) {
 	withStubPath(t)
-	dir1 := t.TempDir()
-	dir2 := t.TempDir()
+	dir1 := journalDir(t)
+	dir2 := journalDir(t)
 	writeFixture(t, dir1, ".exit", "1")
 	writeFixture(t, dir2, ".exit", "1")
 	_, _, _, err := Run(context.Background(), Query{Dirs: []string{dir1, dir2}})
