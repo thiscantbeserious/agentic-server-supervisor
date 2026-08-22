@@ -2599,8 +2599,23 @@ step_apprise_seed() {
   # NOT used: it would make curl treat 204 (and any 4xx/5xx) as a
   # transport error indistinguishable from "apprise unreachable",
   # exactly the two failure modes this step must tell apart.
+  #
+  # pipefail is off for exactly this pipeline, and only this one. The
+  # payload goes in through a pipe, and curl is entitled to answer and
+  # exit before it has read all of stdin. When it does, printf takes
+  # SIGPIPE and pipefail hands back 141 for a request that SUCCEEDED,
+  # after which the branch below reports "could not reach apprise" about
+  # a server that replied 200. That is not hypothetical: it failed three
+  # CI runs across both architectures, intermittently, because the window
+  # only opens when the writer is descheduled between curl exiting and
+  # printf's write.
+  #
+  # curl's own exit status is what the next branch reasons about, so
+  # curl's own exit status is what it must be given.
+  set +o pipefail
   status="$(printf '%s' "tgram://${token}/${chat}" | curl -sS --max-time 5 -o "$tmp" -w '%{http_code}' -X POST --data-urlencode urls@- "$endpoint" 2>/dev/null)"
   curl_rc=$?
+  set -o pipefail
 
   # apprise's own words, kept rather than deleted unread. Three separate
   # failures in this script have now been reported as a bare "it did not
@@ -2624,7 +2639,7 @@ step_apprise_seed() {
     # up (install.sh never does that itself). No TRANSIENT_FAIL here,
     # only the two branches below, where apprise DID answer and told
     # us the registration failed, do that.
-    note "apprise seed: could not reach apprise at $endpoint (the stack may not be up yet), run 'docker compose up -d' in the stack directory, then re-run this script"
+    note "apprise seed: could not reach apprise at $endpoint (curl exit $curl_rc; the stack may not be up yet), run 'docker compose up -d' in the stack directory, then re-run this script"
     return
   fi
   # N.3.1's rule applies here too: a 204 from apprise-api means the key

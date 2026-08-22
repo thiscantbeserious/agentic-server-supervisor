@@ -1,0 +1,40 @@
+# produced by: zpool status
+  pool: cache
+ state: ONLINE
+status: Some supported and requested features are not enabled on the pool.
+	The pool can still be used, but some features are unavailable.
+action: Enable all features using 'zpool upgrade'. Once this is done,
+	the pool may no longer be accessible by software that does not support
+	the features. See zpool-features(7) for details.
+  scan: resilvered 169G in 00:08:43 with 0 errors on Sat Aug 15 12:27:23 2026
+config:
+
+	NAME              STATE     READ WRITE CKSUM
+	cache             ONLINE       0     0     0
+	  mirror-0        ONLINE       0     0     0
+	    sn500-crypt   ONLINE       0     0     0
+	    evo860-crypt  ONLINE       0     0     0
+	logs	
+	  optane2         ONLINE       0     0     0
+
+errors: No known data errors
+
+  pool: hotstore
+ state: ONLINE
+status: Some supported and requested features are not enabled on the pool.
+	The pool can still be used, but some features are unavailable.
+action: Enable all features using 'zpool upgrade'. Once this is done,
+	the pool may no longer be accessible by software that does not support
+	the features. See zpool-features(7) for details.
+  scan: scrub repaired 0B in 02:32:53 with 0 errors on Sat Aug 15 21:29:26 2026
+config:
+
+	NAME                        STATE     READ WRITE CKSUM
+	hotstore                    ONLINE       0     0     0
+	  mirror-0                  ONLINE       0     0     0
+	    seagate-vtaqstv-crypt   ONLINE       0     0     0
+	    seagate-zvtazeam-crypt  ONLINE       0     0     0
+	logs	
+	  optane1                   ONLINE       0     0     0
+
+errors: No known data errors

@@ -4028,6 +4028,12 @@ func TestContainer_C12_AppriseSeedRegistersAndRedactsToken(t *testing.T) {
 
 	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
 #!/bin/sh
+# "cat >/dev/null" in the /add/ arm is not decoration: real curl drains
+# stdin, and a stub that answers and exits without reading leaves the
+# writing printf to take SIGPIPE. Under pipefail that surfaces as exit
+# 141 for a request the server answered 200, which is a property of the
+# stub rather than of install.sh, and it failed three CI runs on both
+# architectures before anyone read curl's exit status.
 out=""
 prev=""
 for a in "$@"; do
@@ -4038,7 +4044,7 @@ case "$*" in
   # The seed identifies the listener before sending the token. In this
   # scenario apprise is up, so its own /status endpoint answers.
   *"/status"*) exit 0 ;;
-  *"/add/"*) : > "$out"; printf '%s' "200"; exit 0 ;;
+  *"/add/"*) cat >/dev/null; : > "$out"; printf '%s' "200"; exit 0 ;;
 esac
 exit 7
 CURLEOF
@@ -4087,7 +4093,7 @@ case "$*" in
   # actually about, a registration that reports success while storing
   # nothing.
   *"/status"*) exit 0 ;;
-  *"/add/"*) printf 'Failed to load Apprise configuration.' > "$out"; printf '%s' "204"; exit 0 ;;
+  *"/add/"*) cat >/dev/null; printf 'Failed to load Apprise configuration.' > "$out"; printf '%s' "204"; exit 0 ;;
 esac
 exit 7
 CURLEOF
@@ -4970,4 +4976,71 @@ mkdir -p /dev/disk/by-id && : > "/dev/disk/by-id/ata-ST18000NM003D-3DL103_` + se
 		t.Errorf("FAIL: journal timestamps were clobbered, they are what the parsers read: %s", kept)
 	}
 	logPass(t, "PASS C12 (capture-fixtures.sh removes real identifiers end to end)")
+}
+
+// TestContainer_C12_AppriseSeedSurvivesEarlyCurlExit pins the defect that
+// failed three CI runs across both architectures and was re-run away twice
+// as a flake.
+//
+// The seed posts the token as `printf ... | curl --data-urlencode urls@-`.
+// curl is entitled to answer and exit before draining stdin, and when it
+// does the writing printf takes SIGPIPE. install.sh runs under pipefail,
+// so the pipeline yields 141 for a request the server answered 200, and the
+// seed then reports "could not reach apprise" about a server that replied.
+//
+// In CI the window is a scheduling accident, which is why it looked random
+// and why re-running "fixed" it. Here it is forced rather than waited for:
+// a payload past the pipe buffer makes printf block mid-write, so the
+// reader's exit is guaranteed to land while a write is outstanding. The
+// oversized token is not modelling a real token; it is modelling a writer
+// that cannot finish in one go.
+func TestContainer_C12_AppriseSeedSurvivesEarlyCurlExit(t *testing.T) {
+	t.Parallel()
+	name := "sentinel-c12-apprise-earlyexit"
+	// One colon, no whitespace, so the shape guard accepts it; long
+	// enough that printf cannot hand it over in a single write.
+	// Built inside the container, not passed through argv: 200k of token
+	// is past what docker exec will carry as an argument.
+	token := "123456789:" + strings.Repeat("A", 200000)
+	startC12AppriseContainer(t, name, "MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\nTELEGRAM_CHAT_ID=555")
+	mkToken := `{ printf 'TELEGRAM_BOT_TOKEN=123456789:'; awk 'BEGIN{while(i++<200000)printf "A"}'; printf '\n'; } >> /root/repo/.env`
+	if out, errOut, code := c12AppriseExec(t, name, mkToken); code != 0 {
+		t.Fatalf("FAIL: could not write the oversized token: %s %s", out, errOut)
+	}
+
+	// Deliberately does NOT drain stdin: this is the early-exiting curl,
+	// the case the other stubs in this file model away with cat >/dev/null.
+	curlStub := `cat > /usr/local/bin/curl <<'CURLEOF'
+#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; fi
+  prev="$a"
+done
+case "$*" in
+  *"/status"*) exit 0 ;;
+  *"/add/"*) : > "$out"; printf '%s' "200"; exit 0 ;;
+esac
+exit 7
+CURLEOF
+chmod +x /usr/local/bin/curl`
+	if out, errOut, code := c12AppriseExec(t, name, dockerComposeReadyStub+"\n"+curlStub+"\n"+systemctlOKStub); code != 0 {
+		t.Fatalf("FAIL: could not install docker/curl/systemctl stubs: %s %s", out, errOut)
+	}
+
+	out, errOut, code := c12AppriseExec(t, name, "cd /root/repo && ./install.sh --env-file /root/repo/.env")
+	if code != 0 {
+		t.Fatalf("FAIL: install.sh exited %d, want 0: %s %s", code, out, errOut)
+	}
+	if strings.Contains(out, "could not reach apprise") {
+		t.Errorf("FAIL: apprise answered 200 and the seed reported it unreachable, the writer's SIGPIPE was mistaken for curl's exit status: %s", out)
+	}
+	if !strings.Contains(out, "apprise seed: registered") {
+		t.Errorf("FAIL: apprise seed success was not reported although apprise answered 200: %s", out)
+	}
+	if strings.Contains(out, token) || strings.Contains(errOut, token) {
+		t.Errorf("FAIL: the bot token leaked into install.sh's output")
+	}
+	logPass(t, "PASS C12 apprise seed: an early-exiting curl is not reported as unreachable")
 }
