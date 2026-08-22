@@ -48,10 +48,18 @@ var (
 // with nothing, so a caller cannot otherwise tell "no response" from
 // "response lost". The envelope makes that distinguishable: a dropped
 // prompt reports status="SUCCESS" with an empty response and zero tokens.
+//
+// StructuredOutput is undocumented by the upstream headless docs and
+// absent from the envelope verified against agy 1.1.13 on 2026-08-16
+// (contracts/analyze.md §6 step 4); it was found live on 2026-08-22
+// against a newer agy pulled by deploy/agy-build-args.sh's unpinned
+// manifest resolution. When present it is agy's own schema-validated
+// result. Response stays the fallback for an agy without this field.
 type agyEnvelope struct {
-	Status   string `json:"status"`
-	Response string `json:"response"`
-	Usage    struct {
+	Status           string          `json:"status"`
+	Response         string          `json:"response"`
+	StructuredOutput json.RawMessage `json:"structured_output"`
+	Usage            struct {
 		InputTokens int64 `json:"input_tokens"`
 	} `json:"usage"`
 }
@@ -64,18 +72,22 @@ type agyEnvelope struct {
 // a failed status or zero input tokens means the prompt never reached the
 // model (not retryable); a successful, token-spending call with an empty
 // response is plausibly a transient drop (retryable).
-func decodeAgyEnvelope(out []byte) (string, error) {
+//
+// It returns both response (agy's free-text answer, subject to fence
+// normalisation) and structuredOutput (agy's own schema-validated result,
+// if this agy version emits one); the caller decides which wins.
+func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, err error) {
 	var env agyEnvelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return "", fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
+		return "", nil, fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
 	}
 	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
-		return "", fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
+		return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
 	}
 	if strings.TrimSpace(env.Response) == "" {
-		return "", fmt.Errorf("empty response (status=%q input_tokens=%d)", env.Status, env.Usage.InputTokens)
+		return "", nil, fmt.Errorf("empty response (status=%q input_tokens=%d)", env.Status, env.Usage.InputTokens)
 	}
-	return env.Response, nil
+	return env.Response, env.StructuredOutput, nil
 }
 
 // normalizeAgyOutput trims whitespace and strips a single leading ```json

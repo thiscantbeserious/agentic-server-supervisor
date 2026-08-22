@@ -6,6 +6,7 @@
 package analyze
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -83,14 +84,29 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	// response, or zero input_tokens is a dropped prompt (agy_empty), not
 	// a model that legitimately said nothing. Only after this check does
 	// normalisation/decoding touch the model's own answer.
-	response, everr := decodeAgyEnvelope(out)
+	response, structuredOutput, everr := decodeAgyEnvelope(out)
 	if everr != nil {
 		return nil, "agy_empty", fmt.Errorf("analyze: agy attempt %d: %w", attempt, everr)
+	}
+
+	// structured_output, when present, is agy's own schema-validated
+	// result: prefer it over response, which a newer agy can pollute by
+	// concatenating every internal self-correction turn into one string
+	// (found live 2026-08-22, contracts/analyze.md §6 step 4). Still run
+	// it through report.Validate, no exemption for having come from the
+	// cleaner field. Absent, empty, or invalid ⇒ fall through to response
+	// unchanged, the path an agy without this field always takes.
+	if trimmed := bytes.TrimSpace(structuredOutput); len(trimmed) > 0 {
+		if rep, verr := report.Validate(trimmed); verr == nil {
+			logger.Info("triage", "attempt", attempt, "via", "structured_output")
+			return rep, "", nil
+		}
 	}
 
 	normalized := normalizeAgyOutput([]byte(response))
 	rep, verr := report.Validate(normalized)
 	if verr == nil {
+		logger.Info("triage", "attempt", attempt, "via", "response")
 		return rep, "", nil
 	}
 	reason := "invalid_json"
