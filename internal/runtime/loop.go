@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -208,16 +209,35 @@ func copyTree(src, dst string) error {
 		case !d.Type().IsRegular():
 			return nil
 		default:
-			data, rerr := os.ReadFile(path)
-			if rerr != nil {
-				return rerr
-			}
-			if merr := os.MkdirAll(filepath.Dir(target), 0o700); merr != nil {
-				return merr
-			}
-			return os.WriteFile(target, data, 0o600)
+			return copyFile(path, target)
 		}
 	})
+}
+
+// copyFile streams src to dst at mode 0600, creating the parent.
+//
+// Streamed rather than read whole: this tree is 16.6 MB across 43 files on
+// the target host and 16.3 MB of that is a single bundled browser helper,
+// inside a container capped at mem_limit 512m. Nothing here needs the file
+// in memory, so nothing here holds it.
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // nextTickSeq is R3.1: read, increment, write atomically. Missing or
