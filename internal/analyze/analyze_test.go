@@ -463,9 +463,11 @@ func TestRun_AgyMissing_KernelSectionErrorSurfaced(t *testing.T) {
 	if len(rep.Findings) != 1 {
 		t.Fatalf("len(Findings) = %d, want 1", len(rep.Findings))
 	}
-	ev := rep.Findings[0].Evidence
-	if ev == "" || !strings.Contains(ev, "kernel section unavailable") {
-		t.Fatalf("Evidence does not name the section error: %q", ev)
+	// In the body, not in the evidence: the finding's evidence is the
+	// analyzer failure itself, because that is what the key is derived
+	// from and it has to stay identical while the outage lasts.
+	if !strings.Contains(rep.Body, "kernel section unavailable") {
+		t.Fatalf("Body does not name the section error: %q", rep.Body)
 	}
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
 		t.Fatalf("Validate() error: %v", verr)
@@ -1672,6 +1674,20 @@ func TestRun_CollectorErrorsSurfacedInPrompt(t *testing.T) {
 // Case 16: the NEWEST emerg/crit lines survive the fallback
 // =====================================================================
 
+// fallbackRawBlock returns the unprocessed kernel lines a fallback report
+// carries. They live in the body, below the explanatory paragraph, which
+// is the only blank line in the document: the finding's evidence is the
+// analyzer failure itself, so that the key stays identical for the whole
+// outage.
+func fallbackRawBlock(t *testing.T, body string) string {
+	t.Helper()
+	parts := strings.Split(body, "\n\n")
+	if len(parts) < 2 {
+		t.Fatalf("body has no raw block: %q", body)
+	}
+	return parts[len(parts)-1]
+}
+
 func TestRun_Fallback_NewestLinesSurvive_ShortMessages(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.AgyBin = "/nonexistent/agy-binary-for-t4"
@@ -1680,18 +1696,18 @@ func TestRun_Fallback_NewestLinesSurvive_ShortMessages(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() expected a non-nil error")
 	}
-	ev := rep.Findings[0].Evidence
-	if n := len([]rune(ev)); n > 900 {
-		t.Fatalf("Evidence is %d runes, want <= 900", n)
+	ev := fallbackRawBlock(t, rep.Body)
+	if n := len([]rune(ev)); n > 1500 {
+		t.Fatalf("raw block is %d runes, want <= 1500", n)
 	}
 	if len(strings.Split(ev, "\n")) > cfg.RawAlertMaxLines {
-		t.Fatalf("Evidence has more than RawAlertMaxLines lines: %q", ev)
+		t.Fatalf("raw block has more than RawAlertMaxLines lines: %q", ev)
 	}
 	if !strings.Contains(ev, "line24") {
-		t.Fatalf("Evidence does not contain the newest line (line24): %q", ev)
+		t.Fatalf("raw block does not contain the newest line (line24): %q", ev)
 	}
 	if strings.Contains(ev, "line0\n") || strings.HasPrefix(ev, "line0") {
-		t.Fatalf("Evidence contains the oldest dropped line (line0): %q", ev)
+		t.Fatalf("raw block contains the oldest dropped line (line0): %q", ev)
 	}
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
 		t.Fatalf("Validate() error: %v", verr)
@@ -1706,12 +1722,12 @@ func TestRun_Fallback_NewestLinesSurvive_RuneBudgetBinds(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() expected a non-nil error")
 	}
-	ev := rep.Findings[0].Evidence
-	if n := len([]rune(ev)); n > 900 {
-		t.Fatalf("Evidence is %d runes, want <= 900", n)
+	ev := fallbackRawBlock(t, rep.Body)
+	if n := len([]rune(ev)); n > 1500 {
+		t.Fatalf("raw block is %d runes, want <= 1500", n)
 	}
 	if !strings.Contains(ev, "line24-") {
-		t.Fatalf("Evidence does not contain the newest line (line24): %q", ev)
+		t.Fatalf("raw block does not contain the newest line (line24): %q", ev)
 	}
 	// With ~80-rune messages the 900-rune budget binds before the 20-line
 	// cap does: fewer than 20 lines must survive, and the newest lines
@@ -1723,7 +1739,7 @@ func TestRun_Fallback_NewestLinesSurvive_RuneBudgetBinds(t *testing.T) {
 		t.Fatalf("rune budget did not bind: got %d lines (want fewer than %d)", lineCount, cfg.RawAlertMaxLines)
 	}
 	if strings.Contains(ev, "line5-") {
-		t.Fatalf("Evidence still contains an old line (line5) although the rune budget should have dropped it: %q", ev)
+		t.Fatalf("raw block still contains an old line (line5) although the rune budget should have dropped it: %q", ev)
 	}
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
 		t.Fatalf("Validate() error: %v", verr)

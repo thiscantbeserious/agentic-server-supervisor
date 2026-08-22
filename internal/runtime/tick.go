@@ -102,6 +102,12 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 	// 1. collect.
 	f, err := d.CollectRun(ctx, collect.Options{Cfg: cfg, Seq: seq})
 	if err != nil {
+		// The analyzer-degraded marker (R3.5b) is deliberately left
+		// untouched here: it records WHEN the outage started in wall-clock
+		// time, and a collector hiccup neither starts nor ends an analyzer
+		// outage, so it must neither bridge two separate outages together
+		// nor reset a real one's clock. A flapping collector during a
+		// genuine analyzer outage must not silence it.
 		result.ExitCode = maxCode(result.ExitCode, 2)
 		rep := CollectorUnavailable(cfg, seq, err.Error())
 		if _, verr := report.Validate(mustMarshalR(rep)); verr != nil {
@@ -164,8 +170,33 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		result.ExitCode = maxCode(result.ExitCode, 3)
 	}
 
+	// An analyzer outage is only worth waking someone for once it
+	// persists: a single failed tick is a blip and its alert would be
+	// resolved before anyone read it. Track how long the outage has
+	// actually lasted in wall-clock time and stay silent below
+	// DEGRADED_ALERT_AFTER by dropping the finding, state's rule 4 then
+	// suppresses the message. The body is left intact so the alert, when
+	// it does come, still carries this tick's raw kernel lines.
+	// Deterministic paths (raw-alert, smartd, ZED) never depended on the
+	// analyzer and are unaffected either way.
+	// stateRep is what state.Process actually sees; it starts as an alias
+	// of rep and only forks into its own copy when the hold suppresses it.
+	// rep itself is never mutated: R3.8's state-failure path below sends
+	// *rep verbatim as the "unfiltered" document, and if suppression had
+	// mutated rep in place that path would forward the held OK/no-findings
+	// version instead of the true ALERT, exactly during the window a state
+	// outage most needs the real document.
+	stateRep := rep
+	degraded := rep.Meta != nil && rep.Meta.Degraded
+	if held := analyzerHeld(cfg, logger, clock, degraded); degraded && held {
+		heldRep := *rep
+		heldRep.Findings = []report.Finding{}
+		heldRep.Status = "OK"
+		stateRep = &heldRep
+	}
+
 	// 3. marshal once, hand to state.
-	raw, merr := json.Marshal(rep)
+	raw, merr := json.Marshal(stateRep)
 	if merr != nil {
 		result.Err = merr
 		result.ExitCode = maxCode(result.ExitCode, 1)
@@ -183,18 +214,18 @@ func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult
 		// bare 16-hex keys reach Telegram. A dropped all-clear list on an
 		// already-degraded tick is strictly better than unreadable hex,
 		// and "delivery beats dedup" still holds for findings/status/body.
-		degraded := *rep
-		degraded.Resolved = []string{}
-		degradedRaw, merr2 := json.Marshal(degraded)
+		unfiltered := *rep
+		unfiltered.Resolved = []string{}
+		unfilteredRaw, merr2 := json.Marshal(unfiltered)
 		if merr2 != nil {
-			degradedRaw = raw // defensive: marshal of a struct we just unmarshal-shaped cannot fail in practice
+			unfilteredRaw = raw // defensive: marshal of a struct we just unmarshal-shaped cannot fail in practice
 		}
 
 		result.ExitCode = maxCode(result.ExitCode, 5)
-		result.Report = &degraded
-		if err := d.NotifySend(ctx, cfg, degraded, false); err != nil {
+		result.Report = &unfiltered
+		if err := d.NotifySend(ctx, cfg, unfiltered, false); err != nil {
 			result.ExitCode = maxCode(result.ExitCode, 4)
-			queueOrLog(d, logger, &result, degradedRaw, "state-failure report")
+			queueOrLog(d, logger, &result, unfilteredRaw, "state-failure report")
 		} else {
 			result.Notified = true
 		}

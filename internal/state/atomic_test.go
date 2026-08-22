@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// writeAtomic must not leave its temp file behind when the final Rename
+// WriteAtomic must not leave its temp file behind when the final Rename
 // fails, a stray .tmp-* in history/ evicts a real report from analyze's
 // window (S.9 case 2), and one anywhere else is a write outside the C4
 // whitelist that outlives the failed call. Renaming a regular file onto an
@@ -21,9 +21,9 @@ func TestWriteAtomic_CleansUpTempFileOnRenameFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := writeAtomic(stateDir, "heartbeat", []byte("data\n"), 0o644)
+	err := WriteAtomic(stateDir, "heartbeat", []byte("data\n"), 0o644)
 	if err == nil {
-		t.Fatal("writeAtomic onto an existing directory = nil error, want non-nil")
+		t.Fatal("WriteAtomic onto an existing directory = nil error, want non-nil")
 	}
 
 	entries, err := os.ReadDir(stateDir)
@@ -32,7 +32,7 @@ func TestWriteAtomic_CleansUpTempFileOnRenameFailure(t *testing.T) {
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
-			t.Errorf("writeAtomic left a temp file behind after a failed Rename: %s", e.Name())
+			t.Errorf("WriteAtomic left a temp file behind after a failed Rename: %s", e.Name())
 		}
 	}
 }

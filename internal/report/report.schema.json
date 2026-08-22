@@ -26,7 +26,7 @@
           "component": { "type": "string",
             "enum": ["kernel","ras","smart","sensors","resources","services","network","zfs","meta"] },
           "evidence": { "type": "string", "minLength": 1, "maxLength": 1000,
-            "description": "Verbatim original log line(s) from FACTS, newline-separated. Never invented." },
+            "description": "For a model-authored finding: verbatim original log line(s) from FACTS, newline-separated, never invented, never paraphrased; this clause constrains only the model. Two LLM-free exceptions, both component 'meta'. The analyzer-unavailable fallback (analyze.md 5): a fixed, deterministic phrase in place of a log line, because its dedup key is derived from this field and must not move across ticks while the outage continues. The collector-unavailable fallback (runtime.md R3.5): the real captured collector error text, which varies tick to tick and is the only diagnostic available; its dedup key is instead a separate fixed string, independent of this field, so state still re-notifies on the ALERT window rather than once per tick." },
           "explanation": { "type": "string", "minLength": 1, "maxLength": 800 },
           "analysis": { "type": "string", "maxLength": 1200,
             "description": "Deep dive only: transient vs. trend, redundancy state, blast radius." },
@@ -51,7 +51,8 @@
       "properties": {
         "hostname": { "type": "string" },
         "tick_seq": { "type": "integer", "minimum": 0 },
-        "raw": { "type": "boolean", "description": "true for the LLM-free raw-alert path." }
+        "raw": { "type": "boolean", "description": "true for the LLM-free raw-alert path." },
+        "degraded": { "type": "boolean", "description": "true when the analyzer failed and this is the LLM-free fallback." }
       }
     }
   }

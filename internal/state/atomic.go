@@ -5,9 +5,12 @@ import (
 	"path/filepath"
 )
 
-// writeAtomic writes data to a file atomically by using a temp file + rename.
-// relPath is relative to stateDir.
-func writeAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error {
+// WriteAtomic writes data to a file atomically by using a temp file + rename.
+// relPath is relative to stateDir. Exported so runtime's own STATE_DIR
+// writes (tick-seq, analyzer-fails, R3.9) share this durability rather than
+// growing a second, weaker copy: fsync before close, and the temp file is
+// removed on any failure so nothing stray is left in $STATE_DIR.
+func WriteAtomic(stateDir, relPath string, data []byte, mode os.FileMode) error {
 	fullPath := filepath.Join(stateDir, relPath)
 	dir := filepath.Dir(fullPath)
 

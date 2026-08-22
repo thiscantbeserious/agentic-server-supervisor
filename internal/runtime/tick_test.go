@@ -158,12 +158,63 @@ func TestTick_RawAlertWithoutAgy(t *testing.T) {
 
 	Tick(context.Background(), cfg, 1, d)
 
+	// A single degraded tick is below the R3.5b hold threshold, so the
+	// fallback itself sends nothing: state's rule 4 suppresses the held
+	// document, and (state.md rule 3, amended) a document carrying
+	// meta.degraded never earns the heartbeat either, even though tick0's
+	// hour would otherwise make one due. Before that heartbeat amendment
+	// this test observed 2 requests (raw alert + the heartbeat, which
+	// happened to also be status OK) without ever checking what the
+	// second one actually was; now there genuinely is only the raw alert.
+	reqs := rec.all()
+	if len(reqs) != 1 {
+		t.Fatalf("apprise received %d requests, want exactly 1 (raw alert only, the degraded fallback is held below threshold): %+v", len(reqs), reqs)
+	}
+	var p0 struct{ Title, Body string }
+	json.Unmarshal(reqs[0].body, &p0)
+	if !strings.HasPrefix(p0.Title, "[ALERT]") {
+		t.Errorf("raw POST title = %q, want prefix [ALERT]", p0.Title)
+	}
+	if !strings.Contains(p0.Body, "Hardware Error") {
+		t.Errorf("raw POST body missing the raw line: %q", p0.Body)
+	}
+}
+
+// TestTick_RawAlertPrecedesAnalysisNotification pins design principle 4:
+// the raw-alert scan (step 1b) is dispatched before analyze even runs
+// (step 2), so a crashing or slow analyzer can never delay a critical
+// kernel event reaching the operator. Needs a tick that sends TWO
+// notifications so ordering is even observable: a degraded/fallback tick
+// (as TestTick_RawAlertWithoutAgy above uses) does not exercise this at
+// all, since R3.5b's hold suppresses the fallback's own notification below
+// its threshold, leaving nothing to compare the raw alert's timestamp
+// against. A healthy analyzer returning a real finding does send its own
+// notification in the same tick, alongside the raw alert the same kernel
+// line independently triggers.
+func TestTick_RawAlertPrecedesAnalysisNotification(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	wd, _ := os.Getwd()
+	t.Setenv("PATH", filepath.Join(wd, "testdata", "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeJSONL(t, filepath.Join(cfg.HostJournalDir, "kernel.jsonl"), []map[string]any{
+		{"__REALTIME_TIMESTAMP": "1755248461000000", "PRIORITY": "2", "SYSLOG_IDENTIFIER": "kernel", "MESSAGE": "mce: Hardware Error"},
+	})
+
+	d := baseDeps(store)
+	d.CollectRun = collect.Run
+	d.AnalyzeRun = stubAnalyzeReturning(watchReport())
+
+	Tick(context.Background(), cfg, 1, d)
+
 	reqs := rec.all()
 	if len(reqs) < 2 {
-		t.Fatalf("apprise received %d requests, want at least 2 (raw + fallback): %+v", len(reqs), reqs)
+		t.Fatalf("apprise received %d requests, want at least 2 (raw alert + analyzer finding): %+v", len(reqs), reqs)
 	}
 	if reqs[1].at.Before(reqs[0].at) {
-		t.Errorf("raw alert did not precede the fallback POST: raw=%v fallback=%v", reqs[0].at, reqs[1].at)
+		t.Errorf("raw alert did not precede the analysis notification: raw=%v later=%v", reqs[0].at, reqs[1].at)
 	}
 	var p0 struct{ Title, Body string }
 	json.Unmarshal(reqs[0].body, &p0)
@@ -320,6 +371,57 @@ func TestTick_StateFailureBlanksResolvedKeys(t *testing.T) {
 	// everything except the all-clear list state can no longer substantiate).
 	if !strings.Contains(p.Body, analyzed.Findings[0].Evidence) {
 		t.Error("findings were lost on the rc-5 path too, not just resolved[]")
+	}
+}
+
+// TestTick_StateFailureDuringHoldSendsUnfilteredAlert asserts R3.8's
+// unfiltered-on-state-failure guarantee still holds during the R3.5b
+// degraded-analyzer hold window. tick.go suppresses the report it hands to
+// state (empty findings, status OK) below the alert threshold; if that
+// suppression mutated the shared report in place, the rc-5 path below
+// would forward the ALREADY-SUPPRESSED document instead of the true one,
+// and an operator would receive "[OK] ... all clear" for an active
+// analyzer outage precisely when state itself is also down.
+func TestTick_StateFailureDuringHoldSendsUnfilteredAlert(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = func(ctx context.Context, o analyze.Options, ad analyze.Deps) (*report.Report, error) {
+		return analyze.Fallback(cfg, o.Seq, "agy_failed", o.Facts), errors.New("analyze: agy failed")
+	}
+	d.StateProcess = func(raw []byte) (*state.Decision, error) {
+		return nil, errors.New("state dir unwritable")
+	}
+
+	// seq 1, at elapsed 0s of the outage, well below DEGRADED_ALERT_AFTER:
+	// the hold would suppress this tick's document on the normal
+	// (state-healthy) path.
+	res := Tick(context.Background(), cfg, 1, d)
+
+	if res.Report == nil || res.Report.Status != "ALERT" {
+		t.Fatalf("Report.Status = %v, want ALERT (the true document, not the held/suppressed one)", res.Report)
+	}
+	if len(res.Report.Findings) == 0 {
+		t.Fatal("Report.Findings is empty, the true document's finding was lost")
+	}
+	reqs := rec.all()
+	if len(reqs) != 1 {
+		t.Fatalf("apprise received %d requests, want 1", len(reqs))
+	}
+	var p struct {
+		Title string
+		Body  string
+	}
+	json.Unmarshal(reqs[0].body, &p)
+	if strings.Contains(p.Title, "OK") || strings.Contains(p.Body, "all clear") {
+		t.Errorf("delivered message reads as all-clear during an active outage: title=%q body=%q", p.Title, p.Body)
+	}
+	if !strings.Contains(p.Title, "Analyzer unavailable") {
+		t.Errorf("delivered title = %q, want it to carry the analyzer-unavailable headline", p.Title)
 	}
 }
 

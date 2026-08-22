@@ -216,13 +216,13 @@ The codes must not reach report text, because `notify` strips `_` from every rep
     {
       "severity": "alert",
       "component": "meta",
-      "evidence": "<RAWLINES_900>",
+      "evidence": "analyzer unavailable",
       "explanation": "Analyzer unavailable (<REASON>). Raw high-priority kernel lines are reported unfiltered so no hardware event is lost.",
       "key": "<KEY>"
     }
   ],
   "resolved": [],
-  "meta": { "hostname": "<HOST>", "tick_seq": <SEQ> }
+  "meta": { "hostname": "<HOST>", "tick_seq": <SEQ>, "degraded": true }
 }
 ```
 
@@ -260,7 +260,13 @@ if raw == "" {
 }
 ```
 
-`<RAWLINES_900>` = `truncRunes(raw, 900)`, `<RAWLINES_1500>` = `truncRunes(raw, 1500)`. `<KEY>` = `dedup.Key("meta", raw)`, so repeated analyzer outages deduplicate instead of spamming. The fallback is passed through `report.Validate` before being returned; if that ever fails it is still returned with the same error (test 4 asserts it passes).
+`<RAWLINES_1500>` = `truncLinesKeepNewest(lines, 1500, raw)`, not a naive `truncRunes(raw, 1500)`: it fits whole lines into the 1500-rune budget by dropping from the OLDEST end first, never splitting a line, so the newest line always survives when the budget binds. Only when even that single newest line alone exceeds 1500 runes are its own trailing runes kept (suffix truncation) instead of the whole thing. A prefix truncation of the joined text would do the opposite of what this exists for: cut the newest, most relevant lines to keep the oldest. `<KEY>` = `dedup.Key("meta", "analyzer unavailable")`, which is `dedup.Key(component, evidence)` over this document's own fields, the same derivation `state` applies when it recomputes a stripped key (C6).
+
+**The evidence is the failure, not the kernel text the report carries.** `raw` changes from tick to tick on any host that actually has kernel errors, so an evidence built from it produces a new key every tick: one analyzer outage then arrives as an alert plus a resolve for the previous alert, once per tick, for as long as it lasts. The kernel lines still travel unprocessed in the body, and the deterministic paths (raw-alert, smartd, ZED) never depended on the analyzer at all.
+
+`meta.degraded` marks the document as the LLM-free fallback. It is what lets `runtime` hold a short outage back (`runtime.md` R3.x) without having to infer "this is a fallback" from the error value it was returned with.
+
+The fallback is passed through `report.Validate` before being returned; if that ever fails it is still returned with the same error (test 4 asserts it passes).
 
 ### 6. Algorithm (normative order)
 

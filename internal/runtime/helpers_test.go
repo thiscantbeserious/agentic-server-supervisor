@@ -109,6 +109,18 @@ func testConfig(t *testing.T, tick time.Time) *config.Config {
 	return cfg
 }
 
+// tickTime returns the wall-clock time of the seq'th tick (1-based),
+// spaced TICK_INTERVAL apart from tick0. R3.5b's hold is measured in
+// elapsed wall-clock time (nowFor/cfg.Now, C9), not a count of Tick()
+// calls, and Tick() itself never advances the clock, only Loop() does, via
+// time.After. A test that drives several Tick() calls to probe the hold
+// and leaves cfg.Now fixed simulates ticks that all land at the same
+// instant, which the hold would never cross; such a test must set
+// cfg.Now = tickTime(cfg, seq) before each call.
+func tickTime(cfg *config.Config, seq int64) time.Time {
+	return tick0.Add(time.Duration(seq-1) * cfg.TickInterval)
+}
+
 func newStore(t *testing.T, cfg *config.Config) *state.Store {
 	t.Helper()
 	s, err := state.New(cfg)
