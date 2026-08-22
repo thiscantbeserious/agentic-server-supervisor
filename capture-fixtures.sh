@@ -57,7 +57,8 @@ scrub() {
     `# ids are. The old {16,} form also matched 16-digit journal` \
     `# timestamps, replacing every __REALTIME_TIMESTAMP with "GUID" and` \
     `# destroying the one field the journal parsing tests need.` \
-    -e 's/\b[0-9a-f]{32}\b/GUID/g'
+    -e 's/\b[0-9a-f]{32}\b/GUID/g' \
+  | { if [ -s "$IDENT_SED" ]; then sed -f "$IDENT_SED"; else cat; fi; }
 }
 
 # verify OUT, refuses to call a capture finished while it still carries
@@ -80,6 +81,18 @@ verify() {
       bad=1
     fi
   done
+  # The values themselves, which is the check that matters: the patterns
+  # above only cover shapes somebody thought of, and three rounds of that
+  # each missed one.
+  while IFS= read -r ident; do
+    [ -n "$ident" ] || continue
+    if grep -rqF "$ident" "$dir" 2>/dev/null; then
+      echo "$PROG: SCRUB FAILED, a hardware identifier survived verbatim" >&2
+      grep -rlF "$ident" "$dir" 2>/dev/null | head -3 >&2
+      bad=1
+    fi
+  done < "${IDENT_LIST:-/dev/null}"
+
   if [ -n "$HOST" ] && grep -rqiE "\b${HOST}\b" "$dir" 2>/dev/null; then
     echo "$PROG: SCRUB FAILED, the hostname is still present" >&2
     bad=1
@@ -94,6 +107,21 @@ cap() {
     && printf '  %-34s %s\n' "$name" "ok" \
     || printf '  %-34s %s\n' "$name" "FAILED (kept, read it)"
 }
+
+# Built before anything is captured, so every command's output passes
+# through it. Escaped for sed: serials are alphanumeric in practice, but
+# nothing guarantees it, and an unescaped delimiter would corrupt the script
+# rather than fail visibly.
+IDENT_SED="$(mktemp)"
+IDENT_LIST="$(mktemp)"
+trap 'rm -f "$IDENT_SED" "$IDENT_LIST"' EXIT
+collect_identifiers > "$IDENT_LIST" 2>/dev/null || true
+while IFS= read -r ident; do
+  [ -n "$ident" ] || continue
+  esc="$(printf '%s' "$ident" | sed -e 's/[|\\&.^$*[]/\\&/g')"
+  printf 's|%s|SERIAL|g\n' "$esc" >> "$IDENT_SED"
+done < "$IDENT_LIST"
+echo "$PROG: $(wc -l < "$IDENT_LIST" | tr -d " ") hardware identifier(s) will be replaced by value"
 
 echo "$PROG: writing to $OUT"
 
