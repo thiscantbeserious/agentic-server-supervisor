@@ -124,11 +124,35 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 
 	// The resolved set is output-only: it needs this tick's findings, which
 	// do not exist until after the triage call below, so it is never part
-	// of the prompt, only the newest history report (kept for
+	// of the prompt, only the eligible history report (kept for
 	// computeResolved) is needed here.
-	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryN)
-	histLines := historyProjectionLines(hist)
-	newest := newestHistory(hist)
+	//
+	// Read up to HISTORY_KEEP, not HISTORY_N: HISTORY_N bounds the prompt
+	// window because that window costs prompt tokens, but the resolved
+	// diff below is pure Go set arithmetic over files already on disk and
+	// pays no token cost, so reusing the token-driven number here was an
+	// accident of implementation, not a decision (issue #39). Reading up
+	// to 50 small JSON files on a tick that already runs an LLM call is
+	// not worth optimising against, and it is what lets the walk-back
+	// below survive an outage longer than the ~25 minutes HISTORY_N alone
+	// would cover.
+	hist := loadHistoryReports(cfg.StateDir, cfg.HistoryKeep)
+	promptHist := hist
+	if len(promptHist) > cfg.HistoryN {
+		promptHist = promptHist[len(promptHist)-cfg.HistoryN:]
+	}
+	histLines := historyProjectionLines(promptHist)
+	newest, exhausted := newestEligible(hist)
+	if exhausted {
+		// Every retained entry is a degraded fallback tick: a continuous
+		// outage longer than HISTORY_KEEP ticks. A finding open before it
+		// cannot be proven resolved from anything on disk, and it will
+		// orphan exactly as it did before this fix (contracts/analyze.md
+		// §6 step 7 states this as the walk-back's residual limit). That
+		// must never be silent (ARCHITECTURE §5): this WARN is the only
+		// trace an operator has that the walk-back gave up.
+		logger.Warn("resolve: walk-back exhausted history, no non-degraded entry to diff against", "retained", len(hist))
+	}
 
 	triagePrompt, err := buildTriagePrompt(cfg, o.Facts, histLines, nonce)
 	if err != nil {

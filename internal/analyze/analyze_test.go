@@ -1022,6 +1022,59 @@ func TestRun_HistoryWindow_IgnoresNonJSONFiles(t *testing.T) {
 	}
 }
 
+// TestRun_HistoryWindow_BackfillsPastACorruptEntry pins the behaviour
+// change issue #39's fix introduced (main's ruling: accept it, but stop it
+// being silent by testing it). Reading for the resolve diff now happens
+// over HISTORY_KEEP files instead of HISTORY_N, and the prompt window is
+// then taken as the newest HISTORY_N of whatever *parsed*, not the newest
+// HISTORY_N *filenames* pre-filtered before parsing.
+//
+// With HISTORY_N=2 and a real-but-unparseable ".json" file (valid
+// filename, invalid content, a corrupted write rather than an atomic
+// .tmp-* leftover) sitting between two real entries: the old
+// loadHistoryReports(dir, HISTORY_N) picked the newest 2 *filenames*
+// first, corrupt-mid included, parsed, dropped the corrupt one, and
+// returned a *short* window (1 entry) rather than reaching further back
+// for a second real one. This code reads up to HISTORY_KEEP filenames,
+// parses all of them, drops the corrupt one, and only then takes the
+// newest HISTORY_N of the survivors, so the model still gets a full
+// 2-entry window, backfilled with the older real entry the old code would
+// have left out.
+func TestRun_HistoryWindow_BackfillsPastACorruptEntry(t *testing.T) {
+	cfg := newTestConfig(t)
+	t.Setenv("HISTORY_N", "2")
+	cfg.HistoryN = 2
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	oldest := report.Report{Status: "OK", Headline: "oldest-real-report", Body: "b", Findings: []report.Finding{}, Resolved: []string{}}
+	newest := report.Report{Status: "OK", Headline: "newest-real-report", Body: "b", Findings: []report.Finding{}, Resolved: []string{}}
+	writeHistoryReport(t, histDir, 1, oldest)
+	// A ".json" file (the filter in loadHistoryReports lets it through)
+	// whose content fails json.Unmarshal, distinct from the non-JSON-
+	// suffix case above: this is a corrupted write, not an in-flight
+	// atomic rename.
+	if err := os.WriteFile(filepath.Join(histDir, "1700000002-000002.json"), []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHistoryReport(t, histDir, 3, newest)
+
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(4), Seq: 4}, d); err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	prompt := rec.prompts[0]
+	if !strings.Contains(prompt, "oldest-real-report") {
+		t.Fatalf("HISTORY_N=2 window must backfill past the corrupt entry to the older real one, not shrink to 1:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "newest-real-report") {
+		t.Fatalf("HISTORY_N=2 window lost the newest real entry:\n%s", prompt)
+	}
+}
+
 // TestRun_NilRunAgy_DoesNotPanic is a regression test for a guard that once
 // shipped with no test protecting it. Run must never panic, even with a
 // Deps that forgot to set RunAgy.
@@ -1261,6 +1314,270 @@ func TestRun_ResolvedIsKeyRegardlessOfEvidenceLength(t *testing.T) {
 	}
 	if _, verr := report.Validate(mustMarshal(t, rep)); verr != nil {
 		t.Fatalf("Validate() error: %v", verr)
+	}
+}
+
+// writeHistoryReport is a small helper for the walk-back tests below: it
+// marshals rep and writes it as a history file named so that sort.Strings
+// orders it at position seq among its siblings (oldest first), matching
+// the real filename convention `<now>-<tick_seq>`.
+func writeHistoryReport(t *testing.T, histDir string, seq int, rep report.Report) {
+	t.Helper()
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("%010d-%06d.json", 1700000000+seq, seq)
+	if err := os.WriteFile(filepath.Join(histDir, name), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRun_ResolvedWalksBackPastDegradedHistoryEntries is the issue #39
+// regression: a finding open before an analyzer outage and genuinely
+// cleared after it must still be named in resolved[], even though the
+// newest history entry is a degraded fallback tick that never looked at
+// it. Per the ruling on #39, the walk-back reads up to HISTORY_KEEP
+// entries (not HISTORY_N, which only bounds the prompt window and has no
+// bearing on this diff's cost) and skips every degraded entry to find the
+// last one that actually observed the world.
+func TestRun_ResolvedWalksBackPastDegradedHistoryEntries(t *testing.T) {
+	cfg := newTestConfig(t)
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	goneEvidence := "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
+	goneKey := dedup.Key("smart", goneEvidence)
+
+	// tick 1: a real, non-degraded report that saw the finding.
+	writeHistoryReport(t, histDir, 1, report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "watch", Component: "smart", Evidence: goneEvidence, Explanation: "e", Key: goneKey,
+		}},
+		Resolved: []string{},
+	})
+	// tick 2: a degraded fallback tick. It never looked at smart, so it
+	// carries neither the finding nor any information about it, only its
+	// own synthetic "analyzer unavailable" finding.
+	writeHistoryReport(t, histDir, 2, report.Report{
+		Status: "ALERT", Headline: "Analyzer unavailable", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "alert", Component: "meta", Evidence: "analyzer exited non-zero",
+			Explanation: "e", Key: dedup.Key("meta", "analyzer exited non-zero"),
+		}},
+		Resolved: []string{},
+		Meta:     &report.Meta{Degraded: true},
+	})
+
+	// tick 3: a real report, agy recovered, the condition genuinely
+	// cleared (no smart finding).
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(3), Seq: 3}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	found := false
+	for _, r := range rep.Resolved {
+		if r == goneKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Resolved = %v, want it to contain %q: computeResolved must walk back past the degraded tick 2 entry to tick 1, the last one that actually observed smart", rep.Resolved, goneKey)
+	}
+}
+
+// TestRun_ResolvedWalkBackReadsBeyondHistoryN guards the ruling's specific
+// correction to option 1: the walk-back must read up to HISTORY_KEEP, not
+// HISTORY_N. HISTORY_N only bounds the prompt window (a token cost); the
+// resolve diff is free Go set arithmetic and has no reason to share that
+// bound. Here HISTORY_N=1 so the prompt window alone would only ever see
+// the single newest (degraded) entry, but two more degraded entries sit
+// between it and the real one, well within the default HISTORY_KEEP=50.
+// If the walk-back mistakenly reused HISTORY_N, it would never look past
+// the newest entry and would report the alert unresolved, orphaning it
+// after an outage of only 3 ticks, exactly the coverage gap the ruling
+// rejected.
+func TestRun_ResolvedWalkBackReadsBeyondHistoryN(t *testing.T) {
+	t.Setenv("HISTORY_N", "1")
+	cfg := newTestConfig(t)
+	if cfg.HistoryN != 1 {
+		t.Fatalf("test setup: cfg.HistoryN = %d, want 1", cfg.HistoryN)
+	}
+	if cfg.HistoryKeep <= cfg.HistoryN {
+		t.Fatalf("test setup: cfg.HistoryKeep = %d must exceed cfg.HistoryN = %d for this test to mean anything", cfg.HistoryKeep, cfg.HistoryN)
+	}
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	goneEvidence := "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
+	goneKey := dedup.Key("smart", goneEvidence)
+	degraded := func(seq int) report.Report {
+		return report.Report{
+			Status: "ALERT", Headline: "Analyzer unavailable", Body: "b",
+			Findings: []report.Finding{{
+				Severity: "alert", Component: "meta", Evidence: "analyzer exited non-zero",
+				Explanation: "e", Key: dedup.Key("meta", "analyzer exited non-zero"),
+			}},
+			Resolved: []string{},
+			Meta:     &report.Meta{Degraded: true},
+		}
+	}
+
+	writeHistoryReport(t, histDir, 1, report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "watch", Component: "smart", Evidence: goneEvidence, Explanation: "e", Key: goneKey,
+		}},
+		Resolved: []string{},
+	})
+	writeHistoryReport(t, histDir, 2, degraded(2))
+	writeHistoryReport(t, histDir, 3, degraded(3)) // newest: HISTORY_N=1 would see only this one
+
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(4), Seq: 4}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	found := false
+	for _, r := range rep.Resolved {
+		if r == goneKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Resolved = %v, want it to contain %q: the walk-back must read up to HISTORY_KEEP, not just the HISTORY_N-sized prompt window, to reach the last non-degraded entry", rep.Resolved, goneKey)
+	}
+}
+
+// TestRun_ResolvedUsesNewestEntryDirectly_WhenNotDegraded is the normal
+// case the walk-back must leave alone: when the newest history entry is
+// not degraded, it is still the one compared, exactly as before this
+// change. Mutating the walk-back to always skip to the oldest entry, or
+// to skip a non-degraded newest entry, must fail this test.
+func TestRun_ResolvedUsesNewestEntryDirectly_WhenNotDegraded(t *testing.T) {
+	cfg := newTestConfig(t)
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staleEvidence := "an older finding, still present in the newest entry only"
+	staleKey := dedup.Key("smart", staleEvidence)
+	goneEvidence := "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
+	goneKey := dedup.Key("smart", goneEvidence)
+
+	// tick 1: older entry, must NOT be consulted, its own distinct finding
+	// (staleKey) must not appear in resolved[] even though it too is
+	// absent from tick 2's currentKeys, walk-back only compares against
+	// the single eligible entry it selects, never merges across entries.
+	writeHistoryReport(t, histDir, 1, report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "watch", Component: "smart", Evidence: staleEvidence, Explanation: "e", Key: staleKey,
+		}},
+		Resolved: []string{},
+	})
+	// tick 2: newest entry, not degraded, carries goneKey. This is the
+	// one that must be compared.
+	writeHistoryReport(t, histDir, 2, report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{{
+			Severity: "watch", Component: "smart", Evidence: goneEvidence, Explanation: "e", Key: goneKey,
+		}},
+		Resolved: []string{},
+	})
+
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(3), Seq: 3}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if len(rep.Resolved) != 1 || rep.Resolved[0] != goneKey {
+		t.Fatalf("Resolved = %v, want exactly [%q]: the newest (non-degraded) entry must be compared directly, not the oldest, and not both merged", rep.Resolved, goneKey)
+	}
+}
+
+// TestRun_ResolvedWalkBackExhausted_WarnsLoudly covers the residual limit
+// the ruling on #39 requires stay loud: an outage longer than HISTORY_KEEP
+// ticks leaves no non-degraded entry on disk at all. That case still
+// orphans the alert, exactly as it did before this fix, but it must never
+// be silent about it (ARCHITECTURE §5): a WARN line is the only trace an
+// operator has that the walk-back gave up.
+func TestRun_ResolvedWalkBackExhausted_WarnsLoudly(t *testing.T) {
+	t.Setenv("HISTORY_KEEP", "2") // small on purpose: exhaust it with 2 files, not 50
+	cfg := newTestConfig(t)
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HistoryKeep != 2 {
+		t.Fatalf("test setup: cfg.HistoryKeep = %d, want 2", cfg.HistoryKeep)
+	}
+
+	degraded := func(seq int) report.Report {
+		return report.Report{
+			Status: "ALERT", Headline: "Analyzer unavailable", Body: "b",
+			Findings: []report.Finding{{
+				Severity: "alert", Component: "meta", Evidence: "analyzer exited non-zero",
+				Explanation: "e", Key: dedup.Key("meta", "analyzer exited non-zero"),
+			}},
+			Resolved: []string{},
+			Meta:     &report.Meta{Degraded: true},
+		}
+	}
+	// Every retained entry (HISTORY_KEEP=2) is degraded: a long, continuous
+	// outage, exactly the residual limit stated in contracts/analyze.md
+	// §6 step 7.
+	writeHistoryReport(t, histDir, 1, degraded(1))
+	writeHistoryReport(t, histDir, 2, degraded(2))
+
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(3), Seq: 3}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if len(rep.Resolved) != 0 {
+		t.Fatalf("Resolved = %v, want none: no non-degraded entry exists to diff against", rep.Resolved)
+	}
+	if !strings.Contains(buf.String(), "WARN") || !strings.Contains(buf.String(), "walk-back exhausted") {
+		t.Fatalf("expected a WARN log line naming the exhausted walk-back when it exhausts every retained entry without a non-degraded one, got: %s", buf.String())
+	}
+}
+
+// TestRun_ResolvedNoHistory_NeverWarns guards newestEligible's two return
+// values against being conflated: "history is empty" (first boot, or any
+// fresh $STATE_DIR) and "history is non-empty but every entry is degraded"
+// (a long outage) are different facts, and only the second is the loud,
+// operator-relevant case TestRun_ResolvedWalkBackExhausted_WarnsLoudly
+// covers. Before this test existed, `return nil, len(hist) > 0` and a
+// mutated `return nil, true` were behaviourally indistinguishable to the
+// suite: both pass every other test, and the mutant would make the
+// exhausted-walk-back WARN fire on every healthy first tick a fresh
+// install ever runs, exactly the blind-warning failure A9 and
+// ARCHITECTURE §1 exist to prevent.
+func TestRun_ResolvedNoHistory_NeverWarns(t *testing.T) {
+	cfg := newTestConfig(t) // newTestConfig never creates $STATE_DIR/history
+
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if len(rep.Resolved) != 0 {
+		t.Fatalf("Resolved = %v, want none: there is no history to resolve anything against", rep.Resolved)
+	}
+	if strings.Contains(buf.String(), "walk-back exhausted") {
+		t.Fatalf("a fresh $STATE_DIR with no history at all must never log the exhausted-walk-back WARN, that WARN means a real outage outlasted HISTORY_KEEP, not \"nothing has happened yet\": got %s", buf.String())
 	}
 }
 
