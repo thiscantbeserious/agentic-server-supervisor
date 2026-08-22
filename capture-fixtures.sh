@@ -66,7 +66,7 @@ scrub() {
 # bug on the person least able to know what the scrubber intended. These
 # patterns are what leaked from a real host, not what seemed plausible.
 verify() {
-  local dir="$1" bad=0 hits
+  local dir="$1" bad=0
   local -a checks=(
     'S/N:[A-Za-z0-9._-]+'
     'WWN:[0-9a-fA-F]{2,}'
@@ -74,7 +74,6 @@ verify() {
     '/dev/disk/by-id/[a-z]+-[A-Za-z0-9._-]+_[A-Za-z0-9]{4,}(\b[^_]|$)'
   )
   for pat in "${checks[@]}"; do
-    hits="$(grep -rEl "$pat" "$dir" 2>/dev/null | grep -v 'SERIAL\|WWN' || true)"
     if grep -rE "$pat" "$dir" 2>/dev/null | grep -qvE 'SERIAL|WWN:WWN'; then
       echo "$PROG: SCRUB FAILED, identifiers still present for /$pat/:" >&2
       grep -rEo "$pat" "$dir" 2>/dev/null | grep -vE 'SERIAL|WWN:WWN' | sort -u | head -5 >&2
