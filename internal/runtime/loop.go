@@ -190,7 +190,62 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 		logger.Warn("runtime skipped unreadable files while seeding agy credentials",
 			"count", len(skipped), "files", strings.Join(skipped, ","))
 	}
+	if err := writeAgyToolPolicy(dst); err != nil {
+		logger.Warn("runtime could not write agy tool policy", "error", err)
+	}
 	os.Setenv("HOME", cfg.AgyHome)
+}
+
+// deniedAgyTools are the tool calls the analyzer must never make.
+//
+// agy is an agent: mid-analysis it decides to run shell commands. In
+// --print mode nobody can approve them, so the turn dies with
+//
+//	permission check failed for command "ls -la":
+//	user denied permission to run command: ls -la
+//
+// and the envelope returns status ERROR with an empty response, which the
+// report parser reports as invalid JSON. With these rules configured the
+// same prompt returns SUCCESS and a valid report: the model answers rather
+// than reaching for a shell.
+//
+// The security argument is the stronger one. This analyzer's input is
+// attacker-controlled log text, and a tool call it can be talked into is a
+// prompt injection with a shell on the end of it. The compose file already
+// keeps the Telegram token out of this process for the same reason.
+var deniedAgyTools = []string{"run_command(*)", "write_file(*)", "*"}
+
+// writeAgyToolPolicy merges the deny rules into settings.json inside the
+// seeded tree, preserving whatever else the operator had there.
+//
+// Written unconditionally on every start, unlike the rest of the seed:
+// this file is policy the container owns, not state agy accumulates. If it
+// depended on what the host's settings.json happened to contain, the
+// container's safety would depend on the operator's desktop configuration.
+func writeAgyToolPolicy(geminiDir string) error {
+	path := filepath.Join(geminiDir, "antigravity-cli", "settings.json")
+	settings := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		// A settings file we cannot parse is replaced rather than
+		// preserved: the policy matters more than the operator's other
+		// keys, and agy replaces invalid settings with defaults anyway.
+		_ = json.Unmarshal(raw, &settings)
+	}
+	perm, _ := settings["permission"].(map[string]any)
+	if perm == nil {
+		perm = map[string]any{}
+	}
+	perm["deny"] = deniedAgyTools
+	settings["permission"] = perm
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
 }
 
 // copyTree copies src into dst recursively: directories 0700, files 0600.
