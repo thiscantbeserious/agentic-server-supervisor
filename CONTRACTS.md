@@ -125,6 +125,7 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `RAW_ALERT_MAX_LINES` | `20` (1–20; `findings.maxItems` is 20) | runtime, collect |
 | `RAW_ALERT_REPEAT_SECONDS` | `3600` | runtime |
 | `RAW_ALERT_MARKER_TTL_HOURS` | `168` | runtime |
+| `DEGRADED_ALERT_AFTER` | `900` (0–86400; `0` alerts on the first failed tick) | runtime |
 | `RENOTIFY_ALERT_SEC` | `3600` | state |
 | `RENOTIFY_WATCH_SEC` | `21600` | state |
 | `STALE_ALERT_SEC` | `86400` | state |

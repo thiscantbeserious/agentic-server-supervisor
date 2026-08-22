@@ -30,6 +30,7 @@ type Meta struct {
 	Hostname string `json:"hostname,omitempty"`
 	TickSeq  int64  `json:"tick_seq,omitempty"`
 	Raw      bool   `json:"raw,omitempty"`
+	Degraded bool   `json:"degraded,omitempty"`
 }
 
 type Report struct {

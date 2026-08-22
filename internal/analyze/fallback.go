@@ -52,9 +52,16 @@ func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *repor
 		lines = nil
 	}
 
-	raw900 := truncLinesKeepNewest(lines, 900, raw)
 	raw1500 := truncLinesKeepNewest(lines, 1500, raw)
-	key := dedup.Key("meta", raw)
+	// The evidence is the failure, never the kernel text this report
+	// carries: raw changes from tick to tick on a host that has kernel
+	// errors, and since the key is derived from (component, evidence),
+	// content evidence turns one analyzer outage into a new alert plus a
+	// resolve for the one before it, every tick, until it ends. The kernel
+	// lines still travel in the body, unprocessed. Derived here with the
+	// same inputs state would use when recomputing a stripped key.
+	evidence := "analyzer unavailable"
+	key := dedup.Key("meta", evidence)
 
 	return &report.Report{
 		Status:   "ALERT",
@@ -67,13 +74,13 @@ func Fallback(cfg *config.Config, seq int64, code string, f *facts.Facts) *repor
 			{
 				Severity:    "alert",
 				Component:   "meta",
-				Evidence:    raw900,
+				Evidence:    evidence,
 				Explanation: "Analyzer unavailable (" + reason + "). Raw high-priority kernel lines are reported unfiltered so no hardware event is lost.",
 				Key:         key,
 			},
 		},
 		Resolved: []string{},
-		Meta:     &report.Meta{Hostname: cfg.Hostname, TickSeq: seq},
+		Meta:     &report.Meta{Hostname: cfg.Hostname, TickSeq: seq, Degraded: true},
 	}
 }
 

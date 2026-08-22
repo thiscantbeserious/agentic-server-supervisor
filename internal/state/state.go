@@ -313,7 +313,16 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		}
 		rep.Body = body.String()
 
-	case hbDue:
+	// A document carrying meta.degraded never earns the heartbeat, even
+	// when it is otherwise due: the analyzer did not run this tick (it is
+	// the LLM-free fallback), so "all clear" is not a claim this document
+	// can back up. Without this guard, a degraded tick during the R3.5b
+	// hold window (findings already emptied, status already OK) falls
+	// straight through rule 3 and the operator's one ground-truth message
+	// of the day reads "Daily heartbeat: all clear" while the analyzer is
+	// down. Falls to rule 4 instead: no message this tick, the file stays
+	// due, and the heartbeat is sent honestly once a healthy tick runs.
+	case hbDue && !(rep.Meta != nil && rep.Meta.Degraded):
 		decision.Notify = true
 		decision.Reason = "heartbeat"
 		decision.Heartbeat = true
@@ -337,7 +346,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	if decision.Notify {
 		hbContent = hbStr
 	}
-	if err := writeAtomic(s.cfg.StateDir, "heartbeat", []byte(hbContent+"\n"), 0o644); err != nil {
+	if err := WriteAtomic(s.cfg.StateDir, "heartbeat", []byte(hbContent+"\n"), 0o644); err != nil {
 		return nil, fmt.Errorf("state: write heartbeat: %w", err)
 	}
 
@@ -425,7 +434,7 @@ func (s *Store) writeAnnotatedHistory(now, tickSeq int64, status, headline, body
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	if err := writeAtomic(s.cfg.StateDir, filepath.Join("history", name), data, 0o644); err != nil {
+	if err := WriteAtomic(s.cfg.StateDir, filepath.Join("history", name), data, 0o644); err != nil {
 		return err
 	}
 

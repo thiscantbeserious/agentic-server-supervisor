@@ -69,5 +69,5 @@ func (s *Store) loadAlertByFile(path string) (*ActiveAlert, error) {
 
 func (s *Store) saveAlert(alert *ActiveAlert) error {
 	data, _ := json.Marshal(alert)
-	return writeAtomic(s.cfg.StateDir, filepath.Join("active-alerts", alert.Key+".json"), data, 0644)
+	return WriteAtomic(s.cfg.StateDir, filepath.Join("active-alerts", alert.Key+".json"), data, 0644)
 }

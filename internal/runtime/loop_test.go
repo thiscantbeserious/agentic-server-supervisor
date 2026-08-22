@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,184 @@ func TestNextTickSeq_MissingWarnsToo(t *testing.T) {
 		t.Errorf("stderr does not WARN on a missing tick-seq file: %q", logBuf.String())
 	}
 }
+
+// --- analyzer-degraded marker durability (R3.5b) ---
+//
+// R3.5b holds an analyzer alert until it has actually LASTED
+// DEGRADED_ALERT_AFTER of wall-clock time, not until a certain number of
+// Tick() calls have happened: $STATE_DIR/analyzer-fails stores the unix
+// timestamp of the first degraded tick, and analyzerHeld compares elapsed
+// time (now - first) against DEGRADED_ALERT_AFTER. now is always the
+// caller's own clock read (nowFor/cfg.Now, C9), passed in explicitly,
+// never a bare time.Now() inside analyzerHeld itself.
+
+// A stored timestamp AFTER now means the clock jumped backwards (or the
+// file is corrupt): now.Sub(stored) would be negative, which compares less
+// than any positive DEGRADED_ALERT_AFTER forever, a permanent hold. Reset
+// to now instead, same as an unparseable value, and WARN.
+func TestAnalyzerHeld_FutureStoredValueTreatedAsCorrupt(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	future := tick0.Add(time.Hour)
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, analyzerFailsFile), []byte(strconv.FormatInt(future.Unix(), 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	held := analyzerHeld(cfg, newLogger(cfg), tick0, true)
+	if !held {
+		t.Fatal("held = false, want true: a corrupt (future) marker must reset to now, not release the hold immediately")
+	}
+	if !strings.Contains(logBuf.String(), "in the future") {
+		t.Errorf("stderr does not WARN on a future marker: %q", logBuf.String())
+	}
+}
+
+// A marker stored absurdly long ago (corruption, not a real multi-year
+// outage) must reset the same way.
+func TestAnalyzerHeld_AbsurdlyOldStoredValueTreatedAsCorrupt(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	ancient := tick0.Add(-20 * 365 * 24 * time.Hour)
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, analyzerFailsFile), []byte(strconv.FormatInt(ancient.Unix(), 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	held := analyzerHeld(cfg, newLogger(cfg), tick0, true)
+	if !held {
+		t.Fatal("held = false, want true: an absurdly old marker must reset to now, not report the outage as already having lasted 20 years")
+	}
+	if !strings.Contains(logBuf.String(), "absurdly old") {
+		t.Errorf("stderr does not WARN on an absurdly old marker: %q", logBuf.String())
+	}
+}
+
+// A write failure must fail OPEN: it must not report "held" while the disk
+// stays broken, that silences a real outage indefinitely. Forced by
+// pre-creating the counter path as a directory, so WriteAtomic's final
+// rename fails (root-safe: an ENOTDIR/ENOTEMPTY-shaped failure, not a
+// permission bit, which uid 0 would sail through).
+func TestAnalyzerHeld_WriteFailureFailsOpen(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	if err := os.MkdirAll(filepath.Join(cfg.StateDir, analyzerFailsFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	held := analyzerHeld(cfg, newLogger(cfg), tick0, true)
+	if held {
+		t.Fatal("held = true, want false: a marker that cannot persist must fail open, not hold the alert")
+	}
+	if !strings.Contains(logBuf.String(), "unfiltered") {
+		t.Errorf("stderr does not WARN about the failed-open write: %q", logBuf.String())
+	}
+}
+
+// The reset path (degraded=false) must WARN when the delete itself fails,
+// distinct from the normal "nothing to delete" case, which must stay
+// silent: a stale marker surviving a healthy tick lets a later blip ride
+// through a hold that should have started fresh. Forced by making the
+// marker path a NON-EMPTY directory, so os.Remove fails with "directory
+// not empty" rather than the file simply not existing.
+func TestAnalyzerHeld_ResetDeleteFailureWarns(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	path := filepath.Join(cfg.StateDir, analyzerFailsFile)
+	if err := os.MkdirAll(filepath.Join(path, "obstruction"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	held := analyzerHeld(cfg, newLogger(cfg), tick0, false)
+	if held {
+		t.Fatal("held = true, want false: the reset path always reports not-held, delete failure or not")
+	}
+	if !strings.Contains(logBuf.String(), "could not reset") {
+		t.Errorf("stderr does not WARN on a failed marker delete: %q", logBuf.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("marker path gone despite Remove failing (test setup invalid): %v", err)
+	}
+}
+
+// A missing marker is the ordinary case (nothing to reset, or a healthy
+// system that was never degraded) and must never WARN.
+func TestAnalyzerHeld_ResetOfMissingMarkerIsSilent(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	analyzerHeld(cfg, newLogger(cfg), tick0, false)
+
+	if logBuf.String() != "" {
+		t.Errorf("stderr = %q, want empty: resetting an already-clean marker must be silent", logBuf.String())
+	}
+}
+
+// --- analyzerHeld elapsed-time threshold (R3.5b) ---
+
+// The hold releases exactly when elapsed time reaches DEGRADED_ALERT_AFTER,
+// not a tick count: with the documented defaults (TICK_INTERVAL=300s,
+// DEGRADED_ALERT_AFTER=900s), the marker is planted at tick0 (elapsed 0,
+// held), stays held at 899s elapsed, and releases at exactly 900s elapsed.
+// A literal boundary, not a call into the code under test, so a mutation
+// of "<" to "<=" (or vice versa) is caught.
+func TestAnalyzerHeld_ReleasesExactlyAtElapsedThreshold(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	logger := newLogger(cfg)
+
+	if !analyzerHeld(cfg, logger, tick0, true) {
+		t.Fatal("held = false at elapsed 0s, want true")
+	}
+	if !analyzerHeld(cfg, logger, tick0.Add(899*time.Second), true) {
+		t.Fatal("held = false at elapsed 899s, want true (still below the 900s threshold)")
+	}
+	if analyzerHeld(cfg, logger, tick0.Add(900*time.Second), true) {
+		t.Fatal("held = true at elapsed 900s, want false (the threshold has been reached)")
+	}
+}
+
+// DEGRADED_ALERT_AFTER=0 means no grace period at all: elapsed(0) < 0 is
+// false, so even the very first degraded tick releases immediately.
+func TestAnalyzerHeld_ZeroGraceNeverHolds(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	cfg.DegradedAlertAfter = 0
+
+	if analyzerHeld(cfg, newLogger(cfg), tick0, true) {
+		t.Fatal("held = true, want false: DEGRADED_ALERT_AFTER=0 must never hold")
+	}
+}
+
+// A restart mid-outage must not hand the analyzer a fresh grace period:
+// the marker's original `first` timestamp must survive being re-read, not
+// be silently overwritten with the read's own `now` on every call. This
+// pins the persistence behaviour directly (the Tick-level equivalent lives
+// in degraded_test.go); mutating `first = stored` to `first = now` in
+// analyzerHeld would make this fail while still passing every Tick-level
+// test that doesn't advance the clock between calls.
+func TestAnalyzerHeld_PreservesOriginalFirstAcrossCalls(t *testing.T) {
+	cfg := testConfig(t, tick0)
+	logger := newLogger(cfg)
+
+	analyzerHeld(cfg, logger, tick0, true) // plants first = tick0
+
+	if !analyzerHeld(cfg, logger, tick0.Add(899*time.Second), true) {
+		t.Fatal("held = false at elapsed 899s from the ORIGINAL first, want true (first must not have been re-planted at the second call's now)")
+	}
+}
+
+// --- E19: health ---
 
 // --- E19: health ---
 

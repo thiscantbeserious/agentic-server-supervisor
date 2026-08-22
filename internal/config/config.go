@@ -85,6 +85,7 @@ type Config struct {
 	RawAlertMaxLines       int
 	RawAlertRepeatSeconds  int
 	RawAlertMarkerTTLHours int
+	DegradedAlertAfter     time.Duration
 	RenotifyAlertSec       int
 	RenotifyWatchSec       int
 	StaleAlertSec          int
@@ -195,6 +196,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.RawAlertMarkerTTLHours, err = loadIntRange("RAW_ALERT_MARKER_TTL_HOURS", 168, 1, 8760); err != nil {
+		return nil, err
+	}
+	if cfg.DegradedAlertAfter, err = loadSecondsRange("DEGRADED_ALERT_AFTER", 900, 0, 86400); err != nil {
 		return nil, err
 	}
 	if cfg.RenotifyAlertSec, err = loadIntRange("RENOTIFY_ALERT_SEC", 3600, 1, maxSecondsBeforeOverflow); err != nil {

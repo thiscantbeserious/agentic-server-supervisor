@@ -242,6 +242,24 @@ A valid `report.Report`, so `notify` needs no special case, and plain text only,
 
 Built by `tick` only when `collect.Run` returns an error: `status = "ALERT"`, `headline = "Collector unavailable"`, `body` = the captured error and stderr tail (max 2000 runes), one finding `{severity:"alert", component:"meta", evidence:<error text>, explanation:"collect failed: <error>", key: dedup.Key("meta", "collector unavailable")}`, `resolved: []`, `meta` set. The key is stable across ticks on purpose, so `state` re-notifies on the ALERT window instead of every tick. It passes through `state` like any report.
 
+#### R3.5b Degraded-analyzer hold
+
+An analyzer outage is only an incident once it has actually LASTED `DEGRADED_ALERT_AFTER` of wall-clock time, not once a certain number of ticks have been observed. `tick` records the unix timestamp of the FIRST tick whose report carries `meta.degraded` (`analyze.md` §5) in `$STATE_DIR/analyzer-fails`, ASCII decimal, written atomically like `tick-seq`, deleted the moment a healthy report arrives. In the file rather than in memory: a restart mid-outage must not hand the analyzer a fresh grace period. The clock used is `tick`'s own single clock read for that tick (`nowFor`/`cfg.Now`, C9), never a second, later read.
+
+While `now - first < DEGRADED_ALERT_AFTER`, `tick` empties `findings` and sets `status = "OK"` before handing the report to `state`, whose message rule 4 then suppresses it. Once elapsed time reaches `DEGRADED_ALERT_AFTER`, the fallback goes through unchanged and `state` alerts on it once, re-notifying on the ALERT window like any other alert. The body is never touched, so the alert still carries the raw kernel lines of the tick that finally sent it. This suppression is applied to a copy handed to `state`; the report `tick` itself holds is never mutated, so R3.8's state-failure path still sends the true, unfiltered document even during the hold window.
+
+`DEGRADED_ALERT_AFTER = 0` alerts on the very first degraded tick: elapsed time at that tick is `0`, and `0 < 0` is false, so nothing is held. This is the deliberate escape hatch for an operator who wants no grace period at all, independent of `TICK_INTERVAL`. With the documented defaults (`TICK_INTERVAL=300s`, `DEGRADED_ALERT_AFTER=900s`), the elapsed-time rule and a tick-counting rule agree on which tick first alerts (the 4th, at 900s elapsed) precisely because 900 is an exact multiple of 300; this is a coincidence of the defaults, not a property of the design, which no longer references `TICK_INTERVAL` at all. Earlier drafts of this hold counted consecutive ticks instead of elapsed time and needed a `ceil(DEGRADED_ALERT_AFTER/TICK_INTERVAL)+1` fencepost correction to reach the same 900s answer; recording elapsed time directly makes that correction, and the tick-counting problem it was fixing, unnecessary.
+
+**The collector-fallback path (R3.5) leaves this marker untouched.** The analyzer did not run that tick either, but a collector failure neither starts nor ends an analyzer outage, and touching the marker on that path is wrong in both directions: clearing it lets a run of unrelated collector failures during a genuine, sustained analyzer outage silence it for as long as the collector keeps flapping (every clear restarts the outage's `first` from scratch); advancing or otherwise crediting it would let collector failures alone manufacture an analyzer-outage alert. Elapsed wall-clock time from the true `first` is exactly what should keep accruing regardless of what happens on unrelated ticks in between, so "untouched" is the only option that is correct on both sides.
+
+A stored `first` that is unparseable, in the future relative to the current clock read (a clock that jumped backwards, which would otherwise make `now - first` negative and hold forever, since a negative value compares less than any positive `DEGRADED_ALERT_AFTER`), or absurdly old (far beyond any credible outage duration, a sign of corruption rather than a genuine multi-year incident) is corrupt: reset to `now` and `WARN`. The reset (degraded=false) path also handles a delete failure: `os.Remove`'s error is checked, and anything other than "already gone" (the ordinary case, silent) is a `WARN`, since a marker that survives a healthy tick lets a later blip ride through a hold that should have started fresh.
+
+Recovery below the threshold is silent, since nothing was ever announced. Recovery from a sustained outage resolves through the normal all-clear path, which by then reports a condition a human actually saw. A marker that fails to persist fails OPEN, not closed: it is reported as not-held so this tick's alert goes through unfiltered rather than held, and is a `WARN`. Trusting whatever was last read instead would mean every subsequent tick re-reads a stale (or, if the disk stays broken, permanently absent) `first` and never crosses the threshold, holding a real outage silent indefinitely; a spurious unfiltered alert on a bad write is the safe failure mode.
+
+A held tick is still recorded to history with its headline intact (`"Analyzer unavailable"`, `status: "OK"`, empty `findings`): the suppression is a notification decision, not a record of what actually happened, so a later reader of that history entry (the next analyze prompt, an operator) sees a deliberately held alert, not a fabricated all-clear.
+
+Deterministic paths are unaffected either way. Raw alerts (R3.3) go out in step 1b, before the analyzer runs at all, and smartd/ZED never involved it.
+
 #### R3.6 Truncation
 
 Truncation of `facts.json` to `FACTS_MAX_BYTES` belongs to `collect`; `runtime` neither implements nor overrides it. Runtime relies on one invariant and tests it (E13): **entries with `Priority <= RAW_ALERT_MAX_PRIORITY` are never dropped**, so a crit line always reaches the raw-alert scan. When `meta.truncated` is true, `tick` logs `WARN tick facts truncated`. Non-empty `meta.collector_errors` ⇒ `WARN` with the section names; the tick proceeds and the analyzer reports them.
@@ -254,7 +272,7 @@ Truncation of `facts.json` to `FACTS_MAX_BYTES` belongs to `collect`; `runtime` 
 
 | Failure | tick does |
 |---|---|
-| agy down/timeout/quota | `analyze` returns its own valid fallback report with a non-nil error ⇒ passed to `state` unchanged, exit `3`. Raw alerts already went out in step 1b. |
+| agy down/timeout/quota | `analyze` returns its own valid fallback report with a non-nil error ⇒ exit `3`. Passed to `state` unchanged once the outage has lasted `DEGRADED_ALERT_AFTER` (R3.5b), stripped to a suppressed OK document before then. Raw alerts already went out in step 1b. |
 | Apprise down | `notify.Send` error ⇒ `state.OutboxAdd(payload)`, `state` is the only outbox writer. Exit `4`. Retry is step 5's take/send/ack drain; after `OUTBOX_SMTP_AFTER` failures `state` marks the item and `tick` calls `notify.Send(..., smtpFallback=true)`, which delivers via mailrise SMTP. |
 | `facts.json` over budget | `collect`'s concern; `tick` logs `WARN tick facts truncated`. |
 | Collector section failed | `WARN` with the section names, tick proceeds. |
@@ -263,7 +281,7 @@ Truncation of `facts.json` to `FACTS_MAX_BYTES` belongs to `collect`; `runtime` 
 
 #### R3.9 Filesystem contract
 
-Reads `$STATE_DIR/**` and the ro host mounts of C4. Writes **only**: `$STATE_DIR/{tick-seq, raw-alerts/*}` directly; `$STATE_DIR/{history,active-alerts,outbox,deep-queue}/**` indirectly through `state` and `analyze`; `/tmp/**` (`$AGY_HOME`, plus `facts-<seq>.json` / `report-<seq>.json` dumps only when `LOG_LEVEL=DEBUG`, unlinked at tick end). It never writes `heartbeat`, `state.Process` owns it (C1).
+Reads `$STATE_DIR/**` and the ro host mounts of C4. Writes **only**: `$STATE_DIR/{tick-seq, analyzer-fails, raw-alerts/*}` directly; `$STATE_DIR/{history,active-alerts,outbox,deep-queue}/**` indirectly through `state` and `analyze`; `/tmp/**` (`$AGY_HOME`, plus `facts-<seq>.json` / `report-<seq>.json` dumps only when `LOG_LEVEL=DEBUG`, unlinked at tick end). It never writes `heartbeat`, `state.Process` owns it (C1).
 
 ---
 
@@ -317,6 +335,7 @@ services:
       RAW_ALERT_MAX_LINES: "${RAW_ALERT_MAX_LINES:-20}"
       RAW_ALERT_REPEAT_SECONDS: "${RAW_ALERT_REPEAT_SECONDS:-3600}"
       RAW_ALERT_MARKER_TTL_HOURS: "${RAW_ALERT_MARKER_TTL_HOURS:-168}"
+      DEGRADED_ALERT_AFTER: "${DEGRADED_ALERT_AFTER:-900}"
       RENOTIFY_ALERT_SEC: "${RENOTIFY_ALERT_SEC:-3600}"
       RENOTIFY_WATCH_SEC: "${RENOTIFY_WATCH_SEC:-21600}"
       STALE_ALERT_SEC: "${STALE_ALERT_SEC:-86400}"

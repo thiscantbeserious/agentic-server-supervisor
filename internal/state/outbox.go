@@ -103,7 +103,7 @@ func (s *Store) OutboxAdd(payload []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("state: marshal outbox entry: %w", err)
 	}
-	if err := writeAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0o600); err != nil {
+	if err := WriteAtomic(s.cfg.StateDir, filepath.Join("outbox", id+".json"), data, 0o600); err != nil {
 		return "", fmt.Errorf("state: write outbox entry: %w", err)
 	}
 
@@ -171,7 +171,7 @@ func (s *Store) OutboxTake() ([]OutboxItem, error) {
 		if err != nil {
 			return nil, fmt.Errorf("state: marshal outbox entry: %w", err)
 		}
-		if err := writeAtomic(s.cfg.StateDir, filepath.Join("outbox", f.Name()), data, 0o600); err != nil {
+		if err := WriteAtomic(s.cfg.StateDir, filepath.Join("outbox", f.Name()), data, 0o600); err != nil {
 			return nil, fmt.Errorf("state: persist outbox attempts: %w", err)
 		}
 

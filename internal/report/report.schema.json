@@ -26,7 +26,7 @@
           "component": { "type": "string",
             "enum": ["kernel","ras","smart","sensors","resources","services","network","zfs","meta"] },
           "evidence": { "type": "string", "minLength": 1, "maxLength": 1000,
-            "description": "Verbatim original log line(s) from FACTS, newline-separated. Never invented." },
+            "description": "For a model-authored finding: verbatim original log line(s) from FACTS, newline-separated, never invented, never paraphrased. LLM-free findings (the analyzer/collector-unavailable fallbacks, component 'meta') instead carry a fixed, deterministic phrase in place of a log line, so the dedup key stays stable across ticks; not a violation of 'never invented', which constrains only the model." },
           "explanation": { "type": "string", "minLength": 1, "maxLength": 800 },
           "analysis": { "type": "string", "maxLength": 1200,
             "description": "Deep dive only: transient vs. trend, redundancy state, blast radius." },
@@ -51,7 +51,8 @@
       "properties": {
         "hostname": { "type": "string" },
         "tick_seq": { "type": "integer", "minimum": 0 },
-        "raw": { "type": "boolean", "description": "true for the LLM-free raw-alert path." }
+        "raw": { "type": "boolean", "description": "true for the LLM-free raw-alert path." },
+        "degraded": { "type": "boolean", "description": "true when the analyzer failed and this is the LLM-free fallback." }
       }
     }
   }

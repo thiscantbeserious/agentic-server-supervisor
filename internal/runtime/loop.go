@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 // stateDirError maps to exit 69 (C2's state-dir specialization of startup
@@ -351,6 +352,86 @@ func nextTickSeq(cfg *config.Config, logger warner) int64 {
 		os.Rename(tmp.Name(), path)
 	}
 	return seq
+}
+
+// analyzerFailsFile holds the unix timestamp (seconds, ASCII decimal) of
+// the FIRST tick in the current run of consecutive analyzer-degraded
+// ticks. It lives in STATE_DIR so a restart mid-outage does not hand the
+// analyzer a fresh grace period.
+//
+// A timestamp, not a tick count: the outage the hold measures is a
+// duration ("the analyzer has been down for DEGRADED_ALERT_AFTER"), and a
+// count of ticks is only a proxy for that duration, one that is exact only
+// when every intervening tick actually runs on schedule. Counting also
+// forced a fencepost correction (ticks land at 0, TICK_INTERVAL, ...,  so
+// the Nth tick proves only (N-1)*TICK_INTERVAL of elapsed time) and made
+// the collector-failure path ambiguous: does a tick where the analyzer
+// never even ran advance the count, reset it, or leave it alone? Recording
+// wall-clock elapsed time answers all of that at once: the collector path
+// leaves this file untouched (it neither bridges nor resets anything,
+// R3.5), and the hold condition is simply "has enough real time passed".
+const analyzerFailsFile = "analyzer-fails"
+
+// maxSaneAnalyzerFailAge bounds how far in the past a stored "first
+// degraded tick" timestamp may credibly be. No real outage lasts this
+// long; a stored value older than this is corruption (a hand edit, a
+// value from an incompatible build), not a genuine multi-year incident,
+// and is treated the same as an unparseable one: reset to now, WARN.
+const maxSaneAnalyzerFailAge = 10 * 365 * 24 * time.Hour
+
+// analyzerHeld records the first degraded tick of the current outage and
+// reports whether the tick should still be held: `now - first <
+// DEGRADED_ALERT_AFTER`. A healthy tick (degraded=false) clears the marker
+// and always returns false.
+//
+// now is the caller's single clock read (nowFor, C9), never a second
+// time.Now() here.
+//
+// A write failure fails OPEN, not closed: it reports "not held" instead of
+// trusting a `first` it could not persist. A tick that cannot write this
+// file also cannot make its `first` durable, so trusting it anyway means a
+// broken disk holds a real outage silent for as long as it stays broken; a
+// spurious unfiltered alert on a bad write is the safe failure mode.
+func analyzerHeld(cfg *config.Config, logger warner, now time.Time, degraded bool) bool {
+	path := filepath.Join(cfg.StateDir, analyzerFailsFile)
+	if !degraded {
+		// ENOENT is the normal case (nothing to reset, or already clean)
+		// and must stay silent; any other failure means a stale marker
+		// survives this healthy tick, and a later blip would ride through
+		// a hold that should have started fresh. That is worth a WARN.
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logger.Warn("could not reset analyzer failure marker")
+		}
+		return false
+	}
+
+	first := now
+	if data, err := os.ReadFile(path); err == nil {
+		text := strings.TrimSpace(string(data))
+		if parsed, perr := strconv.ParseInt(text, 10, 64); perr != nil {
+			logger.Warn("analyzer failure marker unparseable, restarting now")
+		} else {
+			stored := time.Unix(parsed, 0)
+			switch {
+			case stored.After(now):
+				// A clock that jumped backwards must not produce a
+				// permanent hold: now.Sub(stored) would be negative,
+				// which is "less than" any positive DEGRADED_ALERT_AFTER
+				// forever.
+				logger.Warn("analyzer failure marker is in the future, restarting now")
+			case now.Sub(stored) > maxSaneAnalyzerFailAge:
+				logger.Warn("analyzer failure marker absurdly old, restarting now")
+			default:
+				first = stored
+			}
+		}
+	}
+
+	if err := state.WriteAtomic(cfg.StateDir, analyzerFailsFile, []byte(strconv.FormatInt(first.Unix(), 10)), 0o644); err != nil {
+		logger.Warn("could not persist analyzer failure marker, alert sent unfiltered instead of held")
+		return false
+	}
+	return now.Sub(first) < cfg.DegradedAlertAfter
 }
 
 // assertBinDirReadOnly is R2 step 3: prove read_only:true took effect.

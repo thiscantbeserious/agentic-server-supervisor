@@ -1217,6 +1217,42 @@ func TestHeartbeat(t *testing.T) {
 	}
 }
 
+// TestHeartbeat_SuppressedWhenDegraded asserts rule 3's amendment: a
+// document carrying meta.degraded never earns the heartbeat, even when it
+// is otherwise due. The runtime R3.5b hold sends exactly this shape while
+// an analyzer outage is held below its alert threshold (findings already
+// emptied, status already OK), and without the guard that document would
+// fall straight through rule 3 and read "Daily heartbeat: all clear" while
+// the analyzer is down, the one message an operator reads as ground truth.
+func TestHeartbeat_SuppressedWhenDegraded(t *testing.T) {
+	cfg := testConfig(t, time.Date(2000, 1, 1, 8, 1, 0, 0, time.UTC))
+	s := newStore(t, cfg)
+
+	degraded := &report.Report{
+		Status: "OK", Headline: "Analyzer unavailable", Body: "held",
+		Meta: &report.Meta{Degraded: true},
+	}
+	d := mustProcess(t, s, marshalReport(t, degraded))
+
+	if d.Heartbeat {
+		t.Fatal("Heartbeat = true, want false: a degraded document must never fire the heartbeat rule")
+	}
+	if d.Notify {
+		t.Fatalf("Notify = true (reason=%s), want false: nothing should be sent for a due-but-degraded tick", d.Reason)
+	}
+	if d.Report.Headline != degraded.Headline {
+		t.Errorf("Report.Headline = %q, want verbatim input %q (rule 4, not rewritten by a heartbeat that must not fire)", d.Report.Headline, degraded.Headline)
+	}
+
+	// A healthy tick immediately after must still send the heartbeat: the
+	// day's heartbeat obligation is deferred, not permanently lost.
+	healthy := &report.Report{Status: "OK", Headline: "All clear", Body: "b"}
+	d2 := mustProcess(t, s, marshalReport(t, healthy))
+	if !d2.Heartbeat {
+		t.Error("Heartbeat = false on the next healthy tick, want true: the deferred heartbeat must still be sent once the analyzer recovers")
+	}
+}
+
 // --- case 12: heartbeat suppression ---
 
 func TestHeartbeatSuppression(t *testing.T) {
