@@ -79,9 +79,12 @@ func testConfig(t *testing.T, tick time.Time) *config.Config {
 		t.Fatal(err)
 	}
 	journalDir := t.TempDir()
-	// preflight requires at least one non-empty journal dir; a placeholder
-	// keeps that true even for tests that never touch journalctl.
-	if err := os.WriteFile(filepath.Join(journalDir, ".keep"), []byte{}, 0o644); err != nil {
+	// A .journal file, not an arbitrary placeholder: journal.Dirs() treats a
+	// directory with no journal files in it as not a journal directory at
+	// all, because Docker creates the source of a bind mount when it is
+	// missing and an empty directory would otherwise be run against
+	// journalctl on every tick, answering "No journal files were found."
+	if err := os.WriteFile(filepath.Join(journalDir, "system.journal"), []byte{}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
