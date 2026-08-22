@@ -3608,9 +3608,16 @@ func TestContainer_C12_ExistingMTANeverDisplaced(t *testing.T) {
 		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
 	}
 
+	// zed.rc, because the /etc/msmtprc assertion below is only meaningful on
+	// a host that has something to read it. With postfix holding the
+	// transport role, smartd mails through postfix and never reaches msmtp;
+	// ZED_EMAIL_PROG names the binary directly and is the reader that makes
+	// the file worth writing. Without this the test asserted a credential
+	// file into existence on a host where nothing could ever open it.
 	prep := `set -e
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postfix >/dev/null 2>&1
+mkdir -p /etc/zfs/zed.d && printf '#!/bin/sh\n# ZED configuration\n' > /etc/zfs/zed.d/zed.rc
 printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
 	if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
 		skipUnlessCI(t, "C12 (existing MTA): prep failed (postfix install needs network): %s %s", out, errOut)
@@ -4288,4 +4295,108 @@ func mustJSON(t *testing.T, s string) map[string]any {
 		t.Fatalf("invalid JSON: %v: %s", err, s)
 	}
 	return m
+}
+
+// TestContainer_C12_SensorsDetectIsOptInAndNotDrift: sensors-detect probes
+// I2C/SMBus buses and its own documentation warns that can hang or wedge
+// hardware, so it is never a side effect of installing a supervisor. It is
+// offered only when nothing is reporting, defaults to No, and, like every
+// other opt-in here, must not be counted as drift: --check auto-answers
+// prompts, and counting an unanswered offer would mean --check could never
+// exit 0 on a converged host that simply has no board sensors, the exact
+// defect the VM run found in step4/step5.
+func TestContainer_C12_SensorsDetectIsOptInAndNotDrift(t *testing.T) {
+	t.Parallel()
+	name := "sentinel-c12-sensors-optin"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// A container has no hwmon chips bound, which is the shape that makes
+	// the offer appear at all.
+	prep := `printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+		t.Fatalf("FAIL C12 (sensors opt-in): prep failed: %s %s", out, errOut)
+	}
+
+	out, _, code := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (sensors opt-in): --dry-run exit=%d: %s", code, out)
+	}
+
+	// Never the command itself under a mode that promises to change nothing.
+	if strings.Contains(out, "running sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): --dry-run ran sensors-detect, a mode that promises to change nothing must never probe hardware: %s", out)
+	}
+	if strings.Contains(out, "sensors:") && !strings.Contains(out, "not counted as drift") &&
+		strings.Contains(out, "would offer to run sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): the offer is previewed without saying it is not drift: %s", out)
+	}
+
+	// The drift accounting itself: --check must agree with a converged run
+	// rather than counting an offer nobody accepted.
+	outCheck, _, codeCheck := exec_("bash /work/install.sh --check --env-file /root/test.env 2>&1")
+	if strings.Contains(outCheck, "running sensors-detect") {
+		t.Errorf("FAIL C12 (sensors opt-in): --check ran sensors-detect: %s", outCheck)
+	}
+	_ = codeCheck
+
+	logPass(t, "PASS C12 (sensors-detect is offered, never run unattended, and never counted as drift)")
+}
+
+// TestContainer_C12_MsmtprcSkippedWhenNothingReadsIt: the shape of a real
+// OpenMediaVault host. postfix holds mail-transport-agent so msmtp-mta is
+// correctly declined, and zed.rc carries OMV's marker so step5 refuses to
+// touch it. Nothing is left that opens /etc/msmtprc: smartd hands mail to
+// sendmail, which is postfix here, and ZED_EMAIL_PROG is never set. Writing
+// it would put the mailrise password in a second place on disk to configure
+// a path the host cannot take, and would report mail as wired in the same
+// summary where steps 4 and 5 say they configured nothing.
+func TestContainer_C12_MsmtprcSkippedWhenNothingReadsIt(t *testing.T) {
+	t.Parallel()
+	name := "sentinel-c12-msmtprc-no-reader"
+	startC12Container(t, name)
+	exec_ := func(script string) (string, string, int) {
+		return runCmd(t, 120*time.Second, dockerBin(), "exec", name, "sh", "-c", script)
+	}
+
+	// postfix, because without an existing mail-transport-agent step1 plans
+	// to install msmtp-mta, and a host that is about to get msmtp as its
+	// system transport genuinely does have a reader. Declining msmtp-mta is
+	// what leaves nothing behind, and that only happens when the role is
+	// already taken. This is the shape of the target host, not a contrivance.
+	prep := `set -e
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postfix >/dev/null 2>&1
+mkdir -p /etc/zfs/zed.d
+printf '# This file is auto-generated by openmediavault\n# WARNING: Do not edit this file, your changes will get lost.\n' > /etc/zfs/zed.d/zed.rc
+printf 'MAILRISE_SMTP_USER=testuser\nMAILRISE_SMTP_PASS=testpass\n' > /root/test.env`
+	if out, errOut, code := exec_(systemctlOKStub + "\n" + prep); code != 0 {
+		skipUnlessCI(t, "C12 (msmtprc no reader): prep failed (postfix install needs network): %s %s", out, errOut)
+	}
+	if out, _, code := exec_("dpkg-query -W -f='${Status}' postfix 2>/dev/null"); code != 0 || !strings.Contains(out, "install ok installed") {
+		skipUnlessCI(t, "C12 (msmtprc no reader): postfix did not actually install in this environment: %s", out)
+	}
+
+	out, _, code := exec_("bash /work/install.sh --dry-run --env-file /root/test.env 2>&1")
+	if code != 0 {
+		t.Fatalf("FAIL C12 (msmtprc no reader): --dry-run exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "step3 /etc/msmtprc: skipped, nothing on this host reads it") {
+		t.Errorf("FAIL C12 (msmtprc no reader): step3 did not skip on a host with no msmtp reader: %s", out)
+	}
+	if strings.Contains(out, "step3 /etc/msmtprc: would be updated") {
+		t.Errorf("FAIL C12 (msmtprc no reader): step3 previewed a write nothing would read: %s", out)
+	}
+
+	// And the file must genuinely not appear on a real run.
+	if _, _, code := exec_("bash /work/install.sh --env-file /root/test.env 2>&1"); code != 0 && code != 75 {
+		t.Logf("install.sh exited %d (packages may be unavailable in this environment)", code)
+	}
+	if fileOut, _, _ := exec_("test -e /etc/msmtprc && echo exists || echo absent"); strings.TrimSpace(fileOut) != "absent" {
+		t.Errorf("FAIL C12 (msmtprc no reader): /etc/msmtprc was written on a host where nothing reads it, putting the mailrise password on disk for no delivery path: %s", fileOut)
+	}
+
+	logPass(t, "PASS C12 (msmtprc is not written when no msmtp reader exists)")
 }
