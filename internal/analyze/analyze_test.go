@@ -2615,3 +2615,50 @@ func TestNewNonceIsFreshPerCall(t *testing.T) {
 		t.Fatalf("nonce is not hex: %q", n1)
 	}
 }
+
+// TestRunAgy_UnauthenticatedExitsZero_IsClassifiedUnauth pins what agy
+// actually does when it has no credentials, measured on the target host
+// rather than assumed:
+//
+//	$ HOME=/tmp/empty agy --print "reply ok" --output-format json
+//	Error: authentication required. Run 'agy' to log in, then retry.
+//	{"conversation_id":"","status":"ERROR","response":"","error":"authentication failed or timed out",...}
+//	$ echo $?
+//	0
+//
+// Two things follow, and the code got both wrong. agy exits ZERO, so
+// cmd.Run returns nil and the isAgyAuthFailure branch is never reached at
+// all: it was unreachable code. And the phrase is lowercase
+// "authentication required", while the matcher looked for "Authentication
+// required", so even on the paths that did reach it the match failed.
+//
+// The visible consequence on the deployed host was an operator who could
+// not tell "the analyzer needs logging in" from "the analyzer is broken".
+func TestRunAgy_UnauthenticatedExitsZero_IsClassifiedUnauth(t *testing.T) {
+	cfg := newTestConfig(t)
+	binDir := t.TempDir()
+	// Byte-for-byte what the real binary emits, including exit 0.
+	stub := "#!/bin/sh\n" +
+		"echo \"Error: authentication required. Run 'agy' to log in, then retry.\" >&2\n" +
+		`printf '%s' '{"conversation_id":"","status":"ERROR","response":"","error":"authentication failed or timed out","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}'` + "\n" +
+		"exit 0\n"
+	stubPath := filepath.Join(binDir, "agy")
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgyBin = stubPath
+
+	promptPath := filepath.Join(binDir, "prompt.txt")
+	if err := os.WriteFile(promptPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	schemaPath := filepath.Join(binDir, "schema.json")
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if !errors.Is(err, errAgyUnauth) {
+		t.Fatalf("err = %v, want errAgyUnauth: an agy that exits 0 saying it needs a login must not be reported as a schema or JSON fault", err)
+	}
+}
