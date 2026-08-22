@@ -2527,6 +2527,37 @@ step_apprise_seed() {
     return
   fi
 
+  # Shape-checked before it is sent anywhere. A Telegram bot token is an id,
+  # one colon, then a secret; anything else is a value that got edited badly
+  # rather than a credential. Hand-editing this file left two tokens
+  # concatenated on the target host, which has two colons, and apprise
+  # answered 400 for a URL it could not parse. That is a confusing way to
+  # learn about a typo, and it puts a malformed credential on the wire to
+  # find out.
+  #
+  # Deliberately loose: the id length and the secret's alphabet are
+  # Telegram's business and could change. Two colons, or whitespace, cannot
+  # be right under any of those rules.
+  case "$token" in
+    *[[:space:]]*)
+      note "apprise seed: skipped, TELEGRAM_BOT_TOKEN in $ENV_FILE contains whitespace, so it is not a single token"
+      return
+      ;;
+  esac
+  case "${token#*:}" in
+    *:*)
+      note "apprise seed: skipped, TELEGRAM_BOT_TOKEN in $ENV_FILE has more than one colon, which usually means an edit left two tokens joined together. Nothing was sent"
+      return
+      ;;
+  esac
+  case "$token" in
+    *:*) ;;
+    *)
+      note "apprise seed: skipped, TELEGRAM_BOT_TOKEN in $ENV_FILE has no colon, so it is not a bot token"
+      return
+      ;;
+  esac
+
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
     note "apprise seed: would register the Telegram target with apprise at $endpoint once the stack is up (nothing is sent under --check/--dry-run)"
     return
@@ -2570,6 +2601,21 @@ step_apprise_seed() {
   # exactly the two failure modes this step must tell apart.
   status="$(printf '%s' "tgram://${token}/${chat}" | curl -sS --max-time 5 -o "$tmp" -w '%{http_code}' -X POST --data-urlencode urls@- "$endpoint" 2>/dev/null)"
   curl_rc=$?
+
+  # apprise's own words, kept rather than deleted unread. Three separate
+  # failures in this script have now been reported as a bare "it did not
+  # work" while the explanation sat in a variable or a file that was
+  # discarded a line later, and each cost a round trip through the
+  # operator's terminal to recover something the run already had.
+  #
+  # Redacted before it is printed: the body is apprise's, but a service
+  # that echoes a rejected URL back would otherwise put the token in a
+  # summary the operator is likely to paste somewhere.
+  local body
+  body="$(tr '\n' ' ' < "$tmp" 2>/dev/null | cut -c1-200)"
+  case "$body" in
+    *"$token"*) body="$(printf '%s' "$body" | sed "s|$token|<token>|g")" ;;
+  esac
   rm -f "$tmp"
 
   if [ "$curl_rc" -ne 0 ]; then
@@ -2593,7 +2639,7 @@ step_apprise_seed() {
   # documented remedy either way, the same "retryable" contract exit
   # 75 already carries for every other step.
   if [ "$status" = "204" ]; then
-    note "apprise seed: apprise responded 204, the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed"
+    note "apprise seed: apprise responded 204, the key was NOT registered (apprise-api's documented silent-failure response); notifications will not be delivered until this is fixed${body:+. apprise said: $body}"
     TRANSIENT_FAIL=1
     return
   fi
@@ -2603,7 +2649,7 @@ step_apprise_seed() {
       changed=$((changed+1))
       ;;
     *)
-      note "apprise seed: apprise responded HTTP $status registering the Telegram target, notifications will not be delivered until this is fixed"
+      note "apprise seed: apprise responded HTTP $status registering the Telegram target, notifications will not be delivered until this is fixed${body:+. apprise said: $body}"
       TRANSIENT_FAIL=1
       ;;
   esac

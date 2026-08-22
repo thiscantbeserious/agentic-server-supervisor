@@ -30,6 +30,49 @@ fi
 mkdir -p "$OUT" || exit 75
 
 # scrub STDIN: identifiers that describe this machine rather than its behaviour.
+# collect_identifiers prints, one per line, the literal strings that identify
+# THIS machine's hardware: disk serials and WWNs, however they are spelled.
+#
+# Asked of the machine rather than inferred from the text. Three rounds of
+# guessing which shapes a serial appears in each leaked a shape nobody had
+# thought of: "Serial Number" was handled while smartd's "S/N:" was not, then
+# "S/N:" and by-id paths were handled while smartd's state file names,
+# /var/lib/smartmontools/smartd.<MODEL>-<SERIAL>.ata.state, were not. The set
+# of ways a serial can be written is not knowable in advance. The values are.
+collect_identifiers() {
+  {
+    lsblk -dno SERIAL 2>/dev/null
+
+    # by-id names carry the serial as the last underscore-separated field,
+    # and wwn-* entries are the WWN itself.
+    for f in /dev/disk/by-id/*; do
+      [ -e "$f" ] || continue
+      b="$(basename "$f")"
+      case "$b" in
+        *-part[0-9]*) continue ;;
+      esac
+      case "$b" in
+        wwn-*) printf '%s\n' "${b#wwn-}" ;;
+        *_*)   printf '%s\n' "${b##*_}" ;;
+      esac
+    done
+
+    # smartctl is authoritative where it answers, and prints WWNs in a spaced
+    # form that appears nowhere else.
+    smartctl --scan 2>/dev/null | awk '{print $1}' | while read -r dev; do
+      [ -n "$dev" ] || continue
+      smartctl -i "$dev" 2>/dev/null | sed -nE \
+        -e 's/^Serial [Nn]umber:[[:space:]]+(.+[^[:space:]])[[:space:]]*$/\1/p' \
+        -e 's/^LU WWN Device Id:[[:space:]]+(.+[^[:space:]])[[:space:]]*$/\1/p'
+    done
+  } | tr -d '\r' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -vE '^$' \
+    | grep -E '^.{4,}$' \
+    | sort -u \
+    | awk '{ print length, $0 }' | sort -rn | cut -d" " -f2-
+}
+
 scrub() {
   sed -E \
     -e "s/\b${HOST}\b/HOSTNAME/g" \
@@ -115,7 +158,25 @@ cap() {
 IDENT_SED="$(mktemp)"
 IDENT_LIST="$(mktemp)"
 trap 'rm -f "$IDENT_SED" "$IDENT_LIST"' EXIT
-collect_identifiers > "$IDENT_LIST" 2>/dev/null || true
+# NOT silenced, and NOT tolerated when empty. The previous version wrote
+# "2>/dev/null || true" here, so when collect_identifiers turned out not to
+# be defined at all the failure was invisible: the list stayed empty, the
+# literal pass was skipped, the pattern rules alone reported success, and a
+# capture carrying every drive serial was declared clean. A scrubber that
+# cannot enumerate what it is scrubbing must stop, not continue quietly.
+if ! declare -F collect_identifiers >/dev/null 2>&1; then
+  echo "$PROG: collect_identifiers is not defined; refusing to scrub" >&2
+  exit 1
+fi
+if ! collect_identifiers > "$IDENT_LIST"; then
+  echo "$PROG: could not enumerate this machine's hardware identifiers; refusing to scrub" >&2
+  exit 1
+fi
+if [ ! -s "$IDENT_LIST" ]; then
+  echo "$PROG: no hardware identifiers found, which no machine with disks should report." >&2
+  echo "$PROG: refusing to fall back to pattern matching alone, which has leaked three times." >&2
+  exit 1
+fi
 while IFS= read -r ident; do
   [ -n "$ident" ] || continue
   esc="$(printf '%s' "$ident" | sed -e 's/[|\\&.^$*[]/\\&/g')"
