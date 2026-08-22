@@ -212,3 +212,69 @@ func mustMarshalReportForTest(t *testing.T, r report.Report) []byte {
 	}
 	return b
 }
+
+// capturingWarner records warnings so a test can assert what the operator
+// was told, not merely that nothing crashed.
+type capturingWarner struct{ msgs []string }
+
+func (w *capturingWarner) Warn(msg string, _ ...any) { w.msgs = append(w.msgs, msg) }
+
+// TestSeedAgyHome_CopiesCredentialTree pins the layout agy actually uses,
+// measured on the target host rather than assumed:
+//
+//	~/.gemini/
+//	  antigravity-cli/
+//	    antigravity-oauth-token      <- the credential
+//	  config/
+//
+// Every entry at the top level of the mounted secret directory is a
+// DIRECTORY. The previous implementation copied "regular files only" and
+// skipped directories, so it copied nothing at all, and because the
+// directory was not empty it did not even warn: the operator saw an
+// analyzer that silently fell back on every tick with no explanation.
+//
+// agy resolves its credential under $HOME/.gemini/, so the tree has to
+// land there rather than flat in $HOME. Verified end to end on the host:
+// copying ~/.gemini into a fresh HOME and running agy returned
+// status SUCCESS with real token usage, which is the empirical check
+// contracts/runtime.md required before relying on seeding.
+func TestSeedAgyHome_CopiesCredentialTree(t *testing.T) {
+	secret := t.TempDir()
+	home := filepath.Join(t.TempDir(), "agy-home")
+
+	cliDir := filepath.Join(secret, "antigravity-cli")
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte("TOKEN-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(secret, "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{AgyHome: home, AgySecretDir: secret}
+	w := &capturingWarner{}
+	seedAgyHome(cfg, w)
+
+	tokenPath := filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	got, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("credential did not reach %s: %v (the secret dir holds only directories, and skipping them copies nothing)", tokenPath, err)
+	}
+	if string(got) != "TOKEN-CONTENT" {
+		t.Errorf("token content = %q, want TOKEN-CONTENT", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gemini", "config", "config.json")); err != nil {
+		t.Errorf("config tree did not reach AGY_HOME: %v", err)
+	}
+	for _, m := range w.msgs {
+		if strings.Contains(m, "credentials absent") {
+			t.Errorf("warned %q although credentials were present", m)
+		}
+	}
+}

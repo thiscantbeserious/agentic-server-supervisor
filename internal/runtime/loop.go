@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -146,10 +147,26 @@ func checkJournalReadable(ctx context.Context, cfg *config.Config) error {
 
 type warner interface{ Warn(string, ...any) }
 
-// seedAgyHome is R2 step 4: MkdirAll($AGY_HOME, 0700), copy
-// $AGY_SECRET_DIR's regular files into it (mode 0600), then point $HOME
-// at it. A missing or empty secret dir is a WARN, not fatal, the
-// raw-alert path must survive without the LLM.
+// seedAgyHome copies the mounted credential tree into $AGY_HOME/.gemini
+// and points $HOME at $AGY_HOME. A missing or empty secret dir is a WARN,
+// not fatal: the raw-alert path must survive without the LLM.
+//
+// The layout is agy's, measured on the target host rather than assumed:
+//
+//	~/.gemini/
+//	  antigravity-cli/antigravity-oauth-token   <- the credential
+//	  config/
+//
+// Two things follow, and the previous version got both wrong. Every
+// top-level entry is a DIRECTORY, and it copied "regular files only", so
+// it copied nothing while reporting nothing, because the directory was
+// not empty. And agy reads the credential from $HOME/.gemini/, so a flat
+// copy into $HOME would not have been found even if it had happened.
+//
+// Verified end to end before this was written: ~/.gemini copied into a
+// fresh HOME, agy --print returned status SUCCESS with real token usage.
+// contracts/runtime.md asked for exactly that measurement before relying
+// on seeding, and until now nobody had run it.
 func seedAgyHome(cfg *config.Config, logger warner) {
 	if err := os.MkdirAll(cfg.AgyHome, 0o700); err != nil {
 		logger.Warn("runtime could not create AGY_HOME", "error", err)
@@ -158,19 +175,49 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 	entries, err := os.ReadDir(cfg.AgySecretDir)
 	if err != nil || len(entries) == 0 {
 		logger.Warn("runtime agy credentials absent, analysis will fall back")
-	} else {
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			data, rerr := os.ReadFile(filepath.Join(cfg.AgySecretDir, e.Name()))
-			if rerr != nil {
-				continue
-			}
-			os.WriteFile(filepath.Join(cfg.AgyHome, e.Name()), data, 0o600)
-		}
+		os.Setenv("HOME", cfg.AgyHome)
+		return
+	}
+
+	dst := filepath.Join(cfg.AgyHome, ".gemini")
+	if err := copyTree(cfg.AgySecretDir, dst); err != nil {
+		// Partial copies are worse than none: agy would report an auth
+		// failure whose cause is this, not the credential.
+		logger.Warn("runtime could not seed agy credentials, analysis will fall back", "error", err)
 	}
 	os.Setenv("HOME", cfg.AgyHome)
+}
+
+// copyTree copies src into dst recursively: directories 0700, files 0600.
+// The source is a read-only mount, so nothing here writes back to it.
+// Symlinks are skipped rather than followed, a credential mount is not a
+// place to chase links out of.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(target, 0o700)
+		case !d.Type().IsRegular():
+			return nil
+		default:
+			data, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			if merr := os.MkdirAll(filepath.Dir(target), 0o700); merr != nil {
+				return merr
+			}
+			return os.WriteFile(target, data, 0o600)
+		}
+	})
 }
 
 // nextTickSeq is R3.1: read, increment, write atomically. Missing or
