@@ -4325,12 +4325,25 @@ func TestContainer_C12_SensorsDetectIsOptInAndNotDrift(t *testing.T) {
 		t.Fatalf("FAIL C12 (sensors opt-in): --dry-run exit=%d: %s", code, out)
 	}
 
+	// Asserted POSITIVELY first, and this is the whole point of it. The
+	// original version of this test only checked that certain strings were
+	// ABSENT, which an install.sh that had lost the function entirely
+	// satisfied perfectly: the call site remained, bash reported
+	// "report_sensors: command not found" on stderr, nothing was printed to
+	// stdout, and every assertion passed. A test for a feature has to fail
+	// when the feature is gone.
+	if !strings.Contains(out, "sensors:") {
+		t.Fatalf("FAIL C12 (sensors opt-in): no sensors line at all, the step did not run: %s", out)
+	}
+	if strings.Contains(out, "command not found") {
+		t.Fatalf("FAIL C12 (sensors opt-in): install.sh called something that does not exist: %s", out)
+	}
+
 	// Never the command itself under a mode that promises to change nothing.
 	if strings.Contains(out, "running sensors-detect") {
 		t.Errorf("FAIL C12 (sensors opt-in): --dry-run ran sensors-detect, a mode that promises to change nothing must never probe hardware: %s", out)
 	}
-	if strings.Contains(out, "sensors:") && !strings.Contains(out, "not counted as drift") &&
-		strings.Contains(out, "would offer to run sensors-detect") {
+	if strings.Contains(out, "would offer to run sensors-detect") && !strings.Contains(out, "not counted as drift") {
 		t.Errorf("FAIL C12 (sensors opt-in): the offer is previewed without saying it is not drift: %s", out)
 	}
 
@@ -4339,6 +4352,9 @@ func TestContainer_C12_SensorsDetectIsOptInAndNotDrift(t *testing.T) {
 	outCheck, _, codeCheck := exec_("bash /work/install.sh --check --env-file /root/test.env 2>&1")
 	if strings.Contains(outCheck, "running sensors-detect") {
 		t.Errorf("FAIL C12 (sensors opt-in): --check ran sensors-detect: %s", outCheck)
+	}
+	if strings.Contains(outCheck, "command not found") {
+		t.Errorf("FAIL C12 (sensors opt-in): --check called something that does not exist: %s", outCheck)
 	}
 	_ = codeCheck
 

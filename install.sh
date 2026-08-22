@@ -2225,6 +2225,71 @@ step6() {
   changed=$((changed+1))
 }
 
+# --- sensors readiness ---------------------------------------------------
+
+# report_sensors, says whether `sensors` currently sees anything, because
+# installing lm-sensors is not the same as lm-sensors having something to
+# read: internal/collect runs `sensors -j`, and on a host where no hwmon
+# driver is bound that returns an empty, healthy-looking section rather
+# than an error.
+#
+# When nothing is reporting it offers sensors-detect, and argues against
+# taking the offer. That command probes I2C/SMBus buses and its own
+# documentation warns the probing can hang or wedge hardware; --auto
+# answers yes to precisely the probes it warns about, on a machine holding
+# the operator's data. Most of what sentinel reads (coretemp, nvme,
+# drivetemp, jc42) is bound by the kernel with no detection at all, so on a
+# host already reporting chips there is nothing to gain and the question is
+# never asked. Default No, no flag, same shape as step4/step5: an offer the
+# operator has to actively accept, never a side effect of installing a
+# supervisor.
+report_sensors() {
+  if ! command -v sensors >/dev/null 2>&1; then
+    note "sensors: lm-sensors not installed yet, so nothing to report until it is"
+    return
+  fi
+
+  local n
+  n="$(sensors 2>/dev/null | grep -c '^Adapter:' || true)"
+  [ -n "$n" ] || n=0
+  if [ "$n" -gt 0 ]; then
+    note "sensors: $n chip(s) reporting, the sensors section will have data, sensors-detect not needed"
+    return
+  fi
+
+  if ! command -v sensors-detect >/dev/null 2>&1; then
+    note "sensors: no chips reporting and sensors-detect is not available, the sensors section will be empty"
+    return
+  fi
+
+  # Same treatment --check/--dry-run get everywhere else: preview the
+  # question, never ask it, and do not count an unanswered opt-in as drift.
+  if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    note "sensors: no chips reporting, would offer to run sensors-detect (opt-in, defaults to No, not counted as drift)"
+    return
+  fi
+
+  if ! confirm_monitoring_change "sensors: no chips are reporting. sensors-detect probes I2C/SMBus buses to find more, which its own documentation warns can hang or wedge hardware. Most disk and CPU temperatures need no detection at all, so this is only worth it for board sensors. NOT recommended. Run it anyway?"; then
+    note "sensors: sensors-detect not run, $CONFIRM_REASON, the sensors section will be empty until hwmon drivers are bound"
+    return
+  fi
+
+  note "sensors: running sensors-detect --auto"
+  sensors-detect --auto >/dev/null 2>&1 || note "sensors: sensors-detect exited non-zero"
+  # sensors-detect records modules in /etc/modules but does not load them,
+  # so without this the answer to "did that help" is only visible after a
+  # reboot, and the note below would say no either way.
+  systemctl restart kmod >/dev/null 2>&1 || true
+  n="$(sensors 2>/dev/null | grep -c '^Adapter:' || true)"
+  [ -n "$n" ] || n=0
+  if [ "$n" -gt 0 ]; then
+    note "sensors: $n chip(s) reporting after sensors-detect"
+    changed=$((changed+1))
+  else
+    note "sensors: still no chips reporting after sensors-detect, this host exposes nothing lm-sensors can read"
+  fi
+}
+
 # --- apprise seed ----------------------------------------------------
 
 # step_apprise_seed registers the Telegram target with apprise-api's
