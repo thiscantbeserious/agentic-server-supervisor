@@ -16,23 +16,19 @@ It never writes to the host it watches. There is no remediation, no
 self-healing, no action taken on your behalf, only observation and
 notification. If a disk is failing, this tells you.
 
-## Run it
-
-See what it would do, first. Nothing is written and nothing is installed:
+## 1. check (read properly)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --dry-run
 ```
 
-Then run it for real. It prompts for the stack directory (offering what it
-detected), a Telegram bot token, a chat id, and a mailrise password:
+## 2. install (should be run interactively)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
 ```
 
-Then bring the stack up, from the directory the installer reports:
-
+## 3. run (and move away)
 ```bash
 cd /opt/sentinel && docker compose up -d
 ```
