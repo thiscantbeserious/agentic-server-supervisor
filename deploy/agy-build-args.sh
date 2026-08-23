@@ -2,24 +2,28 @@
 # deploy/agy-build-args.sh, R1 ops helper. Fetches the vendor's own
 # manifest, once per architecture, amd64 AND arm64 (contracts/runtime.md
 # R1: the image is built and shipped for both), and prints the full
-# --build-arg set for the CURRENT agy release, so nobody hand-assembles
-# a download URL and the operator sees the version they are about to pin
-# before pinning it.
+# --build-arg set for the CURRENT (latest) agy release.
 #
-#   docker buildx build -f deploy/Dockerfile -t sentinel:dev \
-#     --platform linux/amd64,linux/arm64 \
-#     $(deploy/agy-build-args.sh) \
-#     .
+# CI and a local build both read the pin from deploy/agy-pin.env, not
+# from this script's output; this script never writes that file. It
+# exists so a human deciding whether to bump the pin can see what the
+# vendor is serving right now, and the exact URL/sha512 to verify, before
+# hand-editing deploy/agy-pin.env (see that file for the version-bump
+# checklist: a bump is a contracts/analyze.md 6 step 4 change, agy's
+# envelope contract is not stable across releases).
 #
-# This script RESOLVES; it never builds and never downloads either
-# tarball itself. The vendor installer is deliberately not run here
-# either, it resolves to latest with no record of which version an
-# image contains, discarding the reproducibility the pin exists to
-# provide (contracts/runtime.md R1). POSIX sh, no jq, the vendor's own
-# installer parses this exact manifest with sed, so this reuses that
-# approach rather than adding a dependency (C1: stdlib/no-new-deps in the
-# runtime path; this is the one ops-side bash artifact already sanctioned
-# for install.sh, and the same reasoning applies here).
+#   deploy/agy-build-args.sh
+#
+# This script RESOLVES; it never builds, never downloads either tarball,
+# and never writes deploy/agy-pin.env itself. The vendor installer is
+# deliberately not run here either, it resolves to latest with no record
+# of which version an image contains, discarding the reproducibility the
+# pin exists to provide (contracts/runtime.md R1). POSIX sh, no jq, the
+# vendor's own installer parses this exact manifest with sed, so this
+# reuses that approach rather than adding a dependency (C1: stdlib/no-new-
+# deps in the runtime path; this is the one ops-side bash artifact
+# already sanctioned for install.sh, and the same reasoning applies
+# here).
 set -eu
 
 MANIFEST_BASE="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
