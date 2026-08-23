@@ -1,4 +1,4 @@
-# agentic-server-supervisor
+# OpsNanny
 
 A read-only supervisor for a Linux host. It watches the systemd journal,
 disk health, ZFS pool state, and hardware sensors, turns what it finds into
