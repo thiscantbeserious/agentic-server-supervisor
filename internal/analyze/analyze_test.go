@@ -158,6 +158,27 @@ func mustEnvelope(response string) string {
 	return string(b)
 }
 
+// mustEnvelopeStructured builds a raw --output-format json envelope
+// carrying both response and structured_output, for tests exercising the
+// preference between them. response is not run through mustEnvelope's
+// wrapping since callers here want full control over what "the polluted
+// free-text field" contains.
+func mustEnvelopeStructured(t *testing.T, response string, structuredOutput string) string {
+	t.Helper()
+	b, err := json.Marshal(agyEnvelope{
+		Status:           "SUCCESS",
+		Response:         response,
+		StructuredOutput: json.RawMessage(structuredOutput),
+		Usage: struct {
+			InputTokens int64 `json:"input_tokens"`
+		}{InputTokens: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal structured envelope fixture: %v", err)
+	}
+	return string(b)
+}
+
 func mustJSON(t *testing.T, r report.Report) string {
 	t.Helper()
 	b, err := json.Marshal(r)
@@ -527,6 +548,154 @@ func TestRun_BrokenJSON_RetryThenFallback(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "reason=invalid_json") {
 		t.Fatalf("stderr does not contain %q: %s", "reason=invalid_json", buf.String())
+	}
+}
+
+// TestRun_BrokenJSON_RetryLogsValidatorError closes a real diagnostic gap:
+// runTriage held the concrete parse/validate error and discarded it, so
+// "triage invalid, retrying" gave a 3am reader no way to tell a wrapped
+// answer from a truncated one from a schema violation. The retry log line
+// must carry that error's text.
+func TestRun_BrokenJSON_RetryLogsValidatorError(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub("not json", "not json")}
+
+	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d); err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	line := findLogLine(t, buf.String(), "triage invalid, retrying")
+	if !strings.Contains(line, "error=") {
+		t.Fatalf("retry log line carries no error attribute: %q", line)
+	}
+	if strings.Contains(line, "error=\"\"") || strings.HasSuffix(strings.TrimSpace(line), "error=") {
+		t.Fatalf("retry log line's error attribute is empty: %q", line)
+	}
+}
+
+// TestRun_BrokenJSON_FallbackLogsValidatorError is the fallback-side half
+// of the same gap: "fallback report built" carried only the reason code,
+// never the validator's own message, the one piece of evidence that would
+// have told an operator whether agy wrapped its answer in prose, truncated
+// it, or violated a schema constraint (repro'd live: agy's own multi-turn
+// self-correction concatenates prior turns into "response", not a fence or
+// truncation issue at all, and only the discarded validator error says so).
+func TestRun_BrokenJSON_FallbackLogsValidatorError(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub("not json", "still not json")}
+
+	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d); err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	line := findLogLine(t, buf.String(), "fallback report built")
+	if !strings.Contains(line, "reason=invalid_json") {
+		t.Fatalf("fallback log line missing reason=invalid_json: %q", line)
+	}
+	if !strings.Contains(line, "error=") {
+		t.Fatalf("fallback log line carries no error attribute: %q", line)
+	}
+	if strings.Contains(line, "error=\"\"") || strings.HasSuffix(strings.TrimSpace(line), "error=") {
+		t.Fatalf("fallback log line's error attribute is empty: %q", line)
+	}
+}
+
+// findLogLine returns the single line of captured output containing want,
+// failing the test if there is not exactly one, so a guard cannot silently
+// pass by matching zero lines.
+func findLogLine(t *testing.T, output, want string) string {
+	t.Helper()
+	var matches []string
+	for _, l := range strings.Split(output, "\n") {
+		if strings.Contains(l, want) {
+			matches = append(matches, l)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one log line containing %q, got %d: %s", want, len(matches), output)
+	}
+	return matches[0]
+}
+
+// =====================================================================
+// structured_output preference (live 2026-08-22: a newer agy concatenates
+// every internal self-correction turn into "response" while handing back
+// a clean, already-schema-valid result in "structured_output"; response
+// stays the fallback for an agy without that field).
+// =====================================================================
+
+// TestRun_StructuredOutput_PreferredOverPollutedResponse is the bug this
+// exists for: response holds two JSON documents concatenated with no
+// separator (exactly what json.Unmarshal rejects as invalid_json), while
+// structured_output holds the single clean object. Run must use the
+// clean field and must not even reach a retry.
+func TestRun_StructuredOutput_PreferredOverPollutedResponse(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	polluted := mustJSON(t, okReport()) + mustJSON(t, kernErrReport())
+	d := Deps{RunAgy: rec.stubRaw(mustEnvelopeStructured(t, polluted, mustJSON(t, okReport())))}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("agy call count = %d, want 1 (structured_output must resolve attempt 1, no retry)", rec.calls)
+	}
+	if rep.Status != "OK" || rep.Headline != okReport().Headline {
+		t.Fatalf("expected the structured_output document, got %+v", rep)
+	}
+	if !strings.Contains(buf.String(), "via=structured_output") {
+		t.Fatalf("stderr does not record via=structured_output: %s", buf.String())
+	}
+}
+
+// TestRun_StructuredOutput_Absent_FallsBackToResponse guards the path an
+// older agy (no structured_output field at all) always takes: nothing
+// regresses when the field is simply missing from the envelope. Every
+// other stub in this file uses mustEnvelope, which never sets
+// structured_output, so this is the one place asserting that path by name
+// rather than only exercising it incidentally.
+func TestRun_StructuredOutput_Absent_FallsBackToResponse(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rep.Status != "OK" {
+		t.Fatalf("expected the response document, got %+v", rep)
+	}
+	if !strings.Contains(buf.String(), "via=response") {
+		t.Fatalf("stderr does not record via=response: %s", buf.String())
+	}
+}
+
+// TestRun_StructuredOutput_Invalid_FallsBackToResponse: structured_output
+// present but itself fails report.Validate (missing required keys here)
+// must fall through to response, not fail the tick outright, exactly as
+// an absent field would.
+func TestRun_StructuredOutput_Invalid_FallsBackToResponse(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(mustEnvelopeStructured(t, mustJSON(t, okReport()), `{"not":"a report"}`))}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rep.Status != "OK" {
+		t.Fatalf("expected the response document, got %+v", rep)
+	}
+	if !strings.Contains(buf.String(), "via=response") {
+		t.Fatalf("stderr does not record via=response: %s", buf.String())
 	}
 }
 

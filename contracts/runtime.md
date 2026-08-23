@@ -292,7 +292,7 @@ Only this service is in scope; `apprise` and `mailrise` are defined by the notif
 ```yaml
 services:
   sentinel:
-    image: ghcr.io/thiscantbeserious/agentic-server-supervisor/sentinel:${SENTINEL_TAG:-latest}
+    image: ghcr.io/thiscantbeserious/ops-nanny/sentinel:${SENTINEL_TAG:-latest}
     container_name: sentinel
     restart: unless-stopped
     command: ["tick", "--loop"]
@@ -562,7 +562,7 @@ This is not a performance preference. An earlier single-runner design built and 
 1. `actions/checkout@v5`
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}`, skipped on `pull_request`
-4. `docker/metadata-action@v5` → `images: ghcr.io/${{ github.repository }}/sentinel`, tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
+4. `docker/metadata-action@v5` → `images: ghcr.io/thiscantbeserious/ops-nanny/sentinel` (a pinned literal, not derived from `github.repository`), tags `type=raw,value=latest,enable={{is_default_branch}}` and `type=sha,format=long,prefix=`
 5. `docker/build-push-action@v6` → `context: .`, `file: deploy/Dockerfile`, `platforms: ${{ matrix.platform }}` (**one platform per job**), `outputs: type=image,push-by-digest=true,name-canonical=true`, pushing only on non-PR runs, tags/labels from step 4, `build-args: AGY_URL_AMD64=${{ vars.AGY_URL_AMD64 }}`, `AGY_SHA512_AMD64=${{ vars.AGY_SHA512_AMD64 }}`, `AGY_URL_ARM64=${{ vars.AGY_URL_ARM64 }}`, `AGY_SHA512_ARM64=${{ vars.AGY_SHA512_ARM64 }}`, `AGY_VERSION=${{ vars.AGY_VERSION }}`, `VERSION=${{ github.sha }}`, cache `type=gha` in+out.
 6. Each job smoke-tests **its own** pushed digest, natively, no `--platform`, no native-versus-emulated branching, because there is no emulated case. The ELF `e_machine` of both `/usr/local/bin/sentinel` and `/usr/local/bin/agy` is read **before** anything is executed, then both binaries are run.
 7. The digest is exported as an artifact for the merge job.

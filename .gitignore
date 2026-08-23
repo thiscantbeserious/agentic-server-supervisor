@@ -4,3 +4,7 @@ deploy/mailrise/mailrise.conf
 deploy/apprise/sentinel.cfg.filled
 .claude/worktrees/
 .fixtures-in/
+
+# Affinity Designer/Photo lock file for whichever document is
+# currently open, e.g. logo.af~lock~.
+*.af~lock~

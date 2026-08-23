@@ -244,7 +244,7 @@ func runDeepDive(ctx context.Context, cfg *config.Config, o Options, d Deps, rep
 	}
 	// No retry at deep dive, an envelope failure is just another
 	// non-fatal enrichment failure.
-	response, everr := decodeAgyEnvelope(out)
+	response, _, everr := decodeAgyEnvelope(out)
 	if everr != nil {
 		logger.Info("deep-dive failed, keeping triage report")
 		return

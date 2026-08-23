@@ -451,9 +451,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the lowercase image name
+      # Pinned literal, not derived from github.repository: a repo rename
+      # must never silently move where this gets published, it takes a
+      # reviewed diff to this line instead. Same reasoning as the
+      # sentinel image name below.
+      - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/omv-base" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this content hash is already published
         id: probe
@@ -530,9 +534,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the lowercase image name
+      # Pinned literal, not derived from github.repository, see the
+      # matching comment in vm-omv-image.
+      - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/omv-base" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
 
       - name: Pull the cached OMV base image, build locally on a cold cache
         run: |
@@ -590,15 +596,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # GHCR requires a lowercase image path. This repository is already
-      # all-lowercase so raw ${{ github.repository }} works today, but
-      # it is latent breakage for any repo/org with capitals, lowercase
-      # it explicitly rather than relying on that. Computed once here so
-      # every later step (the build's own tag, the smoke pull, the
-      # digest artifact) references the same value.
-      - name: Resolve the lowercase image name
+      # Pinned literal, not derived from github.repository: this repo has
+      # been renamed twice already, and deriving the publish target from
+      # the repo's current name means a rename silently moves it, with
+      # nothing in the diff to review, and every consumer still pointed
+      # at the old path stops receiving pushes without any error anywhere.
+      # A pin makes that move a reviewed line in this file instead.
+      # Computed once here so every later step (the build's own tag, the
+      # smoke pull, the digest artifact) references the same value.
+      - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
 
       - name: Load the pinned agy release
         # deploy/agy-pin-load.sh filters and validates deploy/agy-pin.env
@@ -796,9 +804,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve the lowercase image name
+      # Pinned literal, see the matching comment in build.
+      - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/sentinel" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
 
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5

@@ -1,4 +1,6 @@
-# agentic-server-supervisor
+# OpsNanny
+
+<img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
 A read-only supervisor for a Linux host. It watches the systemd journal,
 disk health, ZFS pool state, and hardware sensors, turns what it finds into
@@ -14,14 +16,14 @@ disk.
 See what it would do, first. Nothing is written and nothing is installed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --dry-run
 ```
 
 Then run it for real. It prompts for the stack directory (offering what it
 detected), a Telegram bot token, a chat id, and a mailrise password:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
 ```
 
 Then bring the stack up, from the directory the installer reports:
