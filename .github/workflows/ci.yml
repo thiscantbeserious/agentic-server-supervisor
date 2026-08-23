@@ -825,25 +825,3 @@ jobs:
           for want in linux/amd64 linux/arm64; do
             echo "$PLATFORMS" | grep -qx "$want" || { echo "manifest list missing $want" >&2; exit 1; }
           done
-
-      # TEMPORARY dual-publish, for the rename's transition window only.
-      # The deployed host still pulls
-      # ghcr.io/thiscantbeserious/agentic-server-supervisor/sentinel, and
-      # its compose file is root-owned, so CI cannot switch it. Without
-      # this, the next merge stops pushing to that path entirely and the
-      # host silently freezes on today's image while every deploy still
-      # reports success. This re-tags the SAME digests under the old path
-      # (imagetools create references blobs by digest, so this is a
-      # cross-repo tag, not a rebuild or a second push of image content).
-      # Delete this step once the host is confirmed pulling from
-      # ghcr.io/thiscantbeserious/ops-nanny/sentinel.
-      - name: Also tag the pre-rename path (temporary, see above)
-        working-directory: /tmp/digests
-        run: |
-          # shellcheck disable=SC2046  # see the disable two steps above,
-          # same reasoning, same single-command scope.
-          docker buildx imagetools create \
-            $(jq -cr '.["tag-names"] | map("-t ghcr.io/thiscantbeserious/agentic-server-supervisor/sentinel:" + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
-        env:
-          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
