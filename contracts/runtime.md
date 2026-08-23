@@ -292,7 +292,7 @@ Only this service is in scope; `apprise` and `mailrise` are defined by the notif
 ```yaml
 services:
   sentinel:
-    image: ghcr.io/thiscantbeserious/agentic-server-supervisor/sentinel:${SENTINEL_TAG:-latest}
+    image: ghcr.io/thiscantbeserious/ops-nanny/sentinel:${SENTINEL_TAG:-latest}
     container_name: sentinel
     restart: unless-stopped
     command: ["tick", "--loop"]
