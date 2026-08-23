@@ -1,5 +1,7 @@
 # OpsNanny
 
+[![ci](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml/badge.svg)](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml) [![status: prerelease](https://img.shields.io/badge/status-prerelease-orange)](#state-of-this-project) ![Debian: supported](https://img.shields.io/badge/Debian-supported-brightgreen) ![OpenMediaVault: supported](https://img.shields.io/badge/OpenMediaVault-supported-brightgreen) ![TrueNAS: in work](https://img.shields.io/badge/TrueNAS-in%20work-yellow) ![Unraid: in work](https://img.shields.io/badge/Unraid-in%20work-yellow)
+
 <img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
 A read-only supervisor for a Linux host. It watches the systemd journal,
@@ -8,8 +10,7 @@ a plain-language report, and delivers that report to Telegram.
 
 It never writes to the host it watches. There is no remediation, no
 self-healing, no action taken on your behalf, only observation and
-notification. If a disk is failing, this tells you; it does not touch the
-disk.
+notification. If a disk is failing, this tells you.
 
 ## Run it
 
@@ -115,7 +116,15 @@ component: [CONTRACTS.md](CONTRACTS.md) and [contracts/](contracts/).
 
 The image builds, passes its test suite (including live checks against
 real `apprise`/`mailrise`/`msmtp` containers), and publishes to GHCR for
-both `amd64` and `arm64`. It has not yet completed a real rollout: no run
-has reached the success path outside a container, and the extended trial
-that would confirm it behaves correctly against real hardware over real
-time has not happened. Treat it accordingly until that changes.
+both `amd64` and `arm64`. It is deployed and running on a real OpenMediaVault
+NAS, pulling from GHCR under the production security flags: the analyzer
+runs clean tick to tick, notifications reach Telegram, and a deliberately
+provoked event was detected, classified, delivered, and its resolution
+delivered too, end to end.
+
+That rollout is about a day old, not weeks. No disk has actually failed
+under it, so the hardware-alerting path has been exercised only by the
+deterministic raw-alert path and by synthetic events, never by a real
+failure, and the extended trial that would confirm it behaves correctly
+against real hardware over real time has not happened. Treat it
+accordingly, consistent with "prerelease" above, until that changes.
