@@ -8,7 +8,7 @@
 
 <img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
-### 24/7 AI Supervisor for a Linux host
+### 24/7 AI Server-Supervisor
 
 It watches the systemd journal,
 disk health, ZFS pool state, and hardware sensors, turns what it finds into
