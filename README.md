@@ -8,11 +8,13 @@
 
 <img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
-A read-only supervisor for a Linux host. It watches the systemd journal,
+A 24/7 AI-Empowered OPS Supervisor for a Linux host. It watches the systemd journal,
 disk health, ZFS pool state, and hardware sensors, turns what it finds into
 a plain-language report, and delivers that report to Telegram.
 
-It never writes to the host it watches. There is no remediation, no
+Built on strong isolation principles with a deterministic first approach that doesn't stop when connection to the LLM-Engine gets lost.
+
+It currently never writes to the host it watches. There is no remediation, no
 self-healing, no action taken on your behalf, only observation and
 notification. If a disk is failing, this tells you.
 
@@ -20,19 +22,19 @@ notification. If a disk is failing, this tells you.
 
 **I'm testing this with my real data on my Backup-Server**. To ensure stability this repo tests via real e2e-VM images to ensure we're not breaking any sensitive stuff with updates randomly (will exercise a full install from scratch). This will support interaction soon ("Did anything happen in the last week that needs my attention?"), might do Layer 3 meshing later. Not sure about self-healing or control-layers ... I'm not taking any PR's due to Security Reasons, neither will I randomly support other Chat Layer (Slack might be supported later).
 
-## 1. check (read properly)
+## 1. Check (read properly)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --dry-run
 ```
 
-## 2. install (should be run interactively)
+## 2. Install (should be run interactively)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
 ```
 
-## 3. run (and move away)
+## 3. Run (and move away)
 ```bash
 cd /opt/sentinel && docker compose up -d
 ```
