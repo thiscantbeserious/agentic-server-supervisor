@@ -558,7 +558,7 @@ This is not a performance preference. An earlier single-runner design built and 
 
 **This job exists because the C-series suite previously ran nowhere in CI.** It executed only on developer machines, under rootless podman, which differs from the runner's rootful BuildKit in ways that have twice produced defects invisible locally, a build arg silently defaulting, and container-created directories the host user cannot remove. The suite must run where the artifacts are actually produced.
 
-**Job `build`**, `needs: test`, matrix over `{platform, arch, runner}` with `fail-fast: false`, `concurrency: group=build-${{ github.ref }}, cancel-in-progress: true`:
+**Job `build`**, `needs: scan` (not `test`: nothing in this job depends on the unit suite having passed, see the comment above `build` in ci.yml; `merge` is the actual gate on the tag), matrix over `{platform, arch, runner}` with `fail-fast: false`, `concurrency: group=build-${{ github.ref }}, cancel-in-progress: true`:
 1. `actions/checkout@v5`
 2. `docker/setup-buildx-action@v3`
 3. `docker/login-action@v3` → `registry: ghcr.io`, `username: ${{ github.actor }}`, `password: ${{ secrets.GITHUB_TOKEN }}`, skipped on `pull_request`
