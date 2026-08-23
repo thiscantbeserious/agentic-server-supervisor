@@ -16,6 +16,10 @@ It never writes to the host it watches. There is no remediation, no
 self-healing, no action taken on your behalf, only observation and
 notification. If a disk is failing, this tells you.
 
+## Status
+
+**I'm testing this with my real data on my Backup-Server**. To ensure stability this repo tests via real e2e-VM images to ensure we're not breaking any sensitive stuff with updates randomly (will exercise a full install from scratch). This will support interaction soon ("Did anything happen in the last week that needs my attention?"), might do Layer 3 meshing later. Not sure about self-healing or control-layers ... I'm not taking any PR's due to Security Reasons, neither will I randomly support other Chat Layer (Slack might be supported later).
+
 ## 1. check (read properly)
 
 ```bash
