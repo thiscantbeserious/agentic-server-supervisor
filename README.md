@@ -2,6 +2,7 @@
 
 [![ci](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml/badge.svg)](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml) [![status: prerelease](https://img.shields.io/badge/status-prerelease-orange)](#state-of-this-project)
 ![Debian: supported](https://img.shields.io/badge/Debian-supported-brightgreen) ![OpenMediaVault: supported](https://img.shields.io/badge/OpenMediaVault-supported-brightgreen) ![TrueNAS: planned](https://img.shields.io/badge/TrueNAS-planned-lightgrey) ![Unraid: planned](https://img.shields.io/badge/Unraid-planned-lightgrey)
+
 ![rules: deterministic](https://img.shields.io/badge/rules-deterministic-blue) ![ai: enriching](https://img.shields.io/badge/ai-enriching-blue) ![antigravity-cli: supported](https://img.shields.io/badge/antigravity--cli-supported-brightgreen) ![openai-api: planned](https://img.shields.io/badge/openai--api-planned-lightgrey)
 
 <img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
