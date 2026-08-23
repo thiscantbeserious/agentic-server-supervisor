@@ -14,14 +14,14 @@ disk.
 See what it would do, first. Nothing is written and nothing is installed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --dry-run
 ```
 
 Then run it for real. It prompts for the stack directory (offering what it
 detected), a Telegram bot token, a chat id, and a mailrise password:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
 ```
 
 Then bring the stack up, from the directory the installer reports:
