@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
 )
 
 // ---- containment regression suite: identifier-from-contents class ----

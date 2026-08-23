@@ -6,7 +6,7 @@ Binding for every component. Where a component contract disagrees with this sect
 
 ### C1. Module, layout, ownership
 
-Module path: `github.com/thiscantbeserious/agentic-server-supervisor`. Go 1.25, `CGO_ENABLED=0`, stdlib only in the runtime path.
+Module path: `github.com/thiscantbeserious/ai-ops-nanny`. Go 1.25, `CGO_ENABLED=0`, stdlib only in the runtime path.
 
 ```
 cmd/sentinel/main.go          subcommand dispatch + exit-code mapping (the ONLY os.Exit)

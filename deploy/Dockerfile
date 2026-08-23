@@ -178,7 +178,7 @@ ARG TARGETARCH
 # binaries — see that RUN step for why this independence is the point.
 ARG TARGETPLATFORM
 
-LABEL org.opencontainers.image.source="https://github.com/thiscantbeserious/agentic-server-supervisor" \
+LABEL org.opencontainers.image.source="https://github.com/thiscantbeserious/ai-ops-nanny" \
       org.opencontainers.image.revision="${VERSION}" \
       org.opencontainers.image.version="${AGY_VERSION}"
 

@@ -1,4 +1,4 @@
-module github.com/thiscantbeserious/agentic-server-supervisor
+module github.com/thiscantbeserious/ai-ops-nanny
 
 go 1.25
 

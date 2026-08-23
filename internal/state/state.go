@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 var (

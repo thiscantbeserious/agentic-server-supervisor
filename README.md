@@ -1,6 +1,6 @@
 # AI OpsNanny
 
-![engine: deterministic](https://img.shields.io/badge/engine-deterministic-blue) ![ai: enriching](https://img.shields.io/badge/ai-enriching-blue) [![status: prerelease](https://img.shields.io/badge/status-prerelease-orange)](#state-of-this-project) [![ci](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml/badge.svg)](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml) 
+![engine: deterministic](https://img.shields.io/badge/engine-deterministic-blue) ![ai: enriching](https://img.shields.io/badge/ai-enriching-blue) [![status: prerelease](https://img.shields.io/badge/status-prerelease-orange)](#state-of-this-project) [![ci](https://github.com/thiscantbeserious/ai-ops-nanny/actions/workflows/ci.yml/badge.svg)](https://github.com/thiscantbeserious/ai-ops-nanny/actions/workflows/ci.yml) 
 
 ![Debian: supported](https://img.shields.io/badge/Debian-supported-brightgreen) ![OpenMediaVault: supported](https://img.shields.io/badge/OpenMediaVault-supported-brightgreen) ![TrueNAS: planned](https://img.shields.io/badge/TrueNAS-planned-lightgrey) ![Unraid: planned](https://img.shields.io/badge/Unraid-planned-lightgrey)
 
@@ -27,13 +27,13 @@ notification. If a disk is failing, this tells you.
 ## 1. Check (read properly)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/install.sh | sudo bash -s -- --dry-run
 ```
 
 ## 2. Install (should be run interactively)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/install.sh | sudo bash
 ```
 
 ## 3. Run (and move away)

@@ -12,7 +12,7 @@
 
 services:
   sentinel:
-    image: ghcr.io/thiscantbeserious/ops-nanny/sentinel:${SENTINEL_TAG:-latest}
+    image: ghcr.io/thiscantbeserious/ai-ops-nanny/sentinel:${SENTINEL_TAG:-latest}
     container_name: sentinel
     restart: unless-stopped
     command: ["tick", "--loop"]

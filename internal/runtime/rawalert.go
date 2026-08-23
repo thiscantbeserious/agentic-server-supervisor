@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // RawCandidate is one kernel entry eligible for the raw-alert path.

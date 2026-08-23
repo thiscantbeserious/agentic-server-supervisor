@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/logging"
 )
 
 // outboxIDRe is the exact shape OutboxAdd emits (S.4: "<epoch>-<rand3>").

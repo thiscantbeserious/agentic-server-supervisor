@@ -28,7 +28,7 @@ ENV_FILE_EXPLICIT=0
 # Stack creation (curl | sudo bash, nothing copied onto the host first).
 # REPO_SLUG is this script's own repository, it is not a generic
 # installer for someone else's fork, so this is a constant, not a flag.
-REPO_SLUG="thiscantbeserious/ops-nanny"
+REPO_SLUG="thiscantbeserious/ai-ops-nanny"
 REF="${SENTINEL_REF:-main}"
 STACK_DIR=""
 LAYOUT=""

@@ -9,8 +9,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/collect"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
 )
 
 const collectUsage = "usage: sentinel collect [--deep zfs|smart|kernel|ras]"

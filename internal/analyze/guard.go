@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // The deny-list below covers only the recommendation field, deliberately.

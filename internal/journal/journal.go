@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
 )
 
 // ErrNoJournal is returned when neither configured journal directory exists.

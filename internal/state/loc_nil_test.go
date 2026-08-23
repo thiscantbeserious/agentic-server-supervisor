@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // Process must not panic when cfg.Loc is nil, config.Load always resolves

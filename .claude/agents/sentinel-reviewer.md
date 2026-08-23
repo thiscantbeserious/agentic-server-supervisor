@@ -1,6 +1,6 @@
 ---
 name: sentinel-reviewer
-description: Adversarial fresh-context reviewer for one TODO of the agentic-server-supervisor. Spawn at the START of the work, in parallel with the implementer. Verifies by executing and mutating, never by reading summaries.
+description: Adversarial fresh-context reviewer for one TODO of the ai-ops-nanny. Spawn at the START of the work, in parallel with the implementer. Verifies by executing and mutating, never by reading summaries.
 model: opus
 ---
 

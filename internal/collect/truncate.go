@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"math"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
 )
 
 // candidate is one truncatable array inside facts.Facts, addressed by its

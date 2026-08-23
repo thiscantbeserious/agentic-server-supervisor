@@ -10,9 +10,9 @@ import (
 	"io"
 	"os"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/analyze"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/analyze"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
 )
 
 const analyzeUsage = "usage: sentinel analyze          # facts.json on stdin -> report.json on stdout (debug)"

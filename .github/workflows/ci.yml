@@ -457,7 +457,7 @@ jobs:
       # sentinel image name below.
       - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ai-ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this content hash is already published
         id: probe
@@ -538,7 +538,7 @@ jobs:
       # matching comment in vm-omv-image.
       - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ai-ops-nanny/omv-base" >> "$GITHUB_OUTPUT"
 
       - name: Pull the cached OMV base image, build locally on a cold cache
         run: |
@@ -617,7 +617,7 @@ jobs:
       # smoke pull, the digest artifact) references the same value.
       - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ai-ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
 
       - name: Load the pinned agy release
         # deploy/agy-pin-load.sh filters and validates deploy/agy-pin.env
@@ -818,7 +818,7 @@ jobs:
       # Pinned literal, see the matching comment in build.
       - name: Pin the image name
         id: image
-        run: echo "name=ghcr.io/thiscantbeserious/ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/thiscantbeserious/ai-ops-nanny/sentinel" >> "$GITHUB_OUTPUT"
 
       - id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
@@ -841,6 +841,29 @@ jobs:
           # suppression.
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+
+      # Temporary: the deployed host still pulls
+      # ghcr.io/thiscantbeserious/ops-nanny/sentinel:latest. Once this repo
+      # publishes only under ai-ops-nanny/sentinel, that path stops
+      # receiving pushes and the host silently freezes on its current image
+      # while every future deploy still reports success. Re-tag the same
+      # digests under the old path too, imagetools create references blobs
+      # by digest, so this costs one extra call and no rebuild.
+      # Remove this step once every host is repointed at
+      # ai-ops-nanny/sentinel, and remove it BEFORE the ops-nanny/sentinel
+      # package is deleted: deleting the package while this step still
+      # targets it would fail this job, or recreate the package.
+      - name: Dual-publish under the previous image path (temporary)
+        working-directory: /tmp/digests
+        run: |
+          # shellcheck disable=SC2046  # see the same disable above; the
+          # old-path tag list is derived from the same tags this job just
+          # pushed, with only the image name swapped.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map(sub("ai-ops-nanny/sentinel"; "ops-nanny/sentinel")) | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ steps.image.outputs.name }}@sha256:%s ' *)
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}

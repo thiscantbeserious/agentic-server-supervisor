@@ -4,9 +4,9 @@
 package runtime
 
 import (
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // CollectorUnavailable builds R3.5's fallback report when collect.Run

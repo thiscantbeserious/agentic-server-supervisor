@@ -2,8 +2,8 @@
 package runtime
 
 import (
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 // Health reports exit 0 iff $STATE_DIR/heartbeat exists and its mtime is

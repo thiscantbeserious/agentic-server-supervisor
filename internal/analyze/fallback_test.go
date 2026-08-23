@@ -3,8 +3,8 @@ package analyze
 import (
 	"testing"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
 )
 
 func factsWithKernelLine(seq int64, msg string) *facts.Facts {

@@ -10,13 +10,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/analyze"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/notify"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/analyze"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/collect"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/notify"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 // Deps are the seams tests replace: collect/analyze/state/notify as

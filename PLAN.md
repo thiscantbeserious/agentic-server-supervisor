@@ -23,7 +23,7 @@ Two clean halves: the repo root is a **standard Go project** (plus the four docs
 ├── CLAUDE.md                       # working rules: TDD loop + gates + model matrix
 ├── install.sh                      # curl | sudo bash: host part + creates the compose stack itself
 │
-├── go.mod                          # github.com/thiscantbeserious/agentic-server-supervisor
+├── go.mod                          # github.com/thiscantbeserious/ai-ops-nanny
 ├── cmd/sentinel/main.go            # dispatch + exit-code mapping (the only os.Exit)
 ├── internal/                       # one package per concern, single owners (CONTRACTS §C1)
 │   ├── config/  logging/  facts/  report/  dedup/

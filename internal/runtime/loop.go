@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 // stateDirError maps to exit 69 (C2's state-dir specialization of startup

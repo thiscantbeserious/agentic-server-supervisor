@@ -12,8 +12,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/logging"
 )
 
 // logWriter lets tests capture this package's exact C7 lines; the zero

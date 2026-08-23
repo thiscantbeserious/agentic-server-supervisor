@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // historyFinding is the compact projection of a past finding carried in the

@@ -22,7 +22,7 @@ unreachable, and when the analyzer is falling back.
 The normal way in, nothing copied onto the host first:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/install.sh | sudo bash
 ```
 
 This installs the host packages (rasdaemon, msmtp, smartd/ZED wiring, see
@@ -45,8 +45,8 @@ idempotent: it only fills in what is still missing.
 `--ref` accepts any git ref, a tag to pin a specific version, or a branch to try one before it merges:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh | sudo bash -s -- --ref v1.2.3
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/t8-rollout/install.sh | sudo bash -s -- --ref t8-rollout
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/install.sh | sudo bash -s -- --ref v1.2.3
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/t8-rollout/install.sh | sudo bash -s -- --ref t8-rollout
 ```
 
 **If you fetch the script itself from a non-`main` ref, a tag or a branch, pass that same ref as `--ref`.** A `curl | bash` stream has no memory of where it came from, the script cannot infer its own ref, so `--ref` defaults to `main` regardless of which URL fetched it. Fetching `install.sh` from `v1.2.3` (or from an unmerged branch, while testing a change before it lands on `main`) without also passing the matching `--ref` gets that version of the script paired with `main`'s `docker-compose.yml`, silently. The resolved ref is printed on the first line of output and in the run summary, worth checking it reads what you expect.
@@ -62,7 +62,7 @@ read before running as root. It is a plain, gitignore-respecting bash
 script; nothing about it requires the pipe:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ops-nanny/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/install.sh -o install.sh
 less install.sh
 sudo bash install.sh --ref main   # same behavior, run from disk
 ```

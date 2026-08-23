@@ -33,12 +33,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/collect"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/logging"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // Options is Run's per-tick input: configuration, the facts collected this

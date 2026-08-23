@@ -17,8 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
 )
 
 // deepDiveCapable lists the components that have a deep collector.

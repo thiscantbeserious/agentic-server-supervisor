@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
 )
 
 // R3.5: the collector fallback's dedup key is the fixed

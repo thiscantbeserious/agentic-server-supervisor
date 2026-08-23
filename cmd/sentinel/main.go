@@ -25,11 +25,11 @@ import (
 	// the debian-slim runtime image is CGO_ENABLED=0 and may not ship it.
 	_ "time/tzdata"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/logging"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/notify"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/runtime"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/logging"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/notify"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/runtime"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 // version is set at build time in later TODOs (T7 CI); "dev" is the

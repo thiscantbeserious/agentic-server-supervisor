@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
 )
 
 // plainAuthNoTLS implements SMTP AUTH PLAIN without stdlib smtp.PlainAuth's

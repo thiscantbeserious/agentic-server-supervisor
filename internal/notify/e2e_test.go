@@ -42,9 +42,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 // sinkDelivery is apprise's OWN json:// notification envelope, verified

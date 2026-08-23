@@ -6,7 +6,7 @@
 # suite ships today were written from an idea of what these commands emit;
 # these are what they actually emit.
 #
-#   curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/agentic-server-supervisor/main/capture-fixtures.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/thiscantbeserious/ai-ops-nanny/main/capture-fixtures.sh | sudo bash
 #
 # Read-only: every command below reads. Nothing is installed, started,
 # stopped or written outside the output directory.

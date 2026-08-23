@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
 )
 
 // agy failure classes. The split exists because retrying is only ever

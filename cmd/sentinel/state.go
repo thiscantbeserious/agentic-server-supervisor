@@ -7,8 +7,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	st "github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	st "github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 var stateSubcommands = map[string]bool{

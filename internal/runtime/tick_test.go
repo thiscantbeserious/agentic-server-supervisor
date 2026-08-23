@@ -14,13 +14,13 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/analyze"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/analyze"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/collect"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/dedup"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/report"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/state"
 )
 
 var tick0 = time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC)

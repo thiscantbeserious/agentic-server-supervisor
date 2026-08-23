@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/config"
 )
 
 // SeedConfig uploads APPRISE_CONFIG_FILE verbatim via POST /add/{key}. Ops

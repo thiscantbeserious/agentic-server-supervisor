@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
-	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/collect"
+	"github.com/thiscantbeserious/ai-ops-nanny/internal/facts"
 )
 
 type smtpStub struct {
