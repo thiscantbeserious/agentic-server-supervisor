@@ -8,7 +8,9 @@
 
 <img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
-A 24/7 AI-Empowered OPS Supervisor for a Linux host. It watches the systemd journal,
+### 24/7 AI Supervisor for a Linux host
+
+It watches the systemd journal,
 disk health, ZFS pool state, and hardware sensors, turns what it finds into
 a plain-language report, and delivers that report to Telegram.
 
