@@ -1,4 +1,4 @@
-# AI OpsNanny
+# OpsNanny
 
 ![engine: deterministic](https://img.shields.io/badge/engine-deterministic-blue) ![ai: enriching](https://img.shields.io/badge/ai-enriching-blue) [![status: prerelease](https://img.shields.io/badge/status-prerelease-orange)](#state-of-this-project) [![ci](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml/badge.svg)](https://github.com/thiscantbeserious/ops-nanny/actions/workflows/ci.yml) 
 
