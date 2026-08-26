@@ -136,3 +136,16 @@ deterministic raw-alert path and by synthetic events, never by a real
 failure, and the extended trial that would confirm it behaves correctly
 against real hardware over real time has not happened. Treat it
 accordingly, consistent with "prerelease" above, until that changes.
+
+## License
+
+Copyright (C) 2026 Simon Sanladerer
+
+Licensed under the **GNU Affero General Public License v3.0 only**
+([LICENSE](LICENSE)). Free to use, run, and modify, for individuals and
+companies alike, including commercially and in production. The condition is
+reciprocity: if you distribute a modified version, or run one as a network
+service others use, the corresponding source of your version has to be
+available to those users under the same license.
+
+Contributions are accepted under the same license (inbound = outbound).
