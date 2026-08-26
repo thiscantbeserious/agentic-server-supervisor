@@ -1,0 +1,8 @@
+# Secrets that must never enter a build layer or the exported build
+.env
+deploy/.env
+deploy/mailrise/mailrise.conf
+deploy/apprise/*.filled
+
+# .git is not needed inside the build context
+.git

@@ -6,7 +6,7 @@
 
 ![antigravity-cli: supported](https://img.shields.io/badge/antigravity--cli-supported-brightgreen) ![openai-api: planned](https://img.shields.io/badge/openai--api-planned-lightgrey)
 
-<img src="assets/logo-draft.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
+<img src="assets/logo.png" alt="OpsNanny mascot: a pixel-art technician in monitoring goggles holding a server rack with a green checkmark and an amber warning icon" width="110" align="right">
 
 ### 24/7 AI Server-Supervisor
 
