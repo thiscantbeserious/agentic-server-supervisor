@@ -200,12 +200,6 @@ func runTick(args []string) (int, error) {
 	return res.ExitCode, res.Err
 }
 
-// --- collect --- (cmd/sentinel/collect.go)
-
-// --- analyze --- (cmd/sentinel/analyze.go)
-
-// --- state --- (cmd/sentinel/state.go)
-
 // --- notify ---
 
 func runNotify(args []string) (int, error) {
