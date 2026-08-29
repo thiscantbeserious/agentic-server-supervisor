@@ -134,6 +134,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 	// d) per finding, in input order.
 	notified := make([]report.Finding, 0, len(rep.Findings))
 	annotated := make([]report.Finding, len(rep.Findings)) // full input order, for history (S.3b)
+	wasNotified := make([]bool, len(rep.Findings))         // which annotated findings notified, for rule 1's ride-along
 	touchedKeys := make(map[string]bool, len(rep.Findings))
 	suppressedCount := 0
 	reason := ""
@@ -197,6 +198,19 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			}
 		}
 
+		// info findings never earn a notification of their own (S.3d).
+		// The quiet-tick "all systems normal" finding is contract-mandated
+		// (analyze: silence is not a report), and its key is dedup.Key over
+		// model free-text, so every rephrasing mints a fresh key and a
+		// fresh new_finding; severity is the only stable handle. Escalation
+		// is unaffected: a stored info record seen again at watch or alert
+		// arrives here with that higher severity and takes the escalation
+		// branch above, never this gate.
+		if f.Severity == "info" {
+			isNotify = false
+			findingReason = ""
+		}
+
 		if isNotify {
 			alert.LastNotified = now
 			alert.NotifyCount++
@@ -216,6 +230,7 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		annotated[i] = f
 		if isNotify {
 			notified = append(notified, f)
+			wasNotified[i] = true
 		}
 	}
 
@@ -291,7 +306,17 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		}
 		statusByRank := []string{"OK", "WATCH", "ALERT"}
 		rep.Status = statusByRank[highest]
-		rep.Findings = notified
+		// Ride-along (S.3g rule 1): this tick's info findings travel on a
+		// report already being sent, annotated and in input order, so the
+		// operator still sees the analyzer's "everything else" context.
+		// Status stays derived from the notified findings alone above.
+		outgoing := make([]report.Finding, 0, len(annotated))
+		for i, f := range annotated {
+			if wasNotified[i] || f.Severity == "info" {
+				outgoing = append(outgoing, f)
+			}
+		}
+		rep.Findings = outgoing
 		rep.Resolved = allClear
 		if rep.Resolved == nil {
 			rep.Resolved = []string{}

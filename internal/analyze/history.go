@@ -154,7 +154,11 @@ func computeResolved(newest *report.Report, current []report.Finding) []string {
 	}
 	var out []string
 	for _, f := range newest.Findings {
-		if f.Key == "" || currentKeys[f.Key] {
+		// info never resolves, it just is: the quiet-tick finding's key
+		// changes with every model rephrasing, and letting those keys into
+		// the diff pollutes the 20-entry cap and makes state announce that
+		// normality was "resolved".
+		if f.Key == "" || f.Severity == "info" || currentKeys[f.Key] {
 			continue
 		}
 		out = append(out, f.Key)
