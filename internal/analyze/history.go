@@ -154,11 +154,14 @@ func computeResolved(newest *report.Report, current []report.Finding) []string {
 	}
 	var out []string
 	for _, f := range newest.Findings {
-		// info never resolves, it just is: the quiet-tick finding's key
+		// The quiet-tick meta finding never resolves, it just is: its key
 		// changes with every model rephrasing, and letting those keys into
 		// the diff pollutes the 20-entry cap and makes state announce that
-		// normality was "resolved".
-		if f.Key == "" || f.Severity == "info" || currentKeys[f.Key] {
+		// normality was "resolved". Scoped to component "meta", not to all
+		// of info: an alert the model de-escalated to info before it
+		// vanished still needs its key in the diff, or its all-clear is
+		// silently swallowed and the record lingers to the stale reap.
+		if f.Key == "" || (f.Severity == "info" && f.Component == "meta") || currentKeys[f.Key] {
 			continue
 		}
 		out = append(out, f.Key)

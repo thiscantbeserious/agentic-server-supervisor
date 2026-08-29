@@ -1883,16 +1883,28 @@ func TestProcess_InfoRidesAlongOnNotifiedReport(t *testing.T) {
 	alert := finding("alert", "disk on fire")
 	info := finding("info", "everything else fine")
 	info.Component = "meta"
-	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "h", Body: "b", Findings: []report.Finding{alert, info}})
+
+	// A watch inside its renotify window must NOT ride along: only info
+	// findings travel on someone else's notification. Notify the watch
+	// once, then re-send it inside the window together with a fresh alert.
+	watch := finding("watch", "watch evidence")
+	bw := marshalReport(t, &report.Report{Status: "WATCH", Headline: "h", Body: "b", Findings: []report.Finding{watch}})
+	mustProcess(t, s, bw)
+	cfg.Now = time.Unix(1000+300, 0)
+
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "h", Body: "b", Findings: []report.Finding{alert, info, watch}})
 	d := mustProcess(t, s, b)
 	if !d.Notify || d.Report.Status != "ALERT" {
 		t.Fatalf("notify=%v status=%s, want notify=true status=ALERT", d.Notify, d.Report.Status)
 	}
 	if len(d.Report.Findings) != 2 || d.Report.Findings[0].Severity != "alert" || d.Report.Findings[1].Severity != "info" {
-		t.Errorf("Findings=%+v, want [alert, info] in input order", d.Report.Findings)
+		t.Fatalf("Findings=%+v, want [alert, info] in input order and the suppressed watch absent", d.Report.Findings)
 	}
 	if d.Report.Findings[1].Key == "" || d.Report.Findings[1].Occurrences == 0 {
 		t.Errorf("info ride-along not annotated: %+v", d.Report.Findings[1])
+	}
+	if d.SuppressedCount != 2 {
+		t.Errorf("suppressed_count=%d, want 2: the withheld watch plus the gated info (S.4)", d.SuppressedCount)
 	}
 }
 
