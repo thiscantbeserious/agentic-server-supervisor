@@ -1,0 +1,29 @@
+# Replaces mermaid fences in the PR body with rendered images plus
+# collapsed source (.github/render-mermaid.py), because the GitHub
+# mobile app shows fences as raw code. Runs on open and edit; the
+# script is idempotent and the body is only written when it changed,
+# and edits made with the workflow token do not retrigger workflows,
+# so no loop is possible. The job holds only pull-requests: write on
+# this repository, no secrets and no registry scope.
+name: render-mermaid
+on:
+  pull_request:
+    types: [opened, edited]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Render mermaid fences in the PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR" --json body -q .body > body.md
+          .github/render-mermaid.py < body.md > rendered.md
+          if ! cmp -s body.md rendered.md; then
+            gh pr edit "$PR" --body-file rendered.md
+          fi
