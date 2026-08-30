@@ -3164,3 +3164,64 @@ func TestRunAgy_UnauthenticatedExitsZero_IsClassifiedUnauth(t *testing.T) {
 		t.Fatalf("err = %v, want errAgyUnauth: an agy that exits 0 saying it needs a login must not be reported as a schema or JSON fault", err)
 	}
 }
+
+// TestRun_ResolvedSkipsInfoFindings: resolved[] is capped at 20 entries,
+// and the quiet-tick info finding's key changes with every model
+// rephrasing, so letting info keys into the diff both pollutes the cap
+// and makes `state` announce that normality was "resolved". Only watch
+// and alert keys belong in the diff.
+func TestRun_ResolvedSkipsInfoFindings(t *testing.T) {
+	cfg := newTestConfig(t)
+	histDir := filepath.Join(cfg.StateDir, "history")
+	if err := os.MkdirAll(histDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	watchEvidence := "smartd[123]: Device: /dev/sda, 1 Currently unreadable (pending) sectors"
+	watchKey := dedup.Key("smart", watchEvidence)
+	infoKey := dedup.Key("meta", "collector_errors: []")
+	// A de-escalated finding: last seen at info severity but NOT component
+	// meta. Its key must stay in the diff, or its all-clear is swallowed.
+	deescEvidence := "zed[2914]: pool hotstore state changed"
+	deescKey := dedup.Key("zfs", deescEvidence)
+
+	// The previous tick carried a real watch finding, the mandatory
+	// quiet-tick info finding, and a de-escalated zfs finding at info;
+	// the current tick has none of them.
+	writeHistoryReport(t, histDir, 1, report.Report{
+		Status: "WATCH", Headline: "h", Body: "b",
+		Findings: []report.Finding{
+			{Severity: "watch", Component: "smart", Evidence: watchEvidence, Explanation: "e", Key: watchKey},
+			{Severity: "info", Component: "meta", Evidence: "collector_errors: []", Explanation: "e", Key: infoKey},
+			{Severity: "info", Component: "zfs", Evidence: deescEvidence, Explanation: "e", Key: deescKey},
+		},
+		Resolved: []string{},
+	})
+
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(2), Seq: 2}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	foundWatch, foundInfo, foundDeesc := false, false, false
+	for _, r := range rep.Resolved {
+		if r == watchKey {
+			foundWatch = true
+		}
+		if r == infoKey {
+			foundInfo = true
+		}
+		if r == deescKey {
+			foundDeesc = true
+		}
+	}
+	if !foundWatch {
+		t.Errorf("Resolved = %v, want the cleared watch key %q in the diff", rep.Resolved, watchKey)
+	}
+	if foundInfo {
+		t.Errorf("Resolved = %v, must not contain the quiet-tick meta key %q: it never resolves, it just is", rep.Resolved, infoKey)
+	}
+	if !foundDeesc {
+		t.Errorf("Resolved = %v, want the de-escalated non-meta info key %q: the exclusion is scoped to meta, not all of info", rep.Resolved, deescKey)
+	}
+}

@@ -1785,3 +1785,141 @@ func TestTrimOutbox_ReclaimFailureVisibleAtErrorLevel(t *testing.T) {
 		t.Errorf("reclaim failure is invisible at LOG_LEVEL=ERROR; log was %q", buf.String())
 	}
 }
+
+// --- info gate (S.3d): info findings never earn a notification of their own ---
+
+// The quiet-tick "all systems normal" finding is contract-mandated
+// (analyze "Quiet ticks": silence is not a report), and its key is
+// dedup.Key over model free-text evidence, so it fragments across
+// phrasings. Gating on severity is the only stable handle: no phrasing
+// variant may ever produce a new_finding or renotify notification.
+func TestProcess_InfoFindingNeverNotifies(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	// Three ticks, three distinct evidence strings -> three distinct keys,
+	// each of which would be a fresh new_finding without the gate.
+	evidences := []string{"collector_errors: []", "All systems normal", "all checks clean"}
+	for i, ev := range evidences {
+		cfg.Now = time.Unix(1000+int64(i)*300, 0)
+		f := finding("info", ev)
+		f.Component = "meta"
+		b := marshalReport(t, &report.Report{Status: "OK", Headline: "All systems normal", Body: "clean", Findings: []report.Finding{f}})
+		d := mustProcess(t, s, b)
+		if d.Notify || d.Reason != "suppressed" || d.SuppressedCount != 1 {
+			t.Errorf("Tick %d: notify=%v reason=%s suppressed=%d, want notify=false reason=suppressed suppressed=1", i+1, d.Notify, d.Reason, d.SuppressedCount)
+		}
+	}
+
+	// The records still exist (annotation source) but were never notified.
+	alertDir := filepath.Join(cfg.StateDir, "active-alerts")
+	entries, err := os.ReadDir(alertDir)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("active-alerts: %d entries, err=%v, want 3 records with notify_count=0", len(entries), err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(alertDir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rec ActiveAlert
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.NotifyCount != 0 {
+			t.Errorf("record %s: notify_count=%d, want 0", e.Name(), rec.NotifyCount)
+		}
+	}
+
+	// History annotation survives the gate: the finding carries key,
+	// first_seen and occurrences even though it never notified.
+	hist := readHistoryFiles(t, cfg.StateDir)
+	if len(hist) == 0 {
+		t.Fatal("no history files written")
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.StateDir, "history", hist[len(hist)-1].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var histRep report.Report
+	if err := json.Unmarshal(data, &histRep); err != nil {
+		t.Fatal(err)
+	}
+	if len(histRep.Findings) != 1 || histRep.Findings[0].Key == "" || histRep.Findings[0].FirstSeen == 0 || histRep.Findings[0].Occurrences == 0 {
+		t.Errorf("history annotation: %+v, want key/first_seen/occurrences set on the gated info finding", histRep.Findings)
+	}
+}
+
+// Escalation must survive the gate: a stored info record seen again at
+// watch severity is the analyzer saying "this stopped being normal", and
+// that notifies exactly as any other escalation.
+func TestProcess_StoredInfoEscalatesToWatchNotifies(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	info := finding("info", "evidence")
+	b1 := marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b", Findings: []report.Finding{info}})
+	d1 := mustProcess(t, s, b1)
+	if d1.Notify {
+		t.Fatalf("Tick 1 info: notify=%v, want false", d1.Notify)
+	}
+
+	cfg.Now = time.Unix(1000+300, 0)
+	watch := finding("watch", "evidence") // same evidence -> same key -> same record
+	b2 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "h", Body: "b", Findings: []report.Finding{watch}})
+	d2 := mustProcess(t, s, b2)
+	if !d2.Notify || d2.Reason != "escalation" {
+		t.Errorf("Tick 2: notify=%v reason=%s, want notify=true reason=escalation", d2.Notify, d2.Reason)
+	}
+}
+
+// Ride-along (S.3g rule 1): a report notified for a real finding still
+// carries this tick's info findings, annotated and in input order, but
+// status is derived from the notified findings alone.
+func TestProcess_InfoRidesAlongOnNotifiedReport(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	alert := finding("alert", "disk on fire")
+	info := finding("info", "everything else fine")
+	info.Component = "meta"
+
+	// A watch inside its renotify window must NOT ride along: only info
+	// findings travel on someone else's notification. Notify the watch
+	// once, then re-send it inside the window together with a fresh alert.
+	watch := finding("watch", "watch evidence")
+	bw := marshalReport(t, &report.Report{Status: "WATCH", Headline: "h", Body: "b", Findings: []report.Finding{watch}})
+	mustProcess(t, s, bw)
+	cfg.Now = time.Unix(1000+300, 0)
+
+	b := marshalReport(t, &report.Report{Status: "ALERT", Headline: "h", Body: "b", Findings: []report.Finding{alert, info, watch}})
+	d := mustProcess(t, s, b)
+	if !d.Notify || d.Report.Status != "ALERT" {
+		t.Fatalf("notify=%v status=%s, want notify=true status=ALERT", d.Notify, d.Report.Status)
+	}
+	if len(d.Report.Findings) != 2 || d.Report.Findings[0].Severity != "alert" || d.Report.Findings[1].Severity != "info" {
+		t.Fatalf("Findings=%+v, want [alert, info] in input order and the suppressed watch absent", d.Report.Findings)
+	}
+	if d.Report.Findings[1].Key == "" || d.Report.Findings[1].Occurrences == 0 {
+		t.Errorf("info ride-along not annotated: %+v", d.Report.Findings[1])
+	}
+	if d.SuppressedCount != 2 {
+		t.Errorf("suppressed_count=%d, want 2: the withheld watch plus the gated info (S.4)", d.SuppressedCount)
+	}
+}
+
+// The swallowed-heartbeat regression: before the gate, the quiet-tick
+// info finding notified as new_finding at 08:01 and rule 1 pre-empted
+// rule 3, so the operator's one designed daily message never fired.
+func TestProcess_QuietInfoTickStillEarnsHeartbeat(t *testing.T) {
+	cfg := testConfig(t, time.Date(2026, 8, 29, 8, 1, 0, 0, time.UTC))
+	s := newStore(t, cfg)
+
+	f := finding("info", "collector_errors: []")
+	f.Component = "meta"
+	b := marshalReport(t, &report.Report{Status: "OK", Headline: "All systems normal", Body: "clean", Findings: []report.Finding{f}})
+	d := mustProcess(t, s, b)
+	if !d.Notify || !d.Heartbeat || d.Reason != "heartbeat" {
+		t.Errorf("notify=%v heartbeat=%v reason=%s, want the daily heartbeat, not an info new_finding", d.Notify, d.Heartbeat, d.Reason)
+	}
+}

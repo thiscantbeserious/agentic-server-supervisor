@@ -101,6 +101,8 @@ Reachability is defense in depth rather than a live exploit: `analyze` overwrite
 | present, `now - last_notified >= window(severity)` | **notify** | `renotify` |
 | otherwise | suppress, `suppressed_count++` |, |
 
+**`info` findings are never notification candidates**: the `new_finding` and `renotify` rows above do not apply to a finding whose severity is `info`; it is processed for its record and annotations exactly as any other finding and then counted into `suppressed_count`. The quiet-tick "all systems normal" finding is contract-mandated (`contracts/analyze.md`, Quiet ticks) and its key is `dedup.Key` over model free-text evidence, so every rephrasing mints a fresh key; a key-scoped suppression therefore cannot hold, severity is the only stable handle. Escalation is unaffected by construction: an incoming `info` can never out-rank a stored severity (rank 0 exceeds nothing), and a stored `info` record seen again at `watch` or `alert` arrives with that higher severity and takes the escalation row, not this gate.
+
 `window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. **Every** finding, notified and suppressed, is annotated with `key`, `first_seen` and `occurrences` from its (post-update) record. The notified ones carry the annotations into the outgoing report; all of them carry it into the history write of step (b), which is what makes `analyze`'s trend rule answerable.
 
 **e) resolved / all-clear**, each entry of `report.resolved[]` is a 16-hex `dedup.Key`. Reject any entry not matching `^[0-9a-f]{16}$` (drop it, do not error) and compare the remainder against the stored `key` of every active alert **not touched in step (d) this tick** (S-D7). Exact string equality, no normalization, no case folding, no substring matching. **Never build a path from the entry**; it identifies a record already read, and the file to delete is that record's `os.ReadDir` entry name.
@@ -115,7 +117,7 @@ The **output** side is unchanged and still human. On match: append the *stored* 
 
 **g) message assembly**, at most one message per tick, first matching rule:
 
-1. `notified` non-empty ⇒ `status` = highest notified severity (`alert→ALERT`, `watch→WATCH`, `info→OK`); `headline`/`body` verbatim from input; `resolved` = `all_clear`; `reason` = the reason of the **first** notified finding in input order.
+1. `notified` non-empty ⇒ `status` = highest notified severity (`alert→ALERT`, `watch→WATCH`); `findings` = the notified findings **plus this tick's `info` findings**, annotated, in input order, the info ride-along keeps the analyzer's "everything else" context on a message already being sent without ever causing one, and `status` is derived from the notified findings alone (an `info` can therefore never be the highest, the `info→OK` mapping is unreachable here since the S.3(d) gate keeps info out of `notified`); `headline`/`body` verbatim from input; `resolved` = `all_clear`; `reason` = the reason of the **first** notified finding in input order.
 2. else `all_clear` non-empty ⇒ `status="OK"`, `headline="Resolved: <first>"` (`+ " (+N more)"` when >1) **truncated to 80 runes** so the schema bound holds; `body` = one `- ` bullet per entry; `reason="all_clear"`.
 3. else heartbeat due **and the input document does not carry `meta.degraded`** ⇒ `status="OK"`, `headline="Daily heartbeat: all clear"`, `body="No open findings. <k> ticks since <RFC3339 UTC of the oldest kept history entry>."` (`k` = number of kept history files). **When `k == 0` the timestamp is `now`**, i.e. `cfg.Now` when set, else the live clock captured once at the top of `Process`, never a second `time.Now()` call deeper in the code (C9). This case is reachable in production, not theoretical: on a fresh `/state` volume the first heartbeat assembles its body while `history/` is still empty, because the history write happens after step (g), `reason="heartbeat"`, `heartbeat=true`. A degraded document that is otherwise due falls through to rule 4 instead: the analyzer did not run this tick, so "all clear" is not a claim the document can back up, and the heartbeat file stays due until a healthy tick can send it honestly.
 4. else `notify=false`, `reason="suppressed"`, `status="OK"`, `findings=[]`, `resolved=[]`, `headline`/`body` verbatim from input.
@@ -131,7 +133,7 @@ Rule 4's `status="OK"` is what keeps a suppressed document schema-valid (`status
 | `notify` | bool | send `.report` or not |
 | `reason` | string | `new_finding`\|`escalation`\|`renotify`\|`all_clear`\|`heartbeat`\|`suppressed` |
 | `tick_seq` | int64 | this tick's sequence number |
-| `suppressed_count` | int | findings withheld by re-notify windows |
+| `suppressed_count` | int | findings withheld by re-notify windows or the S.3(d) info gate |
 | `active_count` | int | open keys after this tick |
 | `heartbeat` | bool | this message *is* the daily heartbeat |
 | `report` | object | a `report.Report` that validates against `report.schema.json` |
@@ -362,6 +364,10 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 | 19 | key reuse | a finding arriving with `key` set keeps it byte-for-byte; a finding without one gets `dedup.Key(component, evidence)`, and one shared test proves `analyze` and `state` derive the identical key from the same evidence |
 | 20 | schema agreement | every `decision.report` from cases 1–14 validates against `report.schema.json`, suppressed and all-clear documents included |
 | 21 | CLI exit codes | the §S.6 mapping via `cmd/sentinel`, and `outbox-add` prints only the id + `\n` |
+| 22 | info gate | 3 ticks, one `info` finding each with **distinct evidence** (distinct keys) ⇒ every tick `notify=false`, `reason="suppressed"`, `suppressed_count=1`; all 3 records exist with `notify_count=0`; the history write still carries non-zero `key`/`first_seen`/`occurrences` on the gated finding |
+| 23 | info escalation survives the gate | tick 1 `info`, tick 2 same evidence at `watch` ⇒ `notify=true`, `reason="escalation"` |
+| 24 | info ride-along | one `alert` + one `info` in the same tick ⇒ `notify=true`, `status="ALERT"`, emitted `findings` = both, input order, the info one annotated |
+| 25 | heartbeat not swallowed | fresh `StateDir`, 08:01, report with one `info` finding ⇒ `heartbeat=true`, `reason="heartbeat"`, never `new_finding` |
 
 ---
 
