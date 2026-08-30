@@ -8,12 +8,15 @@ goes in fenced blocks, unedited.
 
 <!-- What is wrong, observed where. Numbered facts, not narrative.
 Optional: a Mermaid chart of the state of things (the flow or data path
-as it currently behaves), directly below this headline. -->
+as it currently behaves), directly below this headline. Before opening
+the PR, run the body through .github/render-mermaid.py so the chart
+also renders in the GitHub mobile app. -->
 
 ## Change
 
 <!-- Optional: a Mermaid chart of the changes (the flow or data path as
-it behaves after this PR), directly below this headline.
+it behaves after this PR), directly below this headline; same
+render-mermaid.py step as in Problem.
 One bullet per file or mechanism: what it does now, and the one reason
 for any non-obvious scoping choice. Name amended contract clauses here
 (state.md S.x, analyze.md §y). -->
