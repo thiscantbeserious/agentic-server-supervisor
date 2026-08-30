@@ -27,6 +27,12 @@ how it came to be written.
 Git history holds all of this, keyed to the exact lines, and holds it better
 than prose can. A comment repeating it is a worse copy that goes stale.
 
+## Pull requests
+
+PR descriptions use `.github/pull_request_template.md`. Fill its sections,
+delete the ones that do not apply, put verbatim evidence in fenced blocks.
+Do not invent a per-PR structure.
+
 ## Instead
 
 Name the constraint and its consequence:
