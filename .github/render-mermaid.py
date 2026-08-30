@@ -25,7 +25,10 @@ def ink_url(code: str) -> str:
     comp = zlib.compressobj(9, zlib.DEFLATED, 15)
     data = comp.compress(state.encode()) + comp.flush()
     pako = base64.urlsafe_b64encode(data).decode().rstrip("=")
-    return f"https://mermaid.ink/svg/pako:{pako}"
+    # /img (server-side browser screenshot), not /svg: the SVG endpoint
+    # embeds text metrics for a font the viewer may not have, so labels
+    # overflow and clip at node edges.
+    return f"https://mermaid.ink/img/pako:{pako}?type=png"
 
 
 def convert(md: str) -> str:
