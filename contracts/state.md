@@ -103,13 +103,13 @@ Reachability is defense in depth rather than a live exploit: `analyze` overwrite
 
 **`info` findings are never notification candidates**: the `new_finding` and `renotify` rows above do not apply to a finding whose severity is `info`; it is processed for its record and annotations exactly as any other finding and then counted into `suppressed_count`. The quiet-tick "all systems normal" finding is contract-mandated (`contracts/analyze.md`, Quiet ticks) and its key is `dedup.Key` over model free-text evidence, so every rephrasing mints a fresh key; a key-scoped suppression therefore cannot hold, severity is the only stable handle. Escalation is unaffected by construction: an incoming `info` can never out-rank a stored severity (rank 0 exceeds nothing), and a stored `info` record seen again at `watch` or `alert` arrives with that higher severity and takes the escalation row, not this gate.
 
-`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count` change only when the finding actually enters the outgoing report. **Every** finding, notified and suppressed, is annotated with `key`, `first_seen` and `occurrences` from its (post-update) record. The notified ones carry the annotations into the outgoing report; all of them carry it into the history write of step (b), which is what makes `analyze`'s trend rule answerable.
+`window(alert) = RENOTIFY_ALERT_SEC`, `window(watch|info) = RENOTIFY_WATCH_SEC`. De-escalation never notifies on its own; it lowers the stored severity and switches the window. The record is rewritten on **every** occurrence (`last_seen`, `severity`, `occurrences`, `tick_seq_last`); `last_notified`/`notify_count`/`max_notified_severity` change only when the finding actually enters the outgoing report, and `max_notified_severity` only ever rises (it records the highest severity the operator was notified at, which step (e) gates the all-clear on). **Every** finding, notified and suppressed, is annotated with `key`, `first_seen` and `occurrences` from its (post-update) record. The notified ones carry the annotations into the outgoing report; all of them carry it into the history write of step (b), which is what makes `analyze`'s trend rule answerable.
 
 **e) resolved / all-clear**, each entry of `report.resolved[]` is a 16-hex `dedup.Key`. Reject any entry not matching `^[0-9a-f]{16}$` (drop it, do not error) and compare the remainder against the stored `key` of every active alert **not touched in step (d) this tick** (S-D7). Exact string equality, no normalization, no case folding, no substring matching. **Never build a path from the entry**; it identifies a record already read, and the file to delete is that record's `os.ReadDir` entry name.
 
 **Why keys, and what this replaced.** `analyze` used to render `resolved[]` as the past finding's evidence truncated to 80 runes, because findings have no headline of their own. Matching only on `headline` therefore never matched anything: every all-clear was silently dropped and a genuinely cleared alert sat in `active-alerts/` until `STALE_ALERT_SEC` expired it without ever telling the operator. The accommodation was to match on headline **and** evidence, which worked but left a collision class, two alerts whose evidence agreed in the first 80 runes were indistinguishable, and one entry could close both. `analyze` now emits the key itself (analyze §6 step 7), so the match is exact and both the dual-match rule and the collision class are gone.
 
-The **output** side is unchanged and still human. On match: append the *stored* headline to `all_clear` (deduplicated, first occurrence wins) and delete **the file this record was read from, the directory entry name from `os.ReadDir`, never a path built from the record's own `key` field**, which guarantees exactly one all-clear. A string matching nothing is dropped silently; an LLM must not be able to invent an all-clear. A key that was never notified is deleted without an all-clear.
+The **output** side is human. On match: delete **the file this record was read from, the directory entry name from `os.ReadDir`, never a path built from the record's own `key` field**, and append the *stored* headline to `all_clear` (deduplicated, first occurrence wins) **only when the record was notified at alert severity** (`max_notified_severity == "alert"`), which guarantees at most one all-clear. A resolved watch or info closes silently: it already cost its one message, and announcing its end doubles the volume for something that was never urgent. The gate reads `max_notified_severity`, not `severity`, because de-escalation lowers `severity` without notifying; a finding the operator saw as ALERT must announce its end even if the model later reported it lower. A record with an **empty** `max_notified_severity` predates the field (S.7) and keeps the legacy behavior, an all-clear whatever its severity, so no finding the operator was told about ever closes silently across the upgrade; such records age out within `STALE_ALERT_SEC`. A string matching nothing is dropped silently; an LLM must not be able to invent an all-clear. A key that was never notified is deleted without an all-clear.
 
 **Why the deletion must use the directory entry, not the record's `key`.** "Delete the key file" is ambiguous between "the file named by the record's key" and "the file this record was read from", and the two are identical only while keys are trustworthy, the assumption the S.3(d) guard exists because we cannot make. A stored record containing `"key": "../../victim"` steers `os.Remove` outside `$STATE_DIR`, reproduced against a build carrying the S.3(d) guard: the guard stops such a record being *planted* through step (d), but any record already on a live volume from an older build, or corrupted, or hand-edited, still drives the escape. Deleting by `entry.Name()` costs nothing (it is already in hand from the directory read), needs no validation, and is also the *correct* file when the two disagree. `expireStaleAlerts` already does this.
 
@@ -212,6 +212,7 @@ $STATE_DIR/
   "evidence_core": "bam zed[2914]: eid=# class=checksum pool='hotstore' vdev=seagate-zvtazeam-crypt cksum_errors=#",
   "headline": "ZFS checksum errors on hotstore rising (1 -> 7)",
   "severity": "alert",
+  "max_notified_severity": "alert",
   "first_seen": 1755155520,
   "last_seen": 1755248461,
   "last_notified": 1755248461,
@@ -259,6 +260,7 @@ Nothing goes to stdout on a non-zero exit; diagnostics go to stderr through `int
 | Apprise down | `tick` calls `OutboxAdd`; retried on every following tick via `OutboxTake`; `attempts` increments; `fallback_smtp` flips true at `OUTBOX_SMTP_AFTER`, which is how the SMTP second path is reached |
 | Raw alert fails to send | `tick` queues it through the same `OutboxAdd`, no alert is lost |
 | Corrupt `active-alerts/*.json` | deleted, finding treated as new (one extra notification, never a crash) |
+| `active-alerts/*.json` without `max_notified_severity` (pre-field record) | legal, not corrupt: step (e) emits its all-clear regardless of severity (legacy behavior); the field appears on its next notification |
 | Corrupt `history/*.json` | skipped by `History`, still counted for rotation |
 | Corrupt `outbox/*.json` **content** (valid `<epoch>-<rand3>.json` name) | skipped by `OutboxTake`, still counted against `OUTBOX_MAX`, removable by `OutboxAck` |
 | Corrupt outbox **filename** (does not match `^[0-9]+-[0-9]{3}\.json$`) | **evicted first by `trimOutbox`, before any well-formed entry**, and never counted as capacity that a real alert could occupy |
@@ -294,6 +296,7 @@ type ActiveAlert struct {
     EvidenceCore string `json:"evidence_core"`
     Headline     string `json:"headline"`
     Severity     string `json:"severity"`
+    MaxNotifiedSeverity string `json:"max_notified_severity,omitempty"`
     FirstSeen    int64  `json:"first_seen"`
     LastSeen     int64  `json:"last_seen"`
     LastNotified int64  `json:"last_notified"`
@@ -347,7 +350,7 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 | 2 | tick 4 with `severity:"alert"` | `notify=true`, `reason="escalation"`, with case 1: T5's AC "exactly 1 notification + 1 escalation" |
 | 3 | WATCH finding at +5 h 59 min / +6 h 1 min | suppressed / `renotify` |
 | 4 | ALERT finding at +59 min / +1 h 1 min | suppressed / `renotify` |
-| 5 | report with `resolved:["<key>"]`, finding absent from `findings[]`, twice | first ⇒ `notify=true`, `reason="all_clear"`, one entry carrying the **stored headline**, key file gone; second ⇒ `notify=false` |
+| 5 | report with `resolved:["<key>"]` naming an **alert-notified** finding absent from `findings[]`, twice | first ⇒ `notify=true`, `reason="all_clear"`, one entry carrying the **stored headline**, key file gone; second ⇒ `notify=false` |
 | 6 | `resolved` naming a never-active key, and separately a non-hex string | both ⇒ `notify=false`, `report.resolved == []`; the non-hex entry is dropped without error |
 | 7 | two findings sharing a headline; next tick one persists and the report resolves the other's key | the persisting key survives, the other closes, `report.resolved` has exactly 1 entry (S-D7). Add: two alerts whose evidence agrees in its first 80 runes, resolving one must not close the other, the case the old evidence match could not distinguish |
 | 8 | all-clear headline of 80 runes + `(+2 more)` | emitted `headline` ≤ 80 runes and validates |
@@ -368,6 +371,9 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 | 23 | info escalation survives the gate | tick 1 `info`, tick 2 same evidence at `watch` ⇒ `notify=true`, `reason="escalation"` |
 | 24 | info ride-along | one `alert` + one `info` in the same tick ⇒ `notify=true`, `status="ALERT"`, emitted `findings` = both, input order, the info one annotated |
 | 25 | heartbeat not swallowed | fresh `StateDir`, 08:01, report with one `info` finding ⇒ `heartbeat=true`, `reason="heartbeat"`, never `new_finding` |
+| 26 | watch closes silently | watch notified, then resolved by key ⇒ `notify=false`, `resolved == []`, record deleted |
+| 27 | de-escalated alert still announces its end | alert notified, same key seen at watch (silent de-escalation), then resolved ⇒ `notify=true`, `reason="all_clear"`, the stored headline |
+| 28 | pre-field record keeps legacy all-clear | hand-written record without `max_notified_severity`, `notify_count>0`, severity watch, resolved by key ⇒ `notify=true`, `reason="all_clear"` |
 
 ---
 

@@ -1923,3 +1923,86 @@ func TestProcess_QuietInfoTickStillEarnsHeartbeat(t *testing.T) {
 		t.Errorf("notify=%v heartbeat=%v reason=%s, want the daily heartbeat, not an info new_finding", d.Notify, d.Heartbeat, d.Reason)
 	}
 }
+
+// --- all-clear gate (S.3e): only findings notified at alert severity ---
+
+// A resolved watch costs one message (its WATCH), not two: the all-clear
+// is reserved for alert severity. The record is still deleted.
+func TestProcess_ResolvedWatchClosesWithoutAllClear(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	b1 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Watch headline", Body: "b", Findings: []report.Finding{finding("watch", "evidence")}})
+	if d := mustProcess(t, s, b1); !d.Notify {
+		t.Fatal("initial watch notify failed")
+	}
+
+	cfg.Now = time.Unix(2000, 0)
+	b2 := marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b", Resolved: []string{dedup.Key("kernel", "evidence")}})
+	d2 := mustProcess(t, s, b2)
+	if d2.Notify || len(d2.Report.Resolved) != 0 {
+		t.Errorf("resolved watch: notify=%v resolved=%v, want notify=false resolved=[]", d2.Notify, d2.Report.Resolved)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(cfg.StateDir, "active-alerts")); len(entries) != 0 {
+		t.Errorf("active-alerts: %d files remain, want 0 (deleted, just silently)", len(entries))
+	}
+}
+
+// De-escalation must not lose the all-clear: a finding notified at alert
+// and silently lowered to watch afterwards still announces its end. The
+// record remembers the highest severity it was notified at; the current
+// stored severity is not the gate.
+func TestProcess_DeEscalatedAlertStillGetsAllClear(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	b1 := marshalReport(t, &report.Report{Status: "ALERT", Headline: "Alert headline", Body: "b", Findings: []report.Finding{finding("alert", "evidence")}})
+	if d := mustProcess(t, s, b1); !d.Notify {
+		t.Fatal("initial alert notify failed")
+	}
+
+	// Same key at watch: de-escalation, silent, stored severity lowered.
+	cfg.Now = time.Unix(1300, 0)
+	b2 := marshalReport(t, &report.Report{Status: "WATCH", Headline: "Alert headline", Body: "b", Findings: []report.Finding{finding("watch", "evidence")}})
+	if d := mustProcess(t, s, b2); d.Notify {
+		t.Fatal("de-escalation must not notify")
+	}
+
+	cfg.Now = time.Unix(2000, 0)
+	b3 := marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b", Resolved: []string{dedup.Key("kernel", "evidence")}})
+	d3 := mustProcess(t, s, b3)
+	if !d3.Notify || d3.Reason != "all_clear" || len(d3.Report.Resolved) != 1 || d3.Report.Resolved[0] != "Alert headline" {
+		t.Errorf("de-escalated alert resolve: notify=%v reason=%s resolved=%v, want the all-clear", d3.Notify, d3.Reason, d3.Report.Resolved)
+	}
+}
+
+// M1 migration: a record written before the field existed (absent
+// max_notified_severity, notify_count > 0) keeps the legacy behavior and
+// emits an all-clear whatever its severity, so no finding the operator
+// was told about ever closes silently across the upgrade. Bounded: such
+// records age out via STALE_ALERT_SEC.
+func TestProcess_LegacyRecordWithoutMaxNotifiedSeverityKeepsAllClear(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1000, 0))
+	s := newStore(t, cfg)
+
+	key := dedup.Key("kernel", "legacy evidence")
+	rec := map[string]any{
+		"key": key, "component": "kernel", "evidence_core": "legacy evidence",
+		"headline": "Legacy headline", "severity": "watch",
+		"first_seen": 900, "last_seen": 990, "last_notified": 990,
+		"notify_count": 1, "occurrences": 3, "tick_seq_first": 1, "tick_seq_last": 3,
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "active-alerts", key+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b", Resolved: []string{key}})
+	d := mustProcess(t, s, b)
+	if !d.Notify || d.Reason != "all_clear" || len(d.Report.Resolved) != 1 || d.Report.Resolved[0] != "Legacy headline" {
+		t.Errorf("legacy record resolve: notify=%v reason=%s resolved=%v, want the legacy all-clear", d.Notify, d.Reason, d.Report.Resolved)
+	}
+}

@@ -42,10 +42,12 @@ func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 	sCfg.StateDir = stateDir
 	store := newStore(t, sCfg)
 
+	// alert severity: the all-clear leg of this seam only exists for
+	// findings notified at alert (S.3e); a watch would close silently.
 	tick1 := report.Report{
-		Status: "WATCH", Headline: "Disk health degraded", Body: "b",
+		Status: "ALERT", Headline: "Disk health degraded", Body: "b",
 		Findings: []report.Finding{{
-			Severity: "watch", Component: "smart", Evidence: evidence, Explanation: "e",
+			Severity: "alert", Component: "smart", Evidence: evidence, Explanation: "e",
 		}},
 		Resolved: []string{},
 	}
