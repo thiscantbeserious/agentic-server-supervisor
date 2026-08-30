@@ -1976,7 +1976,7 @@ func TestProcess_DeEscalatedAlertStillGetsAllClear(t *testing.T) {
 	}
 }
 
-// M1 migration: a record written before the field existed (absent
+// A record written before the field existed (absent
 // max_notified_severity, notify_count > 0) keeps the legacy behavior and
 // emits an all-clear whatever its severity, so no finding the operator
 // was told about ever closes silently across the upgrade. Bounded: such
