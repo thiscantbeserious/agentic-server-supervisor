@@ -6,13 +6,17 @@ goes in fenced blocks, unedited.
 
 ## Problem
 
-<!-- What is wrong, observed where. Numbered facts, not narrative. -->
+<!-- What is wrong, observed where. Numbered facts, not narrative.
+Optional: a Mermaid chart of the state of things (the flow or data path
+as it currently behaves), directly below this headline. -->
 
 ## Change
 
-<!-- One bullet per file or mechanism: what it does now, and the one
-reason for any non-obvious scoping choice. Name amended contract
-clauses here (state.md S.x, analyze.md §y). -->
+<!-- Optional: a Mermaid chart of the changes (the flow or data path as
+it behaves after this PR), directly below this headline.
+One bullet per file or mechanism: what it does now, and the one reason
+for any non-obvious scoping choice. Name amended contract clauses here
+(state.md S.x, analyze.md §y). -->
 
 ## Before / after
 
