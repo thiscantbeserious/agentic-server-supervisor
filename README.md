@@ -85,34 +85,36 @@ and a notification.
 ```mermaid
 flowchart LR
     subgraph host["host"]
-        journal[("journal")]
-        smartd["smartd"]
-        zed["zfs-zed"]
-        sensors["lm-sensors /\nrasdaemon"]
+        journal[("journal, /proc, /sys")]
+        smartd["smartd, ZED"]
     end
 
-    subgraph supervisor["sentinel (read-only container)"]
-        collect["collect"]
-        raw["raw-alert path\n(LLM-free)"]
-        analyze["analyze (LLM)"]
-        notify["notify"]
+    subgraph sentinel["sentinel, one read-only container, one tick every 5 min"]
+        direction LR
+        collect["1 collect<br/>facts, deterministic"]
+        raw["raw alert<br/>kernel emerg/crit, no LLM"]
+        analyze["2 analyze<br/>LLM triage, retried and corrected"]
+        state["3 state<br/>dedup, renotify windows, all-clear"]
+        notify["4 notify"]
         collect --> raw
-        collect --> analyze --> notify
+        collect --> analyze --> state --> notify
     end
 
     apprise["apprise"]
     mailrise["mailrise"]
     tg(("Telegram"))
 
-    journal -.ro mount.-> collect
-    sensors -.ro mount.-> collect
-    raw -- POST --> apprise
-    notify -- POST --> apprise
+    journal -. ro .-> collect
+    raw --> apprise
+    notify --> apprise
     smartd -- SMTP --> mailrise
-    zed -- SMTP --> mailrise
     apprise --> tg
     mailrise --> tg
 ```
+
+Two paths reach Telegram without the LLM: `smartd` and ZED mail straight to
+mailrise, and a kernel line at `emerg`, `alert` or `crit` forwarded by the raw
+alert step inside the tick. The analyzer adds interpretation on top of those.
 
 `sentinel` runs unprivileged, `read_only: true`, every mount but its own
 state directory `:ro`. `apprise` holds the Telegram credential; the

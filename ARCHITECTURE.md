@@ -94,11 +94,11 @@ flowchart TB
         end
         subgraph stack["docker compose, ONE stack"]
             subgraph sentinel["sentinel container, ONE Go binary (read_only, cap_drop ALL, unprivileged, group_add 999)"]
-                collect["1 · sentinel collect<br/>facts.json (deterministic)"]
-                raw["1b · emerg/crit ⇒<br/>IMMEDIATE raw alert (LLM-free)"]
-                analyze["2 · sentinel analyze<br/>agy triage, up to 4 attempts in one time budget,<br/>retries corrected (validator error / refused tool call)<br/>→ report.json (validated)<br/>new finding ⇒ deep-dive + 2nd call"]
-                state["3 · sentinel state<br/>dedup / trend (volume)"]
-                notify["4 · sentinel notify<br/>HTTP POST"]
+                collect["1 collect<br/>facts.json"]
+                raw["raw alert<br/>emerg/crit, no LLM"]
+                analyze["2 analyze<br/>agy triage, deep dive"]
+                state["3 state<br/>dedup, trend"]
+                notify["4 notify"]
                 collect --> raw
                 collect --> analyze --> state --> notify
             end
@@ -120,6 +120,8 @@ flowchart TB
     apprise -- "tgram://" --> tg
     mailrise -- "tgram://" --> tg
 ```
+
+The analyze step runs agy in print mode with one time budget for up to four attempts, each retry carrying a correction (the validator's message, or the refusal when the model asked for a tool), produces a schema-validated `report.json`, and gives one new finding per tick a second, focused call (the deep dive); the exact rules are `contracts/analyze.md` §6.
 
 SMART deliberately does NOT run in the container: it would need /dev access +
 CAP_SYS_RAWIO and would soften the read_only promise. Host smartd covers disks (§2.5).
