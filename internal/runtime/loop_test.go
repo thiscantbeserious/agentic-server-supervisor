@@ -648,63 +648,80 @@ func TestSeedAgyHome_UnreadableFileDoesNotAbortSeed(t *testing.T) {
 // by mtime because crash names carry a pid and a uuid rather than a
 // sortable timestamp, and it must never touch anything else under
 // $AGY_HOME, least of all the credential.
-func TestPruneAgyLogs(t *testing.T) {
-	home := t.TempDir()
-	base := filepath.Join(home, ".gemini", "antigravity-cli")
-	for _, sub := range []string{"log", "crashes"} {
+
+// agyHomeFixture builds $AGY_HOME/.gemini/antigravity-cli with a token
+// file, a brain/ directory, and n files in each of log/ and crashes/
+// whose mtime order is deliberately the REVERSE of their name order (f0 is
+// the newest), so a name-sorted or ascending-sorted prune keeps the wrong
+// ones. Returns the home, base and token path.
+func agyHomeFixture(t *testing.T, n int) (home, base, token string) {
+	t.Helper()
+	home = t.TempDir()
+	base = filepath.Join(home, ".gemini", "antigravity-cli")
+	for _, sub := range []string{"log", "crashes", "brain"} {
 		if err := os.MkdirAll(filepath.Join(base, sub), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// The credential and an unrelated directory must survive untouched.
-	tokenPath := filepath.Join(base, "antigravity-oauth-token")
-	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
+	token = filepath.Join(base, "antigravity-oauth-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(base, "brain"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	// 30 files per directory, deliberately named so that lexical order is
-	// the REVERSE of mtime order: a name-sorted prune would keep the wrong
-	// ones and this test would catch it.
 	newest := time.Now()
 	for _, sub := range []string{"log", "crashes"} {
-		for i := 0; i < 30; i++ {
+		for i := 0; i < n; i++ {
 			name := filepath.Join(base, sub, "f"+strconv.Itoa(i)+".log")
 			if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			// i=0 is the newest, i=29 the oldest.
 			mod := newest.Add(-time.Duration(i) * time.Minute)
 			if err := os.Chtimes(name, mod, mod); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
+	return home, base, token
+}
 
-	pruneAgyLogs(&config.Config{AgyHome: home})
+func TestPruneAgyLogs(t *testing.T) {
+	home, base, token := agyHomeFixture(t, 30)
+	// A subdirectory inside log/ is not a log file and must survive: the
+	// IsDir skip is the only thing standing between it and os.Remove.
+	if err := os.Mkdir(filepath.Join(base, "log", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(testConfig(t, tick0)))
 
 	for _, sub := range []string{"log", "crashes"} {
 		entries, err := os.ReadDir(filepath.Join(base, sub))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(entries) != agyLogKeep {
-			t.Errorf("%s: %d files remain, want %d", sub, len(entries), agyLogKeep)
-		}
+		files := 0
 		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			files++
 			var i int
 			if _, err := fmt.Sscanf(e.Name(), "f%d.log", &i); err != nil {
 				t.Fatalf("%s: unexpected file %q", sub, e.Name())
 			}
-			if i >= agyLogKeep {
-				t.Errorf("%s: kept %q, which is older than the newest %d", sub, e.Name(), agyLogKeep)
+			// The contract says the newest 20, the literal, not whatever
+			// the constant happens to be.
+			if i >= 20 {
+				t.Errorf("%s: kept %q, which is older than the newest 20", sub, e.Name())
 			}
 		}
+		if files != 20 {
+			t.Errorf("%s: %d files remain, want 20", sub, files)
+		}
 	}
-
-	if data, err := os.ReadFile(tokenPath); err != nil || string(data) != "secret" {
+	if _, err := os.Stat(filepath.Join(base, "log", "nested")); err != nil {
+		t.Errorf("a directory inside log/ must survive the prune: %v", err)
+	}
+	if data, err := os.ReadFile(token); err != nil || string(data) != "secret" {
 		t.Errorf("the credential must never be touched: err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(base, "brain")); err != nil {
@@ -712,21 +729,94 @@ func TestPruneAgyLogs(t *testing.T) {
 	}
 }
 
+// A1 write containment: if log/ has been replaced by a symlink, following
+// it would prune whatever it points at, sentinel's own history or the
+// credential directory. The snapshot is of the PARENT of the target, a
+// test rooted at the target cannot observe an escape by construction.
+func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
+	home, base, _ := agyHomeFixture(t, 0)
+	outside := t.TempDir() // stands in for $STATE_DIR/history
+	for i := 0; i < 30; i++ {
+		if err := os.WriteFile(filepath.Join(outside, "h"+strconv.Itoa(i)+".json"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logDir := filepath.Join(base, "log")
+	if err := os.Remove(logDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, logDir); err != nil {
+		t.Fatal(err)
+	}
+	// Everything the test itself allocates under the temp root happens
+	// before the snapshot, so a changed count can only be the prune.
+	logger := newLogger(testConfig(t, tick0))
+	before, err := os.ReadDir(filepath.Dir(outside))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
+
+	if entries, _ := os.ReadDir(outside); len(entries) != 30 {
+		t.Fatalf("prune followed the symlinked log/ out of $AGY_HOME: %d of 30 files remain outside", len(entries))
+	}
+	after, err := os.ReadDir(filepath.Dir(outside))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("parent of the symlink target changed: %d entries before, %d after", len(before), len(after))
+	}
+	if fi, err := os.Lstat(logDir); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink itself must be left alone: %v", err)
+	}
+}
+
 // A missing agy-home, and a directory already under the cap, are both
 // normal (a fresh volume, an early tick) and must not error or delete.
 func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
-	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")})
+	logger := newLogger(testConfig(t, tick0))
+	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")}, logger)
 
-	home := t.TempDir()
-	dir := filepath.Join(home, ".gemini", "antigravity-cli", "log")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "only.log"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pruneAgyLogs(&config.Config{AgyHome: home})
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+	home, base, _ := agyHomeFixture(t, 1)
+	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 1 {
 		t.Errorf("a directory under the cap must be left alone, got %d files", len(entries))
+	}
+}
+
+// The prune is wired into Loop, not only defined: one real tick over a
+// 30-file log/ must leave 20. Without this, the call in Loop can be
+// deleted and every other test stays green.
+func TestLoop_PrunesAgyLogsEachTick(t *testing.T) {
+	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+	home, base, _ := agyHomeFixture(t, 30)
+	cfg.AgyHome = home
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) {
+		cancel() // one tick, then Loop must return at its next check
+		return factsClean(), nil
+	}
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	done := make(chan struct{})
+	go func() {
+		Loop(ctx, cfg, d)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Loop did not return within 10s of the in-tick cancel")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 20 {
+		t.Errorf("after one Loop tick: %d log files, want 20 (prune not wired into Loop)", len(entries))
 	}
 }

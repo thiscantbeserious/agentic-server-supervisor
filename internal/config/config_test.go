@@ -60,11 +60,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.FactsMaxBytes != 262144 {
 		t.Errorf("FactsMaxBytes = %d, want 262144", cfg.FactsMaxBytes)
 	}
-	if cfg.AgyPrintTimeout != 240*time.Second {
-		t.Errorf("AgyPrintTimeout = %v, want 240s", cfg.AgyPrintTimeout)
+	if cfg.AgyPrintTimeout != 210*time.Second {
+		t.Errorf("AgyPrintTimeout = %v, want 210s", cfg.AgyPrintTimeout)
 	}
-	if cfg.AgyHardTimeout != 270*time.Second {
-		t.Errorf("AgyHardTimeout = %v, want 270s", cfg.AgyHardTimeout)
+	if cfg.AgyHardTimeout != 240*time.Second {
+		t.Errorf("AgyHardTimeout = %v, want 240s", cfg.AgyHardTimeout)
 	}
 	if cfg.RawAlertMaxLines != 20 {
 		t.Errorf("RawAlertMaxLines = %d, want 20", cfg.RawAlertMaxLines)

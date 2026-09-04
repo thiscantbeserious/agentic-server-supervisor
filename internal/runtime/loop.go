@@ -213,16 +213,27 @@ const agyLogKeep = 20
 // It never opens a file, only Stat and Remove. That is what keeps C7
 // intact: no byte of anything under $AGY_HOME, credential or prompt
 // content, ever enters this process. Deleting a file agy still has open is
-// safe, the fd stays valid until agy rotates, and the newest entry (the one
-// cli.log points at) is always among those kept.
+// safe, the fd stays valid until agy rotates.
+//
+// The directory itself is checked with Lstat before it is read: agy runs
+// as this uid with HOME inside the writable state volume and this repo
+// treats it as untrusted, so a `log` that has become a symlink would
+// otherwise turn a prune of $AGY_HOME into a prune of wherever the link
+// points, sentinel's own history or the credential directory included
+// (A1 write containment). Individual entries are safe as they are:
+// os.Remove unlinks a symlink, it never follows one.
 //
 // Every failure is ignored on purpose. This is housekeeping; a directory
 // that cannot be read or an entry that cannot be removed must never affect
-// a tick.
-func pruneAgyLogs(cfg *config.Config) {
+// a tick. The count is logged at debug level so a wrong path or a changed
+// agy layout does not become a silent no-op; a count is not content.
+func pruneAgyLogs(cfg *config.Config, logger interface{ Debug(string, ...any) }) {
 	base := filepath.Join(cfg.AgyHome, ".gemini", "antigravity-cli")
 	for _, sub := range []string{"log", "crashes"} {
 		dir := filepath.Join(base, sub)
+		if fi, err := os.Lstat(dir); err != nil || !fi.Mode().IsDir() {
+			continue // absent, or a symlink: never follow it out of $AGY_HOME
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil || len(entries) <= agyLogKeep {
 			continue
@@ -246,9 +257,13 @@ func pruneAgyLogs(cfg *config.Config) {
 			continue
 		}
 		sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+		removed := 0
 		for _, f := range files[agyLogKeep:] {
-			os.Remove(filepath.Join(dir, f.name))
+			if os.Remove(filepath.Join(dir, f.name)) == nil {
+				removed++
+			}
 		}
+		logger.Debug("runtime pruned agy files", "dir", sub, "removed", removed)
 	}
 }
 
@@ -362,7 +377,7 @@ func copyTree(src, dst string) ([]string, error) {
 //
 // Streamed rather than read whole: this tree is 16.6 MB across 43 files on
 // the target host and 16.3 MB of that is a single bundled browser helper,
-// inside a container capped at mem_limit 512m. Nothing here needs the file
+// inside a container capped at mem_limit 1g. Nothing here needs the file
 // in memory, so nothing here holds it.
 func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
@@ -580,7 +595,7 @@ func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 		default:
 		}
 
-		pruneAgyLogs(cfg)
+		pruneAgyLogs(cfg, logger)
 		seq := nextTickSeq(cfg, logger)
 		// A tick already in flight gets 5s after shutdown is requested,
 		// then its context is cancelled (R2 step 6).

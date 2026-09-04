@@ -325,8 +325,8 @@ services:
       AGY_BIN: "agy"
       AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
       AGY_SECRET_DIR: "/run/secrets/agy"
-      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-240s}"
-      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-270s}"
+      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-210s}"
+      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-240s}"
       HISTORY_N: "${HISTORY_N:-5}"
       HISTORY_KEEP: "${HISTORY_KEEP:-50}"
       DEEP_ENABLED: "${DEEP_ENABLED:-1}"
@@ -382,7 +382,7 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
-      start_period: 120s
+      start_period: 600s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -712,6 +712,7 @@ func Health(cfg *config.Config) (int, error)
 | E17 | `config_validation` | bad env sets (`TICK_INTERVAL=abc`, `TICK_INTERVAL=10`, `TICK_WINDOW=5m` with interval 300, `LOG_LEVEL=LOUD`, `RAW_ALERT_MAX_LINES=99`) ⇒ each returns `ErrConfig` naming the variable and never its value | C3, C7 |
 | E18 | `shutdown` | `Loop` with a cancelled context returns `(0, nil)` within 5 s and starts no new tick | R2 step 8 |
 | E19 | `health` | fresh `heartbeat` ⇒ `0`; mtime older than `3 × TICK_INTERVAL` ⇒ `1`; missing ⇒ `1` | compose healthcheck |
+| E20 | `prune_agy_logs` | 30 files in each of `agy-home/.gemini/antigravity-cli/{log,crashes}` with mtime order the reverse of name order ⇒ exactly the newest **20** by mtime remain, a subdirectory inside `log/` survives, the credential file is byte-identical; `log/` replaced by a symlink to a directory outside `agy-home` ⇒ that directory is untouched (snapshot its parent, not the target); absent home and an under-cap directory ⇒ no-op; `Loop` running one tick over a 30-file `log/` leaves 20 | C4, A1 |
 
 **`test/container_test.go`** (build tag `container`, `go test -tags container ./test`). Each case prints `PASS`/`FAIL`/`SKIP`; a SKIP is explicit, never a silent pass.
 

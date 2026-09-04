@@ -114,8 +114,8 @@ The 24h bound exists because a second-valued variable is multiplied by `time.Sec
 | `AGY_BIN` | `agy` | analyze |
 | `AGY_HOME` | `/state/agy-home` (persistent; NEVER tmpfs, a lost token refresh cannot be re-authenticated headlessly) | runtime |
 | `AGY_SECRET_DIR` | `/run/secrets/agy` | runtime |
-| `AGY_PRINT_TIMEOUT` | `240s` | analyze |
-| `AGY_HARD_TIMEOUT` | `270s` (raised to print+30s if lower) | analyze |
+| `AGY_PRINT_TIMEOUT` | `210s` | analyze |
+| `AGY_HARD_TIMEOUT` | `240s` (raised to print+30s if lower) | analyze |
 | `HISTORY_N` | `5` | analyze |
 | `PROMPT_MAX_BYTES` | `20000` (whole assembled prompt; agy drops larger prompts silently) | analyze |
 | `HISTORY_KEEP` | `50` | state |
