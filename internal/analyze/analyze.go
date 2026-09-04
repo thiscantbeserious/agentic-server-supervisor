@@ -175,7 +175,7 @@ func Run(ctx context.Context, o Options, d Deps) (*report.Report, error) {
 		return buildFallback(cfg, o.Seq, "internal_error", o.Facts, wrapped, logger), wrapped
 	}
 
-	rep, reason, err := runTriage(ctx, o, d, promptPath, schemaPath, triagePrompt, logger)
+	rep, reason, err := runTriage(ctx, o, d, promptPath, schemaPath, triagePrompt, nonce, logger)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// A shutdown is not an analyzer failure: author no report.

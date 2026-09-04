@@ -90,9 +90,9 @@ func newNonce() (string, error) {
 // refusal and the consequence instead of a validation error. It is the
 // only agy-derived text that ever enters a prompt; the caller bounds it
 // with agyErrorText first, one line of at most 200 runes.
-func buildCorrection(validationErr, deniedTool string) (string, error) {
+func buildCorrection(nonce, validationErr, deniedTool string) (string, error) {
 	var b strings.Builder
-	data := promptData{ValidationError: truncRunes(validationErr, 300), DeniedTool: deniedTool}
+	data := promptData{Nonce: nonce, ValidationError: truncRunes(validationErr, 300), DeniedTool: deniedTool}
 	if err := promptTmpl.ExecuteTemplate(&b, "correction", data); err != nil {
 		return "", err
 	}
