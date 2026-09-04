@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
@@ -540,8 +541,8 @@ func TestRun_BrokenJSON_RetryThenFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() expected a non-nil error")
 	}
-	if rec.calls != 2 {
-		t.Fatalf("agy call count = %d, want 2", rec.calls)
+	if rec.calls != 4 {
+		t.Fatalf("agy call count = %d, want 4 (the retry budget)", rec.calls)
 	}
 	if rep.Status != "ALERT" || rep.Headline != "Analyzer unavailable" {
 		t.Fatalf("expected the fallback document, got %+v", rep)
@@ -565,7 +566,7 @@ func TestRun_BrokenJSON_RetryLogsValidatorError(t *testing.T) {
 	if _, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d); err == nil {
 		t.Fatal("Run() expected a non-nil error")
 	}
-	line := findLogLine(t, buf.String(), "triage invalid, retrying")
+	line := findLogLine(t, buf.String(), "triage retrying attempt=2")
 	if !strings.Contains(line, "error=") {
 		t.Fatalf("retry log line carries no error attribute: %q", line)
 	}
@@ -764,7 +765,7 @@ func TestRun_CorrectionBlockCarriesRealValidationError(t *testing.T) {
 // is the one prompt-shell fragment not covered by TestPromptGoldenFiles, so
 // this is its only byte-level guard.
 func TestBuildCorrection_ExactBytes(t *testing.T) {
-	got, err := buildCorrection("VALIDATION_ERROR_SENTINEL")
+	got, err := buildCorrection("VALIDATION_ERROR_SENTINEL", "")
 	if err != nil {
 		t.Fatalf("buildCorrection: %v", err)
 	}
@@ -796,7 +797,7 @@ not emit "key", "meta", "first_seen" or "occurrences".`
 // rune-based truncation.
 func TestBuildCorrection_TruncatesValidationErrorTo300Runes(t *testing.T) {
 	long := strings.Repeat("é", 400)
-	got, err := buildCorrection(long)
+	got, err := buildCorrection(long, "")
 	if err != nil {
 		t.Fatalf("buildCorrection: %v", err)
 	}
@@ -2616,9 +2617,10 @@ func TestRun_AgyEmpty_ZeroTokens_DoesNotRetry(t *testing.T) {
 	}
 }
 
-// TestRun_AgyEmpty_StatusFailed_DoesNotRetry is the other systemic
-// agy_empty sub-case: status != "SUCCESS".
-func TestRun_AgyEmpty_StatusFailed_DoesNotRetry(t *testing.T) {
+// TestRun_AgyEmpty_StatusFailed_ZeroTokens_DoesNotRetry: a failed status
+// is retried on its own, but zero input tokens still mean the prompt
+// never reached the model, and that rules the retry out.
+func TestRun_AgyEmpty_StatusFailed_ZeroTokens_DoesNotRetry(t *testing.T) {
 	cfg := newTestConfig(t)
 	rec := &agyRecorder{}
 	d := Deps{RunAgy: rec.stubRaw(`{"status":"ERROR","response":"","usage":{"input_tokens":0}}`)}
@@ -2628,7 +2630,7 @@ func TestRun_AgyEmpty_StatusFailed_DoesNotRetry(t *testing.T) {
 		t.Fatal("Run() expected a non-nil error")
 	}
 	if rec.calls != 1 {
-		t.Fatalf("agy call count = %d, want 1 (status != SUCCESS must not retry)", rec.calls)
+		t.Fatalf("agy call count = %d, want 1 (input_tokens==0 must not retry, whatever the status)", rec.calls)
 	}
 	if rep.Status != "ALERT" {
 		t.Fatalf("Status = %q, want ALERT (fallback)", rep.Status)
@@ -3304,11 +3306,15 @@ func TestRunAgy_NonZeroExit_AuthEnvelope_StillUnauth(t *testing.T) {
 // decoder dropped it.
 func TestDecodeAgyEnvelope_SurfacesError(t *testing.T) {
 	_, _, err := decodeAgyEnvelope([]byte(`{"status":"CANCELED","response":"","error":"stream dropped by server","usage":{"input_tokens":28390}}`))
-	if !errors.Is(err, errAgyEmptySystemic) {
-		t.Fatalf("err = %v, want errAgyEmptySystemic", err)
+	if err == nil || !strings.Contains(err.Error(), "stream dropped by server") {
+		t.Fatalf("err = %v, want the envelope's error text", err)
 	}
-	if !strings.Contains(err.Error(), "stream dropped by server") {
-		t.Fatalf("err = %q, want the envelope's error text", err)
+	if errors.Is(err, errAgyPromptNotDelivered) {
+		t.Fatalf("err = %v: tokens were spent, so the prompt was delivered and a retry is allowed", err)
+	}
+	_, _, err = decodeAgyEnvelope([]byte(`{"status":"ERROR","response":"","error":"model not found","usage":{"input_tokens":0}}`))
+	if !errors.Is(err, errAgyPromptNotDelivered) || !strings.Contains(err.Error(), "model not found") {
+		t.Fatalf("err = %v, want errAgyPromptNotDelivered carrying the error text", err)
 	}
 }
 
@@ -3390,5 +3396,461 @@ func TestRun_AgyFailed_ErrorTextReachesLogOnly(t *testing.T) {
 	out, _ := json.Marshal(rep)
 	if strings.Contains(string(out), "SENTINELMARKER") {
 		t.Fatalf("the fallback report must not carry agy's error text: %s", out)
+	}
+}
+
+// --- the triage retry budget ---
+
+// agyOutcome is one scripted RunAgy result: raw stdout bytes or the error
+// runAgy would have returned, so a script can interleave the failure
+// classes runAgy produces (a non-zero exit, a timeout, an OAuth refusal)
+// with envelopes.
+type agyOutcome struct {
+	out string
+	err error
+}
+
+// script scripts RunAgy with a sequence of outcomes; the last one repeats
+// once the script runs out.
+func (r *agyRecorder) script(outcomes ...agyOutcome) func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+	return func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+		b, err := os.ReadFile(promptPath)
+		if err != nil {
+			return nil, err
+		}
+		r.prompts = append(r.prompts, string(b))
+		idx := r.calls
+		r.calls++
+		if idx >= len(outcomes) {
+			idx = len(outcomes) - 1
+		}
+		if outcomes[idx].err != nil {
+			return nil, outcomes[idx].err
+		}
+		return []byte(outcomes[idx].out), nil
+	}
+}
+
+// deniedToolErr is the error runAgy returns for the shape measured on the
+// deployed host: agy exits 1 with an empty stderr and the refusal in the
+// envelope's error field, bounded to one line by agyErrorText.
+func deniedToolErr(command string) error {
+	// The same shape runAgy returns: the classified error wrapped in the
+	// carrier of the envelope's bounded error text.
+	text := agyErrorText(fmt.Sprintf("permission check failed for command %q: user denied permission to run command: %s", command, command))
+	return &envelopeError{Text: text, err: fmt.Errorf("%w: exit status 1 (stderr 0 bytes, agy: %s)", errAgyFailed, text)}
+}
+
+// correctionBlock returns the CORRECTION block of a captured prompt,
+// failing when the prompt carries none or more than one.
+func correctionBlock(t *testing.T, prompt string) string {
+	t.Helper()
+	const marker = "===== CORRECTION ====="
+	if n := strings.Count(prompt, marker); n != 1 {
+		t.Fatalf("prompt carries %d CORRECTION blocks, want exactly 1:\n%s", n, prompt)
+	}
+	return prompt[strings.Index(prompt, marker):]
+}
+
+// Three failed attempts of different classes are followed by a fourth,
+// and the fourth answering ends the tick with its report, not the
+// fallback. Every attempt is numbered in the log.
+func TestRun_TriageRetries_ThreeFailuresThenSuccess(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.script(
+		agyOutcome{err: fmt.Errorf("%w: exit status 1 (stderr 0 bytes)", errAgyFailed)},
+		agyOutcome{err: fmt.Errorf("%w", errAgyTimeout)},
+		agyOutcome{out: mustEnvelope("not json")},
+		agyOutcome{out: mustEnvelope(mustJSON(t, okReport()))},
+	)}
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rec.calls != 4 {
+		t.Fatalf("agy call count = %d, want 4 (three retries)", rec.calls)
+	}
+	if rep.Status != "OK" {
+		t.Fatalf("Status = %q, want OK (the fourth attempt's document)", rep.Status)
+	}
+	for _, want := range []string{
+		"triage attempt=1 rc=error reason=agy_failed",
+		"triage retrying attempt=2 reason=agy_failed",
+		"triage attempt=2 rc=error reason=agy_timeout",
+		"triage retrying attempt=3 reason=agy_timeout",
+		"triage attempt=3 rc=0",
+		"triage retrying attempt=4 reason=invalid_json",
+		"triage attempt=4 rc=0",
+		"triage attempt=4 via=response",
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, buf.String())
+		}
+	}
+	// Attempts 2 and 3 failed on agy, not on the answer: their prompts
+	// carry no correction, and attempt 4 corrects only attempt 3.
+	for i := 1; i <= 2; i++ {
+		if strings.Contains(rec.prompts[i], "===== CORRECTION =====") {
+			t.Errorf("attempt %d carries a correction for a failure that was not the model's answer", i+1)
+		}
+	}
+	if !strings.Contains(correctionBlock(t, rec.prompts[3]), "failed validation") {
+		t.Errorf("attempt 4 lacks the validator correction for attempt 3's invalid answer")
+	}
+}
+
+// After four attempts the tick falls back, and the fallback names the LAST
+// attempt's reason, the one an operator can act on now.
+func TestRun_TriageRetries_ExhaustedFallbackCarriesLastReason(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	// The fourth answer is valid JSON that fails validation (an 81-rune
+	// headline): its reason, schema_invalid, differs from every earlier one.
+	longHeadline := `{"status":"OK","headline":"` + strings.Repeat("h", 81) + `","body":"b","findings":[],"resolved":[]}`
+	d := Deps{RunAgy: rec.script(
+		agyOutcome{out: mustEnvelope("not json")},
+		agyOutcome{err: fmt.Errorf("%w: exit status 1 (stderr 0 bytes)", errAgyFailed)},
+		agyOutcome{err: fmt.Errorf("%w", errAgyTimeout)},
+		agyOutcome{out: mustEnvelope(longHeadline)},
+		agyOutcome{out: mustEnvelope(mustJSON(t, okReport()))},
+	)}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	if rec.calls != 4 {
+		t.Fatalf("agy call count = %d, want 4 (the budget is three retries)", rec.calls)
+	}
+	if rep.Status != "ALERT" || rep.Headline != "Analyzer unavailable" {
+		t.Fatalf("expected the fallback document, got %+v", rep)
+	}
+	line := findLogLine(t, buf.String(), "fallback report built")
+	if !strings.Contains(line, "reason=schema_invalid") {
+		t.Fatalf("fallback names %q, want the last attempt's reason schema_invalid", line)
+	}
+	if !strings.Contains(rep.Body, "failed schema validation") {
+		t.Fatalf("fallback body does not carry the last reason's phrase: %q", rep.Body)
+	}
+}
+
+// The two failures a retry cannot change end the phase on the first
+// attempt: an unauthenticated agy needs a login, and zero input tokens
+// mean the prompt never reached the model. Each script would answer on
+// the second call, so a retry that happened would turn the tick green.
+func TestRun_TriageRetries_Exclusions(t *testing.T) {
+	cases := []struct {
+		name   string
+		first  agyOutcome
+		phrase string
+	}{
+		{"agy_unauth", agyOutcome{err: fmt.Errorf("%w: stderr 120 bytes", errAgyUnauth)}, "analyzer not authenticated"},
+		{"zero input tokens, SUCCESS", agyOutcome{out: `{"status":"SUCCESS","response":"","usage":{"input_tokens":0}}`}, "analyzer returned no answer"},
+		{"zero input tokens, ERROR", agyOutcome{out: `{"status":"ERROR","response":"","error":"model not found","usage":{"input_tokens":0}}`}, "analyzer returned no answer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestConfig(t)
+			rec := &agyRecorder{}
+			d := Deps{RunAgy: rec.script(tc.first, agyOutcome{out: mustEnvelope(mustJSON(t, okReport()))})}
+			rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+			if err == nil {
+				t.Fatal("Run() expected a non-nil error")
+			}
+			if rec.calls != 1 {
+				t.Fatalf("agy call count = %d, want 1 (no retry)", rec.calls)
+			}
+			if !strings.Contains(rep.Body, tc.phrase) {
+				t.Fatalf("fallback body = %q, want %q", rep.Body, tc.phrase)
+			}
+		})
+	}
+}
+
+// A failed envelope that did spend tokens reached the model; it is retried
+// like any other failed attempt.
+func TestRun_TriageRetries_FailedStatusWithTokensRetries(t *testing.T) {
+	cfg := newTestConfig(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(
+		`{"status":"CANCELED","response":"","error":"turn canceled","usage":{"input_tokens":1800}}`,
+		mustEnvelope(mustJSON(t, okReport())),
+	)}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil {
+		t.Fatalf("Run() unexpected error: %v", err)
+	}
+	if rec.calls != 2 || rep.Status != "OK" {
+		t.Fatalf("calls = %d, Status = %q; want 2 and OK", rec.calls, rep.Status)
+	}
+}
+
+// The denied-tool shape retries with a correction that names the refused
+// command and the consequence of a tool call, bounded to the one line
+// agyErrorText allows, and still carries the JSON-only instruction; the
+// validator correction follows an invalid answer on a later attempt; and
+// neither the command nor the envelope text reaches the report.
+func TestRun_TriageRetries_DeniedToolCorrection(t *testing.T) {
+	cfg := newTestConfig(t)
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	longCommand := "pwd && ls -la " + strings.Repeat("/very/long/path ", 30) + "\nrm -rf /"
+	d := Deps{RunAgy: rec.script(
+		agyOutcome{err: deniedToolErr(longCommand)},
+		agyOutcome{out: mustEnvelope("not json")},
+		agyOutcome{err: deniedToolErr("pwd")},
+		agyOutcome{err: deniedToolErr("pwd")},
+	)}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	if rec.calls != 4 {
+		t.Fatalf("agy call count = %d, want 4", rec.calls)
+	}
+
+	second := correctionBlock(t, rec.prompts[1])
+	for _, want := range []string{
+		`permission check failed for command "pwd && ls -la`,
+		"tool call aborts the analysis and produces no report",
+		"Output ONE JSON object only",
+	} {
+		if !strings.Contains(second, want) {
+			t.Errorf("denied-tool correction lacks %q:\n%s", want, second)
+		}
+	}
+	if strings.Contains(second, "rm -rf") {
+		t.Errorf("the command text is not bounded to 200 runes:\n%s", second)
+	}
+	if strings.Contains(second, "failed validation") {
+		t.Errorf("attempt 2 carries the validator correction for a failure that was not a validation failure:\n%s", second)
+	}
+	quoted := second[strings.Index(second, "permission check failed"):]
+	line := strings.SplitN(quoted, "\n", 2)[0]
+	if n := utf8.RuneCountInString(strings.TrimSuffix(line, ").")); n != 200 {
+		t.Errorf("quoted refusal is %d runes, want the 200-rune bound: %q", n, line)
+	}
+
+	third := correctionBlock(t, rec.prompts[2])
+	if !strings.Contains(third, "Your previous answer failed validation") {
+		t.Errorf("attempt 3 after an invalid answer lacks the validator correction:\n%s", third)
+	}
+	if strings.Contains(third, "permission check failed") {
+		t.Errorf("attempt 3 still carries the denied-tool correction from attempt 1")
+	}
+
+	// The fourth attempt corrects attempt 3's refusal, quoted whole.
+	fourth := correctionBlock(t, rec.prompts[3])
+	if !strings.Contains(fourth, `(permission check failed for command "pwd": user denied permission to run command: pwd).`) {
+		t.Errorf("attempt 4 lacks the whole refusal from attempt 3:\n%s", fourth)
+	}
+
+	raw := string(mustMarshal(t, rep))
+	if strings.Contains(raw, "pwd") || strings.Contains(raw, "permission check") {
+		t.Fatalf("agy-derived text reached the report: %s", raw)
+	}
+	if !strings.Contains(buf.String(), `reason=agy_failed error=analyze: agy attempt 4: agy: exited non-zero or unusable: exit status 1 (stderr 0 bytes, agy: permission check failed for command "pwd"`) {
+		t.Errorf("the fallback log line does not carry the last refusal:\n%s", buf.String())
+	}
+}
+
+// buildCorrection with a refused command names it and the consequence
+// instead of a validation error, keeps the JSON-only instruction, and
+// stays one line per rendered field.
+func TestBuildCorrection_DeniedTool(t *testing.T) {
+	got, err := buildCorrection("", `permission check failed for command "pwd": user denied permission to run command: pwd`)
+	if err != nil {
+		t.Fatalf("buildCorrection: %v", err)
+	}
+	want := "\n\n===== CORRECTION =====\n" +
+		"Your previous attempt produced no report: it asked to run a command, and the\n" +
+		"request was refused (permission check failed for command \"pwd\": user denied permission to run command: pwd).\n" +
+		"You have no tools. A tool call aborts the analysis and produces no report, so\n" +
+		"no command you request will ever run or return anything. Do not request a\n" +
+		"command; answer from FACTS alone.\n" +
+		`Output ONE JSON object only - no prose, no markdown fence, no explanation
+before or after it. It must match the schema exactly: required keys status,
+headline, body, findings, resolved; no additional keys; status must equal the
+highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
+not emit "key", "meta", "first_seen" or "occurrences".`
+	if got != want {
+		t.Fatalf("buildCorrection bytes changed.\n--- want ---\n%s\n--- got ---\n%s", want, got)
+	}
+}
+
+// The refusal is bounded where it is produced: a multi-line refusal past
+// 200 runes leaves runAgy as one line cut there, and that is what the
+// correction quotes, unchanged. Driven through a stub agy so the bound
+// under test is the real producer's, not the fixture's.
+func TestRetryCorrection_BoundsRefusal(t *testing.T) {
+	cfg := newTestConfig(t)
+	long := strings.Repeat("x\\n", 150) // 300 runes of x and newline escapes inside the JSON string
+	env := `{"status":"ERROR","response":"","error":"permission check failed for command \"` + long + `\": user denied","usage":{"input_tokens":0}}`
+	promptPath, schemaPath := agyStub(t, cfg, env, 1)
+	_, rerr := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if rerr == nil {
+		t.Fatal("stub must fail")
+	}
+	got, err := retryCorrection("agy_failed", rerr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.Index(got, "(permission check")
+	if i < 0 {
+		t.Fatalf("no refusal in %q", got)
+	}
+	line := strings.SplitN(got[i+1:], "\n", 2)[0]
+	if n := utf8.RuneCountInString(strings.TrimSuffix(line, ").")); n != 200 {
+		t.Fatalf("refusal is %d runes, want 200: %q", n, line)
+	}
+	if !strings.HasSuffix(line, ").") {
+		t.Fatalf("refusal is not one line: %q", line)
+	}
+}
+
+// The whole triage phase shares one budget of TriageBudgetTimeouts x
+// AGY_HARD_TIMEOUT: two attempts that each spend a full hard timeout
+// exhaust it, so the phase can never outrun the health window however
+// many attempts the count allows.
+func TestRun_TriageRetries_SharedTimeBudget(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.AgyHardTimeout = 30 * time.Millisecond
+	buf := captureLog(t)
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+		rec.calls++
+		<-ctx.Done()
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("%w", errAgyTimeout)
+		}
+		return nil, fmt.Errorf("%w", context.Canceled)
+	}}
+	start := time.Now()
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Run() expected a non-nil error")
+	}
+	// The contract's window arithmetic (CONTRACTS.md C4) counts this
+	// phase as 2 x AGY_HARD_TIMEOUT; state's HealthWindow reads the
+	// constant, so changing it moves the window, and this pins the number
+	// the documents state.
+	if TriageBudgetTimeouts != 2 {
+		t.Fatalf("TriageBudgetTimeouts = %d, want 2", TriageBudgetTimeouts)
+	}
+	if rec.calls != TriageBudgetTimeouts {
+		t.Fatalf("agy call count = %d, want %d (each timeout spends one AGY_HARD_TIMEOUT of the budget)", rec.calls, TriageBudgetTimeouts)
+	}
+	// The call count is the proof that the budget ended the phase: the
+	// stub only returns when its context ends, so without the shared
+	// budget there would be four calls. The elapsed bound is a hang
+	// guard only, generous because the image build runs this suite under
+	// emulation where a 30 ms timer can take hundreds of milliseconds.
+	if elapsed > 20*TriageBudgetTimeouts*cfg.AgyHardTimeout {
+		t.Fatalf("triage phase took %v, want it ended by the %v budget", elapsed, TriageBudgetTimeouts*cfg.AgyHardTimeout)
+	}
+	if rep.Status != "ALERT" || !strings.Contains(buf.String(), "reason=agy_timeout") {
+		t.Fatalf("want the agy_timeout fallback, got %+v\n%s", rep, buf.String())
+	}
+}
+
+// A shutdown mid-retry is still a shutdown: no fallback, no report.
+func TestRun_TriageRetries_CancelDuringRetryAuthorsNothing(t *testing.T) {
+	cfg := newTestConfig(t)
+	rec := &agyRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := Deps{RunAgy: func(c context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+		rec.calls++
+		if rec.calls == 2 {
+			cancel()
+			return nil, fmt.Errorf("%w", context.Canceled)
+		}
+		return []byte(mustEnvelope("not json")), nil
+	}}
+	rep, err := Run(ctx, Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if !errors.Is(err, context.Canceled) || rep != nil {
+		t.Fatalf("Run() = (%v, %v), want (nil, context.Canceled)", rep, err)
+	}
+	if rec.calls != 2 {
+		t.Fatalf("agy call count = %d, want 2 (no attempt after cancellation)", rec.calls)
+	}
+}
+
+// --- the denied-tool correction is selected by the envelope, never by text ---
+
+// A validator message echoes model-supplied values verbatim, and facts
+// content reaches the model, so a crafted status value can carry the
+// refusal marker. The correction must still be the validator's, not the
+// denied-tool one: the marker is trusted only in agy's own envelope.
+func TestRun_TriageRetries_ValidatorMessageCannotHijackCorrection(t *testing.T) {
+	cfg := newTestConfig(t)
+	bad := `{"status":"permission check failed for command \"pwd\": user denied","headline":"h","body":"b","findings":[],"resolved":[]}`
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stub(bad, mustJSON(t, okReport()))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil || rep == nil {
+		t.Fatalf("Run() = %v, %v; want the second attempt to succeed", rep, err)
+	}
+	block := correctionBlock(t, rec.prompts[1])
+	if !strings.Contains(block, "failed validation") || strings.Contains(block, "asked to run a command") {
+		t.Fatalf("a validator message carrying the marker steered the denied-tool correction:\n%s", block)
+	}
+}
+
+// The refusal reaches the correction from the envelope's error field,
+// whichever way agy delivered it: a non-zero exit, or a clean exit with
+// an ERROR envelope. The text is the envelope's, not a quoted rendering.
+func TestRun_TriageRetries_DeniedToolViaErrorEnvelope(t *testing.T) {
+	cfg := newTestConfig(t)
+	env := `{"status":"ERROR","response":"","error":"permission check failed for command \"pwd\": user denied permission to run command: pwd","usage":{"input_tokens":1800}}`
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: rec.stubRaw(env, mustEnvelope(mustJSON(t, okReport())))}
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if err != nil || rep == nil {
+		t.Fatalf("Run() = %v, %v; want the second attempt to succeed", rep, err)
+	}
+	block := correctionBlock(t, rec.prompts[1])
+	if !strings.Contains(block, `run command: pwd)`) || strings.Contains(block, `\"pwd\"`) {
+		t.Fatalf("correction must carry the envelope error verbatim, not a quoted rendering:\n%s", block)
+	}
+}
+
+// A refused command ending in a quote or parenthesis keeps its last
+// character: the refusal is taken from the envelope, not trimmed off the
+// end of a wrapped message.
+func TestRetryCorrection_KeepsRefusalTail(t *testing.T) {
+	block, err := retryCorrection("agy_failed", deniedToolErr("echo (hi)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(block, "run command: echo (hi))") {
+		t.Fatalf("refusal tail lost:\n%s", block)
+	}
+}
+
+// A shutdown that lands between two attempts authors no report, exactly
+// as one that lands inside an attempt: the loop re-checks the parent
+// before spending another attempt, and the phase budget running out is
+// the only thing that ends the phase with a fallback.
+func TestRun_TriageRetries_CancelBetweenAttemptsAuthorsNothing(t *testing.T) {
+	cfg := newTestConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := &agyRecorder{}
+	d := Deps{RunAgy: func(c context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
+		rec.calls++
+		cancel() // the parent goes away while this attempt is returning its failure
+		return nil, fmt.Errorf("%w: exit status 1 (stderr 0 bytes)", errAgyFailed)
+	}}
+	rep, err := Run(ctx, Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, d)
+	if !errors.Is(err, context.Canceled) || rep != nil {
+		t.Fatalf("Run() = %v, %v; want (nil, context.Canceled): a report authored after shutdown", rep, err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("calls = %d, want 1: no attempt after the parent was cancelled", rec.calls)
 	}
 }

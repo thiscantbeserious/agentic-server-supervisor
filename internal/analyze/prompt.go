@@ -67,6 +67,7 @@ type promptData struct {
 	DeepJSON        string
 	Component       string
 	ValidationError string
+	DeniedTool      string
 }
 
 // newNonce returns 16 hex chars from crypto/rand, the per-run fence
@@ -81,12 +82,17 @@ func newNonce() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// buildCorrection renders the retry suffix with the concrete validation
-// error from the failed attempt (truncated; the text comes from our own
-// validator and contains no log content, so it is safe to embed).
-func buildCorrection(validationErr string) (string, error) {
+// buildCorrection renders the retry suffix. validationErr is our own
+// validator's message for an answer that failed parsing or validation
+// (truncated; it contains no log content). deniedTool, when set, replaces
+// it: the attempt produced no answer because the model asked to run a
+// command and the request was refused, so the correction names the
+// refusal and the consequence instead of a validation error. It is the
+// only agy-derived text that ever enters a prompt; the caller bounds it
+// with agyErrorText first, one line of at most 200 runes.
+func buildCorrection(validationErr, deniedTool string) (string, error) {
 	var b strings.Builder
-	data := promptData{ValidationError: truncRunes(validationErr, 300)}
+	data := promptData{ValidationError: truncRunes(validationErr, 300), DeniedTool: deniedTool}
 	if err := promptTmpl.ExecuteTemplate(&b, "correction", data); err != nil {
 		return "", err
 	}
