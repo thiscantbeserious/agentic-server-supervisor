@@ -124,20 +124,36 @@ component: [CONTRACTS.md](CONTRACTS.md) and [contracts/](contracts/).
 
 ## State of this project
 
-The image builds, passes its test suite (including live checks against
-real `apprise`/`mailrise`/`msmtp` containers), and publishes to GHCR for
-both `amd64` and `arm64`. It is deployed and running on a real OpenMediaVault
-NAS, pulling from GHCR under the production security flags: the analyzer
-runs clean tick to tick, notifications reach Telegram, and a deliberately
-provoked event was detected, classified, delivered, and its resolution
-delivered too, end to end.
+The image builds, passes its test suite (unit, container and VM end-to-end,
+including live checks against real `apprise`/`mailrise`/`msmtp`
+containers), and publishes to GHCR for both `amd64` and `arm64`. It has
+been running on a real OpenMediaVault NAS since late August 2026 under the
+production security flags.
 
-That rollout is about a day old, not weeks. No disk has actually failed
-under it, so the hardware-alerting path has been exercised only by the
-deterministic raw-alert path and by synthetic events, never by a real
-failure, and the extended trial that would confirm it behaves correctly
-against real hardware over real time has not happened. Treat it
-accordingly, consistent with "prerelease" above, until that changes.
+What the first days in the field showed, and what changed because of it:
+
+- It finds real things. The analyzer surfaced a Samba Time Machine
+  sparsebundle metadata error, collectd RRD timestamp races, a load spike,
+  and a failed `sudo` attempt by the operator's own tooling, each classified
+  as a first occurrence rather than a trend.
+- It was too talkative. The quiet-tick "all systems normal" finding and every
+  resolved watch each produced a message; both are gone, the daily heartbeat
+  is the only routine message, and all-clears are sent for alerts only.
+- The analyzer failed on a third to two thirds of ticks. The causes were
+  found in order: a container pinned at its memory limit and timeouts too
+  short for the prompt sizes, failures logged without their reason, and the
+  model asking to run shell commands that the tool-deny policy refuses. The
+  limits are raised, agy's own error text is logged, and a failed attempt is
+  retried up to three times inside one time budget with a correction that
+  names what went wrong.
+
+Still open, tracked as issues: no dead-man's switch (a dead host is noticed
+only by the missing daily heartbeat), no deterministic rule engine for
+serious failures when the analyzer is down, unbounded growth of agy's
+working state, and whether the raised memory limit is sufficient rather than
+merely larger. No disk has failed under it, so the hardware-alerting path
+has been exercised by the deterministic raw-alert path and by synthetic
+events only. Treat it as prerelease until that changes.
 
 ## License
 
