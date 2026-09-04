@@ -3744,8 +3744,13 @@ func TestRun_TriageRetries_SharedTimeBudget(t *testing.T) {
 	if rec.calls != TriageBudgetTimeouts {
 		t.Fatalf("agy call count = %d, want %d (each timeout spends one AGY_HARD_TIMEOUT of the budget)", rec.calls, TriageBudgetTimeouts)
 	}
-	if elapsed > (TriageBudgetTimeouts+1)*cfg.AgyHardTimeout {
-		t.Fatalf("triage phase took %v, must stay near %v", elapsed, TriageBudgetTimeouts*cfg.AgyHardTimeout)
+	// The call count is the proof that the budget ended the phase: the
+	// stub only returns when its context ends, so without the shared
+	// budget there would be four calls. The elapsed bound is a hang
+	// guard only, generous because the image build runs this suite under
+	// emulation where a 30 ms timer can take hundreds of milliseconds.
+	if elapsed > 20*TriageBudgetTimeouts*cfg.AgyHardTimeout {
+		t.Fatalf("triage phase took %v, want it ended by the %v budget", elapsed, TriageBudgetTimeouts*cfg.AgyHardTimeout)
 	}
 	if rep.Status != "ALERT" || !strings.Contains(buf.String(), "reason=agy_timeout") {
 		t.Fatalf("want the agy_timeout fallback, got %+v\n%s", rep, buf.String())
