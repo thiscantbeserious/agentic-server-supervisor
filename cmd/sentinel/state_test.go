@@ -187,7 +187,7 @@ func TestHealthCLI(t *testing.T) {
 	}
 
 	// Backdate the heartbeat file past the default health window
-	// (state.HealthWindow, 2280s at the defaults) so it reads as stale.
+	// (state.HealthWindow, 2120s at the defaults) so it reads as stale.
 	hbPath := filepath.Join(stateDir, "heartbeat")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(hbPath, past, past); err != nil {

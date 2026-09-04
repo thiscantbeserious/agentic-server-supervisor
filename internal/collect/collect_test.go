@@ -1476,3 +1476,24 @@ func TestCapturedHostJournalsReachFacts(t *testing.T) {
 		t.Errorf("first captured zed event does not mention a pool: %q", f.ZFS.Data.Events[0].Message)
 	}
 }
+
+// TickSections must track the sections actually run: the health window
+// budgets one SECTION_TIMEOUT per section, so a section added here
+// without raising the constant understates the window.
+func TestTickSections_MatchesSectionsRun(t *testing.T) {
+	src, err := os.ReadFile("collect.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	start := strings.Index(body, `meta.Mode = "tick"`)
+	if start < 0 {
+		t.Fatal("could not locate the tick section block in collect.go")
+	}
+	// Tick sections are the runSection calls bounded by SECTION_TIMEOUT
+	// after the tick marker; the deep section uses DEEP_TIMEOUT and sits
+	// in the other branch.
+	if n := strings.Count(body[start:], "cfg.SectionTimeout, func("); n != TickSections {
+		t.Fatalf("tick block runs %d sections, TickSections = %d", n, TickSections)
+	}
+}

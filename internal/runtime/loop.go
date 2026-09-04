@@ -244,10 +244,10 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 		// antigravity-cli itself and delete the credential as the oldest
 		// entry. Every component is therefore required to be a real
 		// directory, checked with Lstat so a link is seen as a link.
-		if !realDirs(root, ".gemini", filepath.Join(".gemini", "antigravity-cli"), dir) {
-			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", "a path component is a symlink or not a directory")
+		if err := realDirs(root, ".gemini", filepath.Join(".gemini", "antigravity-cli"), dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", err)
 			continue
-		}
+		} // a missing component falls through: root.Open names it in its own error
 		df, err := root.Open(dir)
 		if err != nil {
 			// Absent, a symlink somewhere in the path, or a layout agy
@@ -294,16 +294,24 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 	}
 }
 
-// realDirs reports whether every given path, relative to root, is a
+// errNotRealDir is realDirs' verdict on a component that exists but is a
+// symlink or not a directory; a missing component surfaces as the Lstat
+// error itself, which wraps fs.ErrNotExist.
+var errNotRealDir = errors.New("a path component is a symlink or not a directory")
+
+// realDirs returns nil when every given path, relative to root, is a
 // directory reached without following a symlink at that component.
-func realDirs(root *os.Root, paths ...string) bool {
+func realDirs(root *os.Root, paths ...string) error {
 	for _, p := range paths {
 		fi, err := root.Lstat(p)
-		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			return false
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return fmt.Errorf("%s: %w", p, errNotRealDir)
 		}
 	}
-	return true
+	return nil
 }
 
 // deniedAgyTools are the tool calls the analyzer must never make.

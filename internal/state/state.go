@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
@@ -559,12 +560,6 @@ func (s *Store) Health() error {
 	return nil
 }
 
-// collectSections is how many facts sections a tick collects, each
-// bounded by SECTION_TIMEOUT and run one after another (contracts/
-// collect.md: the eight sections kernel, ras, smart, sensors, resources,
-// services, network, zfs).
-const collectSections = 8
-
 // HealthWindow is how old the heartbeat may be before Health reports the
 // supervisor dead (S.3f, C11). The heartbeat is rewritten inside every
 // tick, so its age at the next write is the tick's own duration plus
@@ -579,7 +574,7 @@ const collectSections = 8
 // Duration yields the maximum Duration, never a wrapped negative that
 // would report a live supervisor dead.
 func HealthWindow(cfg *config.Config) time.Duration {
-	w := satAdd(2*cfg.TickInterval, satMul(collectSections, cfg.SectionTimeout))
+	w := satAdd(satMul(2, cfg.TickInterval), satMul(collect.TickSections, cfg.SectionTimeout))
 	w = satAdd(w, cfg.DeepTimeout)
 	w = satAdd(w, satMul(3, cfg.AgyHardTimeout))
 	deliveries := int64(cfg.OutboxMax) // OUTBOX_MAX has no upper bound in config

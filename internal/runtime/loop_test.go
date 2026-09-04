@@ -959,8 +959,10 @@ func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	pruneAgyLogs(&config.Config{AgyHome: wrong}, logger)
-	if got := logBuf.String(); !strings.Contains(got, "runtime agy dir not pruned dir=log") {
-		t.Errorf("wrong layout produced no debug signal:\n%s", got)
+	// The reason is the real one, a missing path, not a symlink accusation
+	// that would send an operator looking for an attack on a fresh volume.
+	if got := logBuf.String(); !strings.Contains(got, "runtime agy dir not pruned dir=log") || !strings.Contains(got, "no such file or directory") || strings.Contains(got, "symlink") {
+		t.Errorf("wrong layout: want the missing-path error as the reason:\n%s", got)
 	}
 
 	// The normal steady state, a correct path under the cap, logs
