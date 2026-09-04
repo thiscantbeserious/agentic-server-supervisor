@@ -151,9 +151,9 @@ Still open, tracked as issues: no dead-man's switch (a dead host is noticed
 only by the missing daily heartbeat), no deterministic rule engine for
 serious failures when the analyzer is down, unbounded growth of agy's
 working state, and whether the raised memory limit is sufficient rather than
-merely larger. No disk has failed under it, so the hardware-alerting path
-has been exercised by the deterministic raw-alert path and by synthetic
-events only. Treat it as prerelease until that changes.
+merely larger. No disk has failed outright under it yet; a disk whose read
+error count kept rising has been reported through it, so the hardware path
+has been exercised by real degradation, not only by synthetic events.
 
 ## License
 
