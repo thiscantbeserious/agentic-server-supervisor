@@ -240,7 +240,7 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 	for _, sub := range []string{"log", "crashes"} {
 		dir := filepath.Join(".gemini", "antigravity-cli", sub)
 		// os.Root refuses a link that leaves the root but follows one that
-		// stays inside it, and a `log -> ..` would make this prune list
+		// stays inside it, and a `log -> .` would make this prune list
 		// antigravity-cli itself and delete the credential as the oldest
 		// entry. Every component is therefore required to be a real
 		// directory, checked with Lstat so a link is seen as a link.

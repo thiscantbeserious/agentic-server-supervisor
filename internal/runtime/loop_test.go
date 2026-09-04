@@ -787,9 +787,9 @@ func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
 	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
 		t.Run(link, func(t *testing.T) { symlinkEscapeProbe(t, link) })
 	}
-	// A link that stays inside agy-home is followed by os.Root, so it is
-	// refused by the component check instead: `log -> ..` would list
-	// antigravity-cli itself and delete the credential as its oldest
+	// A relative link that stays inside agy-home is followed by os.Root,
+	// so it is refused by the component check instead: `log -> .` would
+	// list antigravity-cli itself and delete the credential as its oldest
 	// entry.
 	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
 		t.Run("in-root/"+link, func(t *testing.T) { symlinkInRootProbe(t, link) })
@@ -798,62 +798,78 @@ func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
 
 func symlinkInRootProbe(t *testing.T, link string) {
 	home, base, token := agyHomeFixture(t, 0)
-	// The credential is made the oldest entry of antigravity-cli, so a
-	// prune that lands there selects it first.
-	old := time.Now().Add(-99 * time.Hour)
-	if err := os.Chtimes(token, old, old); err != nil {
-		t.Fatal(err)
-	}
-	// Enough regular files beside the credential to exceed the cap.
-	for i := 0; i < 25; i++ {
-		if err := os.WriteFile(filepath.Join(base, "f"+strconv.Itoa(i)), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var linkPath, target string
+	// victimDir is where the pruned path resolves once the link is in
+	// place: for `log -> .` that is antigravity-cli itself, holding the
+	// credential; for a linked parent it is the real tree's log/. It gets
+	// an old, credential-like regular file and enough newer files to put
+	// that file past the cap, so a prune that follows the link deletes it.
+	var linkPath, target, victimDir string
 	switch link {
 	case "log":
-		linkPath, target = filepath.Join(base, "log"), ".."
+		if err := os.RemoveAll(filepath.Join(base, "log")); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target, victimDir = filepath.Join(base, "log"), ".", base
 	case "antigravity-cli":
-		// .gemini/antigravity-cli -> .gemini/real, which holds the tree.
-		if err := os.Rename(base, filepath.Join(home, ".gemini", "real")); err != nil {
+		real := filepath.Join(home, ".gemini", "real")
+		if err := os.Rename(base, real); err != nil {
 			t.Fatal(err)
 		}
-		linkPath, target = base, "real"
-		base = filepath.Join(home, ".gemini", "real")
-		token = filepath.Join(base, "antigravity-oauth-token")
+		linkPath, target, victimDir = base, "real", filepath.Join(real, "log")
+		token = filepath.Join(real, "antigravity-oauth-token")
 	case ".gemini":
-		if err := os.Rename(filepath.Join(home, ".gemini"), filepath.Join(home, "real")); err != nil {
+		real := filepath.Join(home, "real")
+		if err := os.Rename(filepath.Join(home, ".gemini"), real); err != nil {
 			t.Fatal(err)
 		}
-		linkPath, target = filepath.Join(home, ".gemini"), "real"
-		base = filepath.Join(home, "real", "antigravity-cli")
-		token = filepath.Join(base, "antigravity-oauth-token")
+		linkPath, target, victimDir = filepath.Join(home, ".gemini"), "real", filepath.Join(real, "antigravity-cli", "log")
+		token = filepath.Join(real, "antigravity-cli", "antigravity-oauth-token")
 	}
-	if link == "log" {
-		if err := os.RemoveAll(linkPath); err != nil {
+	victim := filepath.Join(victimDir, "must-survive")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-99 * time.Hour)
+	for _, f := range []string{victim, token} {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 25; i++ {
+		if err := os.WriteFile(filepath.Join(victimDir, "f"+strconv.Itoa(i)), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := os.Symlink(target, linkPath); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadDir(base)
+	before, err := os.ReadDir(victimDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
 
-	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(testConfig(t, tick0)))
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(logCfg))
 
+	if _, err := os.Lstat(victim); err != nil {
+		t.Fatalf("in-root %s link: the prune followed the link and deleted the oldest file where it landed: %v", link, err)
+	}
 	if _, err := os.Lstat(token); err != nil {
 		t.Fatalf("in-root %s link: the prune deleted the credential: %v", link, err)
 	}
-	after, err := os.ReadDir(base)
+	after, err := os.ReadDir(victimDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(after) != len(before) {
-		t.Errorf("in-root %s link: %d entries before, %d after; the prune followed the link", link, len(before), len(after))
+		t.Errorf("in-root %s link: %d entries before, %d after", link, len(before), len(after))
+	}
+	if !strings.Contains(logBuf.String(), "a path component is a symlink") {
+		t.Errorf("in-root %s link: refused silently, want the debug reason:\n%s", link, logBuf.String())
 	}
 }
 
