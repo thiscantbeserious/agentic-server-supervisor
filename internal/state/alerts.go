@@ -17,7 +17,7 @@ type ActiveAlert struct {
 	// notified at. De-escalation lowers Severity silently, so Severity
 	// alone cannot answer "was the operator told this was an alert",
 	// which is what gates the all-clear (S.3e). Empty on records written
-	// before the field existed; step (e) treats that as legacy and emits
+	// before the field existed. Step (e) treats that as legacy and emits
 	// the all-clear regardless of severity, so no finding the operator
 	// saw closes silently across the upgrade.
 	MaxNotifiedSeverity string `json:"max_notified_severity,omitempty"`

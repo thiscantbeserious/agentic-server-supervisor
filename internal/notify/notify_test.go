@@ -815,7 +815,7 @@ func TestSMTPFallback_HungServerIsBounded(t *testing.T) {
 
 // The dial and the conversation share ONE deadline. With a dial that
 // consumes most of NOTIFY_TIMEOUT, a conversation deadline started after
-// the dial would allow close to 2 x NOTIFY_TIMEOUT in total; a shared
+// the dial would allow close to 2 x NOTIFY_TIMEOUT in total. A shared
 // deadline ends the whole call at NOTIFY_TIMEOUT. The liveness window
 // (C4) counts one NOTIFY_TIMEOUT per outbox item, so the difference is
 // the difference between that derivation being true and false.

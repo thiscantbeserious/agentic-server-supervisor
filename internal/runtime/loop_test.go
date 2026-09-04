@@ -687,7 +687,7 @@ func agyHomeFixture(t *testing.T, n int) (home, base, token string) {
 func TestPruneAgyLogs(t *testing.T) {
 	home, base, token := agyHomeFixture(t, 30)
 	// Snapshot the credential's timestamps here, before any fixture step
-	// that could follow a symlink into it; a snapshot taken later would
+	// that could follow a symlink into it. A snapshot taken later would
 	// compare a damaged file with itself.
 	tokenBefore, err := os.Lstat(token)
 	if err != nil {
@@ -709,7 +709,7 @@ func TestPruneAgyLogs(t *testing.T) {
 	// A symlink inside log/ pointing at the credential: not a regular
 	// file, so it is neither counted nor removed, and its target is never
 	// touched. Its mtime is left as created (os.Chtimes would follow the
-	// link and age the credential instead); a prune that counted it would
+	// link and age the credential instead). A prune that counted it would
 	// keep it as the newest entry and evict one real file, which the
 	// regular-file count below catches.
 	link := filepath.Join(base, "log", "stale-link")
@@ -726,7 +726,7 @@ func TestPruneAgyLogs(t *testing.T) {
 	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(logCfg))
 
 	// The count line is what makes a wrong path visible instead of a
-	// silent no-op; it carries the directory name and a number, no
+	// silent no-op. It carries the directory name and a number, no
 	// filenames and no content.
 	if got := logBuf.String(); !strings.Contains(got, "runtime pruned agy files dir=log removed=10") ||
 		!strings.Contains(got, "dir=crashes removed=10") {
@@ -782,7 +782,7 @@ func TestPruneAgyLogs(t *testing.T) {
 // test rooted at the target cannot observe an escape by construction.
 func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
 	// Every component between $AGY_HOME and log/ is a place agy can plant
-	// a link, so each is tried in turn; a guard on the leaf alone passes
+	// a link, so each is tried in turn. A guard on the leaf alone passes
 	// the first case and fails the other two.
 	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
 		t.Run(link, func(t *testing.T) { symlinkEscapeProbe(t, link) })
@@ -1014,7 +1014,7 @@ func TestLoop_PrunesAgyLogsEachTick(t *testing.T) {
 }
 
 // The --once command calls Tick directly, never Loop, and C4 promises the
-// prune before each tick; a prune wired into Loop alone would skip it.
+// prune before each tick. A prune wired into Loop alone would skip it.
 func TestTick_PrunesAgyLogs(t *testing.T) {
 	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
 	cfg := testConfig(t, tick0)

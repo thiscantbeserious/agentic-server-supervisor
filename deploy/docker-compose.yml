@@ -26,7 +26,7 @@ services:
     group_add: ["${JOURNAL_GID:?JOURNAL_GID missing, run install.sh}"]
     pids_limit: 256
     # agy is a ~205MB binary holding a prompt of tens of thousands of
-    # tokens plus a streaming response; at 512m the cgroup sat exactly on
+    # tokens plus a streaming response. At 512m the cgroup sat exactly on
     # its ceiling (memory.peak == memory.max) and reclaimed continuously
     # instead of running, which is what made analyze miss its timeout.
     # memory.peak is censored at memory.max, so this value is a first
@@ -114,7 +114,7 @@ services:
       # SECTION_TIMEOUT) + collect (8 x SECTION_TIMEOUT) + raw-alert notify
       # + the triage phase (up to four attempts sharing 2 x
       # AGY_HARD_TIMEOUT) + one deep dive at AGY_HARD_TIMEOUT + deep
-      # collect, about 780 s at the defaults; only after this period do
+      # collect, about 780 s at the defaults. Only after this period do
       # the retries start counting, so a slow analyzer on a cold start is
       # not reported unhealthy.
       start_period: 900s

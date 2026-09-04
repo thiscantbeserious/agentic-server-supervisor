@@ -50,7 +50,7 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 	// One absolute deadline for the dial and the conversation together.
 	// A dial timeout alone leaves the exchange unbounded (ctx is consumed
 	// by DialContext), so a server that accepts TCP and never greets
-	// would hold this call, the outbox drain and the whole tick; and a
+	// would hold this call, the outbox drain and the whole tick. And a
 	// second deadline started after the dial would allow 2 x
 	// NOTIFY_TIMEOUT per item, which is not the term the liveness window
 	// (C4) counts. Sharing one instant makes dial plus every read and
@@ -64,7 +64,7 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(deadline)
-	// ctx was consumed by the dial; a cancelled tick (shutdown gives an
+	// ctx was consumed by the dial. A cancelled tick (shutdown gives an
 	// active tick five seconds, then cancels) must also end a conversation
 	// that is blocked in a read or write, not wait out NOTIFY_TIMEOUT.
 	// Moving the deadline to now fails the pending I/O immediately.

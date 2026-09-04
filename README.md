@@ -137,7 +137,7 @@ What the first days in the field showed, and what changed because of it:
   and a failed `sudo` attempt by the operator's own tooling, each classified
   as a first occurrence rather than a trend.
 - It was too talkative. The quiet-tick "all systems normal" finding and every
-  resolved watch each produced a message; both are gone, the daily heartbeat
+  resolved watch each produced a message. Both are gone, the daily heartbeat
   is the only routine message, and all-clears are sent for alerts only.
 - The analyzer failed on a third to two thirds of ticks. The causes were
   found in order: a container pinned at its memory limit and timeouts too
@@ -151,7 +151,7 @@ Still open, tracked as issues: no dead-man's switch (a dead host is noticed
 only by the missing daily heartbeat), no deterministic rule engine for
 serious failures when the analyzer is down, unbounded growth of agy's
 working state, and whether the raised memory limit is sufficient rather than
-merely larger. No disk has failed outright under it yet; a disk whose read
+merely larger. No disk has failed outright under it yet. A disk whose read
 error count kept rising has been reported through it, so the hardware path
 has been exercised by real degradation, not only by synthetic events.
 

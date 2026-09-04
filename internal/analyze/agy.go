@@ -71,7 +71,7 @@ type agyEnvelope struct {
 // spawns it, returning exit 0 with nothing, so a bare read cannot tell
 // "no response" from "response lost". The envelope makes it distinguishable:
 // zero input tokens means the prompt never reached the model
-// (errAgyPromptNotDelivered, not retryable); any other failed or empty
+// (errAgyPromptNotDelivered, not retryable). Any other failed or empty
 // envelope is a turn that went wrong and is retried.
 //
 // It returns both response (agy's free-text answer, subject to fence
@@ -234,7 +234,7 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 	}
 	if runErr != nil {
 		// agy exits non-zero with an empty stderr and the reason in the
-		// stdout envelope's error field; without it the log says only
+		// stdout envelope's error field. Without it the log says only
 		// "exit status 1" and the cause is lost.
 		if reason := envelopeErrorText(out.Bytes()); reason != "" {
 			return nil, &envelopeError{Text: reason, err: fmt.Errorf("%w: %v (stderr %d bytes, agy: %s)", errAgyFailed, runErr, agyErr.Len(), reason)}

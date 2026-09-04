@@ -121,7 +121,7 @@ flowchart TB
     mailrise -- "tgram://" --> tg
 ```
 
-The analyze step runs agy in print mode with one time budget for up to four attempts, each retry carrying a correction (the validator's message, or the refusal when the model asked for a tool), produces a schema-validated `report.json`, and gives one new finding per tick a second, focused call (the deep dive); the exact rules are `contracts/analyze.md` §6.
+The analyze step runs agy in print mode with one time budget for up to four attempts, each retry carrying a correction (the validator's message, or the refusal when the model asked for a tool), produces a schema-validated `report.json`, and gives one new finding per tick a second, focused call (the deep dive). The exact rules are in `contracts/analyze.md` §6.
 
 SMART deliberately does NOT run in the container: it would need /dev access +
 CAP_SYS_RAWIO and would soften the read_only promise. Host smartd covers disks (§2.5).

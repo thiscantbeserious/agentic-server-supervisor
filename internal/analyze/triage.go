@@ -53,8 +53,8 @@ const deniedToolMarker = "permission check failed for command"
 // while the budget lasts, except the two whose outcome a retry cannot
 // change: an unauthenticated agy (the fix is a login) and an envelope
 // with zero input tokens (the prompt never reached the model). print mode
-// is stateless, so a retry that only repeats the prompt is a re-roll;
-// when the failure was the model's own doing the retry prompt appends the
+// is stateless, so a retry that only repeats the prompt is a re-roll.
+// When the failure was the model's own doing the retry prompt appends the
 // concrete correction, the validator's message or the refused command.
 func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
 	phaseCtx, cancel := context.WithTimeout(ctx, triageBudget(o.Cfg))
@@ -110,12 +110,12 @@ func retryable(reason string, err error) bool {
 // after an answer that failed parsing or validation, nothing otherwise.
 // The refused command is agy-derived text and reaches the prompt only in
 // the bounded one-line form agyErrorText produces, the same bound the log
-// line has; it never reaches a report.
+// line has. It never reaches a report.
 func retryCorrection(reason string, err error) (string, error) {
 	// The marker is trusted only inside agy's own envelope error, read
 	// structurally. A validator message echoes model-supplied values, and
 	// facts content reaches the model, so a marker found by searching a
-	// wrapped message could have been planted; it never selects this
+	// wrapped message could have been planted. It never selects this
 	// branch.
 	if text, ok := envelopeErrorOf(err); ok {
 		if i := strings.Index(text, deniedToolMarker); i >= 0 {
@@ -210,7 +210,7 @@ func classifyAgyErr(err error) string {
 // permits it: cause is the validator's own message or, for an agy
 // failure, the envelope's error field in the bounded one-line form C7
 // names, never prompt or facts content and never any other agy stdout.
-// It reaches this log line only; the report carries the reason code.
+// It reaches this log line only. The report carries the reason code.
 func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, cause error, logger *slog.Logger) *report.Report {
 	rep := Fallback(cfg, seq, reason, f)
 	if raw, err := json.Marshal(rep); err == nil {
