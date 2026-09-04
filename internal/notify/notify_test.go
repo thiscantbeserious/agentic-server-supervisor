@@ -868,3 +868,49 @@ func TestSMTPFallback_DialAndConversationShareOneDeadline(t *testing.T) {
 		t.Fatalf("Send took %v: dial and conversation are not sharing one NOTIFY_TIMEOUT deadline", elapsed)
 	}
 }
+
+// A cancelled context ends a conversation blocked in I/O at once, not at
+// NOTIFY_TIMEOUT: shutdown gives an active tick five seconds and then
+// cancels, and an outbox drain must honor that.
+func TestSMTPFallback_CancelInterruptsConversation(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // accepted, never greeted
+		}
+	}()
+
+	appriseStubSrv := newAppriseStub(t, 200)
+	cfg := notifyTestConfig(t, appriseStubSrv, newSMTPStub(t))
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	cfg.MailriseHost = host
+	cfg.MailrisePort, _ = strconv.Atoi(port)
+	cfg.NotifyTimeout = 10 * time.Second
+	r := loadFixture(t, "report-ok.json")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- Send(ctx, cfg, r, true) }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	select {
+	case err = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send did not return within 3s of ctx cancellation: cancellation does not reach the SMTP conversation")
+	}
+	if err == nil {
+		t.Fatal("Send returned nil after cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Send took %v after a cancel at 300ms, want well under NOTIFY_TIMEOUT=%v", elapsed, cfg.NotifyTimeout)
+	}
+}

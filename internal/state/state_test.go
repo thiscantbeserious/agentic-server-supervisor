@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2008,23 +2009,25 @@ func TestProcess_LegacyRecordWithoutMaxNotifiedSeverityKeepsAllClear(t *testing.
 }
 
 // The health window is derived from the same configuration that bounds a
-// tick, so a longer legal tick can never outrun it: three agy calls at
-// AGY_HARD_TIMEOUT plus a full outbox drain, on top of 3 x TICK_INTERVAL.
-// At the shipped defaults that is 900 + 630 + 750 = 2280 s.
+// tick, so a longer legal tick can never outrun it. At the shipped
+// defaults: 2 x 300 + 8 x 10 + 30 + 3 x 210 + (2 + 50) x 15 = 2120 s.
 func TestHealthWindow_TracksTickBudget(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1_700_000_000, 0))
+	cfg.SectionTimeout = 10 * time.Second
+	cfg.DeepTimeout = 30 * time.Second
 	cfg.AgyHardTimeout = 210 * time.Second
 	cfg.OutboxMax = 50
 	cfg.NotifyTimeout = 15 * time.Second
-	if got, want := HealthWindow(cfg), 2280*time.Second; got != want {
+	if got, want := HealthWindow(cfg), 2120*time.Second; got != want {
 		t.Fatalf("HealthWindow = %v, want %v", got, want)
 	}
 
 	s := newStore(t, cfg)
 	mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b"}))
 	hb := filepath.Join(cfg.StateDir, "heartbeat")
-	// A heartbeat that is the worst legal tick old (1820 s: 80 + 15 + 420
-	// + 30 + 210 + 15 + 750 + 300) is healthy; one past the window is not.
+	// A heartbeat that is the longest legal tick plus the interval old
+	// (80 + 15 + 420 + 30 + 210 + 15 + 750 + 300 = 1820 s) is healthy;
+	// one past the window is not.
 	inside := cfg.Now.Add(-1820 * time.Second)
 	if err := os.Chtimes(hb, inside, inside); err != nil {
 		t.Fatal(err)
@@ -2038,5 +2041,26 @@ func TestHealthWindow_TracksTickBudget(t *testing.T) {
 	}
 	if err := s.Health(); err == nil {
 		t.Error("past the window: Health() = nil, want error")
+	}
+
+	// Every configured term moves the window: a collect that is allowed
+	// 120 s per section adds 8 x 110 s over the default.
+	cfg.SectionTimeout = 120 * time.Second
+	if got, want := HealthWindow(cfg), 3000*time.Second; got != want {
+		t.Errorf("HealthWindow with SECTION_TIMEOUT=120 = %v, want %v", got, want)
+	}
+
+	// A budget that does not fit a Duration saturates instead of wrapping
+	// negative, which would report a live supervisor dead.
+	cfg.OutboxMax = math.MaxInt
+	if got := HealthWindow(cfg); got != math.MaxInt64 {
+		t.Errorf("overflowing budget: HealthWindow = %v, want the maximum Duration", got)
+	}
+	fresh := cfg.Now
+	if err := os.Chtimes(hb, fresh, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err != nil {
+		t.Errorf("fresh heartbeat under a saturated window: Health() = %v, want nil", err)
 	}
 }

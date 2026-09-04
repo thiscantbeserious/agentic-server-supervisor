@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -558,20 +559,53 @@ func (s *Store) Health() error {
 	return nil
 }
 
+// collectSections is how many facts sections a tick collects, each
+// bounded by SECTION_TIMEOUT and run one after another (contracts/
+// collect.md: the eight sections kernel, ras, smart, sensors, resources,
+// services, network, zfs).
+const collectSections = 8
+
 // HealthWindow is how old the heartbeat may be before Health reports the
 // supervisor dead (S.3f, C11). The heartbeat is rewritten inside every
-// tick, so the gap between two writes is the tick's own duration plus
+// tick, so its age at the next write is the tick's own duration plus
 // TICK_INTERVAL, and a window shorter than the longest legal tick makes
-// the healthcheck raise a false alarm in exactly the slow-agy regime the
-// supervisor exists to survive. The longest legal tick is bounded by
-// configuration: three agy calls at AGY_HARD_TIMEOUT (two triage
-// attempts, one deep dive), and an outbox drain of up to OUTBOX_MAX
-// deliveries at NOTIFY_TIMEOUT each, both after or around the heartbeat
-// write. 3 x TICK_INTERVAL covers the interval itself plus collect,
-// deep collect and the two direct notifies with room to spare. At the
-// defaults: 900 + 630 + 750 = 2280 s.
+// the healthcheck raise a false alarm in exactly the slow-analyzer regime
+// the supervisor exists to survive. The longest legal tick is bounded by
+// configuration alone: sequential collect, a raw-alert notify, three agy
+// calls at AGY_HARD_TIMEOUT (two triage attempts, one deep dive), the deep
+// collect, the decision notify, and an outbox drain of up to OUTBOX_MAX
+// deliveries. One extra TICK_INTERVAL is margin for the sub-second steps.
+// Every term is checked: a configuration whose budget does not fit a
+// Duration yields the maximum Duration, never a wrapped negative that
+// would report a live supervisor dead.
 func HealthWindow(cfg *config.Config) time.Duration {
-	return 3*cfg.TickInterval +
-		3*cfg.AgyHardTimeout +
-		time.Duration(cfg.OutboxMax)*cfg.NotifyTimeout
+	w := satAdd(2*cfg.TickInterval, satMul(collectSections, cfg.SectionTimeout))
+	w = satAdd(w, cfg.DeepTimeout)
+	w = satAdd(w, satMul(3, cfg.AgyHardTimeout))
+	deliveries := int64(cfg.OutboxMax) // OUTBOX_MAX has no upper bound in config
+	if deliveries > math.MaxInt64-2 {
+		deliveries = math.MaxInt64
+	} else {
+		deliveries += 2 // the raw-alert and the decision notify
+	}
+	w = satAdd(w, satMul(deliveries, cfg.NotifyTimeout))
+	return w
+}
+
+// satAdd and satMul are saturating Duration arithmetic for HealthWindow.
+func satAdd(a, b time.Duration) time.Duration {
+	if a > 0 && b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+func satMul(n int64, d time.Duration) time.Duration {
+	if n <= 0 || d <= 0 {
+		return 0
+	}
+	if int64(d) > math.MaxInt64/n {
+		return math.MaxInt64
+	}
+	return time.Duration(n) * d
 }

@@ -64,6 +64,12 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(deadline)
+	// ctx was consumed by the dial; a cancelled tick (shutdown gives an
+	// active tick five seconds, then cancels) must also end a conversation
+	// that is blocked in a read or write, not wait out NOTIFY_TIMEOUT.
+	// Moving the deadline to now fails the pending I/O immediately.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 
 	client, err := smtp.NewClient(conn, cfg.MailriseHost)
 	if err != nil {

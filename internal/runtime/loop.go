@@ -239,6 +239,15 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 	defer root.Close()
 	for _, sub := range []string{"log", "crashes"} {
 		dir := filepath.Join(".gemini", "antigravity-cli", sub)
+		// os.Root refuses a link that leaves the root but follows one that
+		// stays inside it, and a `log -> ..` would make this prune list
+		// antigravity-cli itself and delete the credential as the oldest
+		// entry. Every component is therefore required to be a real
+		// directory, checked with Lstat so a link is seen as a link.
+		if !realDirs(root, ".gemini", filepath.Join(".gemini", "antigravity-cli"), dir) {
+			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", "a path component is a symlink or not a directory")
+			continue
+		}
 		df, err := root.Open(dir)
 		if err != nil {
 			// Absent, a symlink somewhere in the path, or a layout agy
@@ -283,6 +292,18 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 		}
 		logger.Debug("runtime pruned agy files", "dir", sub, "removed", removed)
 	}
+}
+
+// realDirs reports whether every given path, relative to root, is a
+// directory reached without following a symlink at that component.
+func realDirs(root *os.Root, paths ...string) bool {
+	for _, p := range paths {
+		fi, err := root.Lstat(p)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 // deniedAgyTools are the tool calls the analyzer must never make.

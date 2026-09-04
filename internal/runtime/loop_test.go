@@ -787,6 +787,74 @@ func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
 	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
 		t.Run(link, func(t *testing.T) { symlinkEscapeProbe(t, link) })
 	}
+	// A link that stays inside agy-home is followed by os.Root, so it is
+	// refused by the component check instead: `log -> ..` would list
+	// antigravity-cli itself and delete the credential as its oldest
+	// entry.
+	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
+		t.Run("in-root/"+link, func(t *testing.T) { symlinkInRootProbe(t, link) })
+	}
+}
+
+func symlinkInRootProbe(t *testing.T, link string) {
+	home, base, token := agyHomeFixture(t, 0)
+	// The credential is made the oldest entry of antigravity-cli, so a
+	// prune that lands there selects it first.
+	old := time.Now().Add(-99 * time.Hour)
+	if err := os.Chtimes(token, old, old); err != nil {
+		t.Fatal(err)
+	}
+	// Enough regular files beside the credential to exceed the cap.
+	for i := 0; i < 25; i++ {
+		if err := os.WriteFile(filepath.Join(base, "f"+strconv.Itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var linkPath, target string
+	switch link {
+	case "log":
+		linkPath, target = filepath.Join(base, "log"), ".."
+	case "antigravity-cli":
+		// .gemini/antigravity-cli -> .gemini/real, which holds the tree.
+		if err := os.Rename(base, filepath.Join(home, ".gemini", "real")); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target = base, "real"
+		base = filepath.Join(home, ".gemini", "real")
+		token = filepath.Join(base, "antigravity-oauth-token")
+	case ".gemini":
+		if err := os.Rename(filepath.Join(home, ".gemini"), filepath.Join(home, "real")); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target = filepath.Join(home, ".gemini"), "real"
+		base = filepath.Join(home, "real", "antigravity-cli")
+		token = filepath.Join(base, "antigravity-oauth-token")
+	}
+	if link == "log" {
+		if err := os.RemoveAll(linkPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(testConfig(t, tick0)))
+
+	if _, err := os.Lstat(token); err != nil {
+		t.Fatalf("in-root %s link: the prune deleted the credential: %v", link, err)
+	}
+	after, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("in-root %s link: %d entries before, %d after; the prune followed the link", link, len(before), len(after))
+	}
 }
 
 func symlinkEscapeProbe(t *testing.T, link string) {
