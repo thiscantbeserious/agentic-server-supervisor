@@ -687,7 +687,14 @@ func TestPruneAgyLogs(t *testing.T) {
 	home, base, token := agyHomeFixture(t, 30)
 	// A subdirectory inside log/ is not a log file and must survive: the
 	// IsDir skip is the only thing standing between it and os.Remove.
-	if err := os.Mkdir(filepath.Join(base, "log", "nested"), 0o700); err != nil {
+	nested := filepath.Join(base, "log", "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Older than every file, so it sits outside the keep window: the only
+	// thing that saves it is the directory skip, not its position.
+	old := time.Now().Add(-99 * time.Hour)
+	if err := os.Chtimes(nested, old, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -734,20 +741,50 @@ func TestPruneAgyLogs(t *testing.T) {
 // credential directory. The snapshot is of the PARENT of the target, a
 // test rooted at the target cannot observe an escape by construction.
 func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
+	// Every component between $AGY_HOME and log/ is a place agy can plant
+	// a link, so each is tried in turn; a guard on the leaf alone passes
+	// the first case and fails the other two.
+	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
+		t.Run(link, func(t *testing.T) { symlinkEscapeProbe(t, link) })
+	}
+}
+
+func symlinkEscapeProbe(t *testing.T, link string) {
 	home, base, _ := agyHomeFixture(t, 0)
 	outside := t.TempDir() // stands in for $STATE_DIR/history
+	// The target carries the same layout below the link, so a prune that
+	// follows it finds a populated log/ to delete from.
+	target := outside
+	switch link {
+	case "antigravity-cli":
+		target = filepath.Join(outside, "log")
+	case ".gemini":
+		target = filepath.Join(outside, "antigravity-cli", "log")
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 30; i++ {
-		if err := os.WriteFile(filepath.Join(outside, "h"+strconv.Itoa(i)+".json"), []byte("x"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(target, "h"+strconv.Itoa(i)+".json"), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	logDir := filepath.Join(base, "log")
-	if err := os.Remove(logDir); err != nil {
+	var logDir string
+	switch link {
+	case "log":
+		logDir = filepath.Join(base, "log")
+	case "antigravity-cli":
+		logDir = base
+	case ".gemini":
+		logDir = filepath.Join(home, ".gemini")
+	}
+	if err := os.RemoveAll(logDir); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, logDir); err != nil {
 		t.Fatal(err)
 	}
+	outside = target
 	// Everything the test itself allocates under the temp root happens
 	// before the snapshot, so a changed count can only be the prune.
 	logger := newLogger(testConfig(t, tick0))
@@ -759,7 +796,7 @@ func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
 	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
 
 	if entries, _ := os.ReadDir(outside); len(entries) != 30 {
-		t.Fatalf("prune followed the symlinked log/ out of $AGY_HOME: %d of 30 files remain outside", len(entries))
+		t.Fatalf("prune followed the symlinked %s out of $AGY_HOME: %d of 30 files remain outside", link, len(entries))
 	}
 	after, err := os.ReadDir(filepath.Dir(outside))
 	if err != nil {

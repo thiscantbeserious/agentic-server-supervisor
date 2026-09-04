@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -210,31 +211,37 @@ const agyLogKeep = 20
 // and a uuid rather than only a timestamp, so mtime is the ordering that
 // holds for both.
 //
-// It never opens a file, only Stat and Remove. That is what keeps C7
-// intact: no byte of anything under $AGY_HOME, credential or prompt
-// content, ever enters this process. Deleting a file agy still has open is
-// safe, the fd stays valid until agy rotates.
+// Every path is resolved through os.Root, which refuses any symlink that
+// leaves $AGY_HOME at any component, not only the last one. agy runs as
+// this uid with HOME inside the writable state volume and this repo treats
+// it as untrusted; a `.gemini`, `antigravity-cli` or `log` that has become
+// a symlink would otherwise turn a prune of $AGY_HOME into a prune of
+// wherever the link points, sentinel's own history or the credential
+// directory included (A1 write containment).
 //
-// The directory itself is checked with Lstat before it is read: agy runs
-// as this uid with HOME inside the writable state volume and this repo
-// treats it as untrusted, so a `log` that has become a symlink would
-// otherwise turn a prune of $AGY_HOME into a prune of wherever the link
-// points, sentinel's own history or the credential directory included
-// (A1 write containment). Individual entries are safe as they are:
-// os.Remove unlinks a symlink, it never follows one.
+// No file is ever opened for reading, only listed, Lstat'ed and removed.
+// Filenames enter the process, file bytes never do, which is what C7
+// governs: no credential or prompt content reaches sentinel.
 //
 // Every failure is ignored on purpose. This is housekeeping; a directory
 // that cannot be read or an entry that cannot be removed must never affect
-// a tick. The count is logged at debug level so a wrong path or a changed
-// agy layout does not become a silent no-op; a count is not content.
-func pruneAgyLogs(cfg *config.Config, logger interface{ Debug(string, ...any) }) {
-	base := filepath.Join(cfg.AgyHome, ".gemini", "antigravity-cli")
+// a tick. The removed count is logged at debug level so a wrong path or a
+// changed agy layout does not become a silent no-op; a count is not
+// content.
+func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
+	root, err := os.OpenRoot(cfg.AgyHome)
+	if err != nil {
+		return
+	}
+	defer root.Close()
 	for _, sub := range []string{"log", "crashes"} {
-		dir := filepath.Join(base, sub)
-		if fi, err := os.Lstat(dir); err != nil || !fi.Mode().IsDir() {
-			continue // absent, or a symlink: never follow it out of $AGY_HOME
+		dir := filepath.Join(".gemini", "antigravity-cli", sub)
+		df, err := root.Open(dir)
+		if err != nil {
+			continue // absent, or a symlink somewhere in the path: never followed
 		}
-		entries, err := os.ReadDir(dir)
+		entries, err := df.ReadDir(-1)
+		df.Close()
 		if err != nil || len(entries) <= agyLogKeep {
 			continue
 		}
@@ -247,7 +254,7 @@ func pruneAgyLogs(cfg *config.Config, logger interface{ Debug(string, ...any) })
 			if e.IsDir() {
 				continue
 			}
-			info, err := e.Info()
+			info, err := root.Lstat(filepath.Join(dir, e.Name()))
 			if err != nil {
 				continue
 			}
@@ -259,7 +266,7 @@ func pruneAgyLogs(cfg *config.Config, logger interface{ Debug(string, ...any) })
 		sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
 		removed := 0
 		for _, f := range files[agyLogKeep:] {
-			if os.Remove(filepath.Join(dir, f.name)) == nil {
+			if root.Remove(filepath.Join(dir, f.name)) == nil {
 				removed++
 			}
 		}

@@ -52,8 +52,8 @@ services:
       AGY_BIN: "agy"
       AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
       AGY_SECRET_DIR: "/run/secrets/agy"
-      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-210s}"
-      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-240s}"
+      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-180s}"
+      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-210s}"
       HISTORY_N: "${HISTORY_N:-5}"
       HISTORY_KEEP: "${HISTORY_KEEP:-50}"
       DEEP_ENABLED: "${DEEP_ENABLED:-1}"
