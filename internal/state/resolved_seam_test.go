@@ -43,7 +43,7 @@ func TestResolvedSeam_AnalyzeKeyClosesStateAlert(t *testing.T) {
 	store := newStore(t, sCfg)
 
 	// alert severity: the all-clear leg of this seam only exists for
-	// findings notified at alert (S.3e); a watch would close silently.
+	// findings notified at alert (S.3e). A watch would close silently.
 	tick1 := report.Report{
 		Status: "ALERT", Headline: "Disk health degraded", Body: "b",
 		Findings: []report.Finding{{

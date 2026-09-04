@@ -1952,7 +1952,7 @@ func TestProcess_ResolvedWatchClosesWithoutAllClear(t *testing.T) {
 
 // De-escalation must not lose the all-clear: a finding notified at alert
 // and silently lowered to watch afterwards still announces its end. The
-// record remembers the highest severity it was notified at; the current
+// record remembers the highest severity it was notified at. The current
 // stored severity is not the gate.
 func TestProcess_DeEscalatedAlertStillGetsAllClear(t *testing.T) {
 	cfg := testConfig(t, time.Unix(1000, 0))
@@ -2034,7 +2034,7 @@ func TestHealthWindow_TracksTickBudget(t *testing.T) {
 	// A heartbeat that is the longest legal tick plus the interval old
 	// (80 collect + 15 raw notify + 420 triage phase, whatever the number
 	// of attempts inside it + 30 deep collect + 210 deep dive + 15 notify
-	// + 750 drain + 300 interval = 1820 s) is healthy; one past the window
+	// + 750 drain + 300 interval = 1820 s) is healthy. One past the window
 	// is not.
 	inside := cfg.Now.Add(-1820 * time.Second)
 	if err := os.Chtimes(hb, inside, inside); err != nil {

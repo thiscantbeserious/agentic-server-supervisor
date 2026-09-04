@@ -214,7 +214,7 @@ const agyLogKeep = 20
 // Every path is resolved through os.Root, which refuses any symlink that
 // leaves $AGY_HOME at any component, not only the last one. agy runs as
 // this uid with HOME inside the writable state volume and this repo treats
-// it as untrusted; a `.gemini`, `antigravity-cli` or `log` that has become
+// it as untrusted. A `.gemini`, `antigravity-cli` or `log` that has become
 // a symlink would otherwise turn a prune of $AGY_HOME into a prune of
 // wherever the link points, sentinel's own history or the credential
 // directory included (A1 write containment).
@@ -223,15 +223,15 @@ const agyLogKeep = 20
 // Filenames enter the process, file bytes never do, which is what C7
 // governs: no credential or prompt content reaches sentinel.
 //
-// Every failure is ignored on purpose. This is housekeeping; a directory
+// Every failure is ignored on purpose. This is housekeeping. A directory
 // that cannot be read or an entry that cannot be removed must never affect
 // a tick. The removed count is logged at debug level so a wrong path or a
-// changed agy layout does not become a silent no-op; a count is not
+// changed agy layout does not become a silent no-op. A count is not
 // content.
 func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 	root, err := os.OpenRoot(cfg.AgyHome)
 	if err != nil {
-		// The most literal wrong path of all; seedAgyHome warns on the
+		// The most literal wrong path of all. SeedAgyHome warns on the
 		// same condition earlier, this keeps the prune's own promise.
 		logger.Debug("runtime agy home not pruned", "error", err)
 		return
@@ -252,7 +252,7 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 		if err != nil {
 			// Absent, a symlink somewhere in the path, or a layout agy
 			// changed under us. Said at debug level so a wrong path does
-			// not become unbounded growth with no signal; a path and an
+			// not become unbounded growth with no signal. A path and an
 			// error are not file content. The under-cap case below stays
 			// silent, it is the normal steady state.
 			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", err)
@@ -295,7 +295,7 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 }
 
 // errNotRealDir is realDirs' verdict on a component that exists but is a
-// symlink or not a directory; a missing component surfaces as the Lstat
+// symlink or not a directory. A missing component surfaces as the Lstat
 // error itself, which wraps fs.ErrNotExist.
 var errNotRealDir = errors.New("a path component is a symlink or not a directory")
 

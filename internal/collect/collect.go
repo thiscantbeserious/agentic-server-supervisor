@@ -83,7 +83,7 @@ func Run(ctx context.Context, o Options) (*facts.Facts, error) {
 		meta.Mode = "tick"
 		meta.Window = cfg.TickWindowRaw
 
-		// TickSections counts the runSection calls below; keep it next to
+		// TickSections counts the runSection calls below. Keep it next to
 		// them, state.HealthWindow budgets SECTION_TIMEOUT per section.
 		f.Kernel = runSection(ctx, &meta, "kernel", cfg.SectionTimeout, func(ctx context.Context) (facts.KernelData, error) {
 			return collectKernel(ctx, cfg, &meta)

@@ -84,11 +84,11 @@ func newNonce() (string, error) {
 
 // buildCorrection renders the retry suffix. validationErr is our own
 // validator's message for an answer that failed parsing or validation
-// (truncated; it contains no log content). deniedTool, when set, replaces
+// (truncated. It contains no log content). deniedTool, when set, replaces
 // it: the attempt produced no answer because the model asked to run a
 // command and the request was refused, so the correction names the
 // refusal and the consequence instead of a validation error. It is the
-// only agy-derived text that ever enters a prompt; the caller bounds it
+// only agy-derived text that ever enters a prompt. The caller bounds it
 // with agyErrorText first, one line of at most 200 runes.
 func buildCorrection(nonce, validationErr, deniedTool string) (string, error) {
 	var b strings.Builder
