@@ -137,8 +137,10 @@ func classifyAgyErr(err error) string {
 // not just the reason code, is what makes an invalid_json/schema_invalid
 // occurrence self-diagnosing: the reason code alone cannot distinguish a
 // wrapped answer from a truncated one from a schema violation, and C7
-// permits it, cause is the validator's own message, never prompt or facts
-// content or agy stdout.
+// permits it: cause is the validator's own message or, for an agy
+// failure, the envelope's error field in the bounded one-line form C7
+// names, never prompt or facts content and never any other agy stdout.
+// It reaches this log line only; the report carries the reason code.
 func buildFallback(cfg *config.Config, seq int64, reason string, f *facts.Facts, cause error, logger *slog.Logger) *report.Report {
 	rep := Fallback(cfg, seq, reason, f)
 	if raw, err := json.Marshal(rep); err == nil {

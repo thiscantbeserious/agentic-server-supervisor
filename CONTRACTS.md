@@ -215,7 +215,7 @@ Every diagnostic goes to **stderr**; stdout carries machine output only (one JSO
 <RFC3339-UTC> <LEVEL> <component> <message> [k=v ...]
 ```
 
-Never logged: `$AGY_SECRET_DIR` contents, `APPRISE_KEY`, `MAILRISE_PASS`, any `TELEGRAM_*` value, prompt or facts content, agy stdout. On an env error print the variable **name** only.
+Never logged: `$AGY_SECRET_DIR` contents, `APPRISE_KEY`, `MAILRISE_PASS`, any `TELEGRAM_*` value, prompt or facts content, agy stdout, with one bounded exception: the `error` field of agy's own JSON envelope, as one line of at most 200 runes with control and line-separator characters stripped, surfaced only after the authentication check and only into the container log, never into a report (`contracts/analyze.md` §6 step 4). agy fails with an empty stderr and the reason in that field; without it every crash is logged as "exit status 1" and nothing else. On an env error print the variable **name** only.
 
 ### C8. Component seams (in-process, no subprocesses between components)
 
