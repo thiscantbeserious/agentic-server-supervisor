@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
@@ -36,6 +37,14 @@ func (a plainAuthNoTLS) Next(_ []byte, more bool) ([]byte, error) {
 	return nil, nil
 }
 
+// smtpDialControl is net.Dialer.Control for the SMTP dial: nil in
+// production, so the dialer behaves as if the field were unset. A test
+// assigns a function that sleeps before the connect to make the dial
+// itself consume part of NOTIFY_TIMEOUT, which is the only portable way
+// to observe that the dial and the conversation share one deadline
+// rather than getting one each.
+var smtpDialControl func(network, address string, c syscall.RawConn) error
+
 func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) error {
 	addr := net.JoinHostPort(cfg.MailriseHost, strconv.Itoa(cfg.MailrisePort))
 	// One absolute deadline for the dial and the conversation together.
@@ -48,7 +57,7 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 	// write fit inside NOTIFY_TIMEOUT, the same bound the apprise path
 	// gets from http.Client.Timeout.
 	deadline := time.Now().Add(cfg.NotifyTimeout)
-	dialer := net.Dialer{Deadline: deadline}
+	dialer := net.Dialer{Deadline: deadline, Control: smtpDialControl}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)

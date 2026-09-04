@@ -238,7 +238,13 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 		dir := filepath.Join(".gemini", "antigravity-cli", sub)
 		df, err := root.Open(dir)
 		if err != nil {
-			continue // absent, or a symlink somewhere in the path: never followed
+			// Absent, a symlink somewhere in the path, or a layout agy
+			// changed under us. Said at debug level so a wrong path does
+			// not become unbounded growth with no signal; a path and an
+			// error are not file content. The under-cap case below stays
+			// silent, it is the normal steady state.
+			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", err)
+			continue
 		}
 		entries, err := df.ReadDir(-1)
 		df.Close()

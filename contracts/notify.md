@@ -229,7 +229,7 @@ flowchart TB
 
 `net/smtp`, no external dependency:
 
-1. `net.DialTimeout` with `cfg.NotifyTimeout` + `smtp.NewClient` on `net.JoinHostPort(MailriseHost, MailrisePort)`.
+1. One absolute deadline, `now + cfg.NotifyTimeout`, set on the dialer **and** on the accepted connection, then `smtp.NewClient` on `net.JoinHostPort(MailriseHost, MailrisePort)`. The dial and every read and write of the conversation share that one instant: a dial timeout alone leaves a server that accepts and never greets holding the call (and the outbox drain, and the tick) without limit, and a second deadline started after the dial allows two `NOTIFY_TIMEOUT`s per outbox item where the liveness window (CONTRACTS.md C4) counts one.
 2. `c.Auth(plainAuthNoTLS{user, pass, host})`, a ~15-line local `smtp.Auth` implementing PLAIN without stdlib's TLS requirement. `ponytail: mailrise is a LAN-only plaintext listener (mailrise.conf tls: off); switch to smtp.PlainAuth over STARTTLS when the listener gets a cert.`
 3. `c.Mail(MailFrom)`, `c.Rcpt(MailTo)`, `c.Data()`.
 4. Message with CRLF endings: `From:`, `To:`, `Subject:` (`mime.QEncoding.Encode("utf-8", title)`), `Date:` (RFC1123Z), `MIME-Version: 1.0`, `Content-Type: text/html; charset=utf-8`, blank line, then **the HTML body (N.3.6), never `payload.Body`**.
@@ -310,6 +310,7 @@ Table-driven, offline, no framework, no external process. Apprise stub: `httptes
 | 14 | `TestRawAlertRoundTrip` | a runtime-built raw-alert report (plain `<ts> <priority-name> <message>` lines, a 4000-rune kernel message, control characters, invalid UTF-8) survives `Validate → BuildPayload` with a valid-JSON payload within the rune caps |
 | 15 | `TestSeedConfig` | a fixture config ⇒ multipart body contains the file bytes verbatim, stderr reports `urls=1`, exit 0; closed server ⇒ exit 4 |
 | 16 | `TestHostnameSource` | `meta.hostname` wins; otherwise `cfg.Hostname`; `os.Hostname()` never used (asserted by setting `cfg.Hostname` to a value differing from the machine's) |
+| 17 | `TestSMTPFallback_HungServerIsBounded`, `TestSMTPFallback_DialAndConversationShareOneDeadline` | a server that accepts TCP and never greets ⇒ `Send(..., smtpFallback=true)` errors within `NOTIFY_TIMEOUT` plus scheduling margin, never hangs; with a dial that itself costs 0.7 × `NOTIFY_TIMEOUT` the call still ends at ~1 × `NOTIFY_TIMEOUT`, not ~1.7 × (one shared deadline, not one per phase) |
 | 18 | `TestE2E` (`t.Skip` unless `SENTINEL_E2E=1`) | `apprise` and `mailrise` healthy; sending `report-watch-zfs-cksum.json` exits 0; an SMTP send to `omv@mailrise.xyz` with the configured auth succeeds |
 
 Cases 1–17 run offline and are the RED/GREEN gate.

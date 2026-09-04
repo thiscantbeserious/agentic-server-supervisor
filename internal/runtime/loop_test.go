@@ -853,13 +853,35 @@ func symlinkEscapeProbe(t *testing.T, link string) {
 // A missing agy-home, and a directory already under the cap, are both
 // normal (a fresh volume, an early tick) and must not error or delete.
 func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
-	logger := newLogger(testConfig(t, tick0))
-	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")}, logger)
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+	logger := newLogger(logCfg)
 
+	// A layout that is not agy's (or an absent home) must not be a silent
+	// no-op: at debug level the operator can tell "path wrong, growing"
+	// from "path right, nothing to do".
+	wrong := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wrong, ".gemini", "antigravity-v2", "log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pruneAgyLogs(&config.Config{AgyHome: wrong}, logger)
+	if got := logBuf.String(); !strings.Contains(got, "runtime agy dir not pruned dir=log") {
+		t.Errorf("wrong layout produced no debug signal:\n%s", got)
+	}
+
+	// The normal steady state, a correct path under the cap, logs
+	// nothing at all: no per-tick noise on a healthy volume.
+	logBuf.Reset()
 	home, base, _ := agyHomeFixture(t, 1)
 	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
 	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 1 {
 		t.Errorf("a directory under the cap must be left alone, got %d files", len(entries))
+	}
+	if got := logBuf.String(); got != "" {
+		t.Errorf("under-cap prune must be silent, got:\n%s", got)
 	}
 }
 

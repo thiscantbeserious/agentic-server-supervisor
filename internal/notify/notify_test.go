@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode"
@@ -777,7 +778,9 @@ func TestSMTPFallback_HungServerIsBounded(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer c.Close() // accepted, never greeted
+			// Deliberately deferred inside the loop: every accepted
+			// connection must stay open, unanswered, until the test ends.
+			defer c.Close()
 		}
 	}()
 
@@ -807,5 +810,61 @@ func TestSMTPFallback_HungServerIsBounded(t *testing.T) {
 	// bounded by NOTIFY_TIMEOUT itself, not by two of them in sequence.
 	if elapsed > cfg.NotifyTimeout+time.Second {
 		t.Fatalf("Send took %v against a hung SMTP server, want at most NOTIFY_TIMEOUT=%v plus scheduling margin", elapsed, cfg.NotifyTimeout)
+	}
+}
+
+// The dial and the conversation share ONE deadline. With a dial that
+// consumes most of NOTIFY_TIMEOUT, a conversation deadline started after
+// the dial would allow close to 2 x NOTIFY_TIMEOUT in total; a shared
+// deadline ends the whole call at NOTIFY_TIMEOUT. The liveness window
+// (C4) counts one NOTIFY_TIMEOUT per outbox item, so the difference is
+// the difference between that derivation being true and false.
+func TestSMTPFallback_DialAndConversationShareOneDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // accepted, never greeted, same as above
+		}
+	}()
+
+	const dialCost = 700 * time.Millisecond
+	smtpDialControl = func(network, address string, c syscall.RawConn) error {
+		time.Sleep(dialCost)
+		return nil
+	}
+	defer func() { smtpDialControl = nil }()
+
+	appriseStubSrv := newAppriseStub(t, 200)
+	cfg := notifyTestConfig(t, appriseStubSrv, newSMTPStub(t))
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	cfg.MailriseHost = host
+	cfg.MailrisePort, _ = strconv.Atoi(port)
+	cfg.NotifyTimeout = time.Second
+	r := loadFixture(t, "report-ok.json")
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- Send(context.Background(), cfg, r, true) }()
+	select {
+	case err = <-done:
+	case <-time.After(cfg.NotifyTimeout + 3*time.Second):
+		t.Fatal("Send did not return: the conversation is unbounded")
+	}
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Send returned nil against a server that never greets")
+	}
+	// Shared deadline: ~1.0 s. Sequential deadlines: dial 0.7 s + a fresh
+	// 1.0 s for the conversation = ~1.7 s. The bound sits between them.
+	if elapsed > cfg.NotifyTimeout+300*time.Millisecond {
+		t.Fatalf("Send took %v: dial and conversation are not sharing one NOTIFY_TIMEOUT deadline", elapsed)
 	}
 }
