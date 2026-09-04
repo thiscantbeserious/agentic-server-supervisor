@@ -3365,8 +3365,8 @@ func TestRunAgy_NonZeroExit_ErrorKeyWithoutStatus_NotSurfaced(t *testing.T) {
 }
 
 // The surfaced text is a log-line matter only. Driven through Run with
-// the real sink chain: the fallback report and the history file must not
-// carry it, the log line must, with the reason code for a crash.
+// the real sink chain: the fallback report must not carry it, the log
+// line must, with the reason code for a crash.
 func TestRun_AgyFailed_ErrorTextReachesLogOnly(t *testing.T) {
 	cfg := newTestConfig(t)
 	promptPath, schemaPath := agyStub(t, cfg, `{"status":"ERROR","response":"","error":"SENTINELMARKER boom","usage":{"input_tokens":0}}`, 1)
