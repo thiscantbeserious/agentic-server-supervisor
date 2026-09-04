@@ -1,4 +1,4 @@
-// loop.go: Loop(), startup preflight, agy-home seeding, the tick-seq
+// loop.go: Loop(), startup preflight, agy-home seeding and log pruning, the tick-seq
 // counter, and the signal-driven interval loop (R2).
 package runtime
 
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -195,6 +196,60 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 		logger.Warn("runtime could not write agy tool policy", "error", err)
 	}
 	os.Setenv("HOME", cfg.AgyHome)
+}
+
+// agyLogKeep is how many files survive in each of agy's log and crashes
+// directories. agy writes one cli log per invocation and a crash file per
+// abnormal exit, and never removes either, so on a 5-minute tick they grow
+// without bound in a persistent volume. Twenty of each is several hours of
+// ticks, enough to diagnose a failure that was noticed in the next report.
+const agyLogKeep = 20
+
+// pruneAgyLogs unlinks all but the newest agyLogKeep entries in agy's log
+// and crashes directories, oldest first by mtime. Their names carry a pid
+// and a uuid rather than only a timestamp, so mtime is the ordering that
+// holds for both.
+//
+// It never opens a file, only Stat and Remove. That is what keeps C7
+// intact: no byte of anything under $AGY_HOME, credential or prompt
+// content, ever enters this process. Deleting a file agy still has open is
+// safe, the fd stays valid until agy rotates, and the newest entry (the one
+// cli.log points at) is always among those kept.
+//
+// Every failure is ignored on purpose. This is housekeeping; a directory
+// that cannot be read or an entry that cannot be removed must never affect
+// a tick.
+func pruneAgyLogs(cfg *config.Config) {
+	base := filepath.Join(cfg.AgyHome, ".gemini", "antigravity-cli")
+	for _, sub := range []string{"log", "crashes"} {
+		dir := filepath.Join(base, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) <= agyLogKeep {
+			continue
+		}
+		type aged struct {
+			name string
+			mod  time.Time
+		}
+		files := make([]aged, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			files = append(files, aged{e.Name(), info.ModTime()})
+		}
+		if len(files) <= agyLogKeep {
+			continue
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+		for _, f := range files[agyLogKeep:] {
+			os.Remove(filepath.Join(dir, f.name))
+		}
+	}
 }
 
 // deniedAgyTools are the tool calls the analyzer must never make.
@@ -525,6 +580,7 @@ func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 		default:
 		}
 
+		pruneAgyLogs(cfg)
 		seq := nextTickSeq(cfg, logger)
 		// A tick already in flight gets 5s after shutdown is requested,
 		// then its context is cancelled (R2 step 6).

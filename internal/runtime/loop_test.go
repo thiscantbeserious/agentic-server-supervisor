@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -638,5 +639,94 @@ func TestSeedAgyHome_UnreadableFileDoesNotAbortSeed(t *testing.T) {
 	}
 	if !named {
 		t.Errorf("the skipped file was not reported; warnings were %v", w.msgs)
+	}
+}
+
+// agy writes one cli log per invocation and a crash file per abnormal
+// exit and never removes either, so on a 5-minute tick they grow without
+// bound in a persistent volume. The prune keeps a bounded window, ordered
+// by mtime because crash names carry a pid and a uuid rather than a
+// sortable timestamp, and it must never touch anything else under
+// $AGY_HOME, least of all the credential.
+func TestPruneAgyLogs(t *testing.T) {
+	home := t.TempDir()
+	base := filepath.Join(home, ".gemini", "antigravity-cli")
+	for _, sub := range []string{"log", "crashes"} {
+		if err := os.MkdirAll(filepath.Join(base, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The credential and an unrelated directory must survive untouched.
+	tokenPath := filepath.Join(base, "antigravity-oauth-token")
+	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base, "brain"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// 30 files per directory, deliberately named so that lexical order is
+	// the REVERSE of mtime order: a name-sorted prune would keep the wrong
+	// ones and this test would catch it.
+	newest := time.Now()
+	for _, sub := range []string{"log", "crashes"} {
+		for i := 0; i < 30; i++ {
+			name := filepath.Join(base, sub, "f"+strconv.Itoa(i)+".log")
+			if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// i=0 is the newest, i=29 the oldest.
+			mod := newest.Add(-time.Duration(i) * time.Minute)
+			if err := os.Chtimes(name, mod, mod); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	pruneAgyLogs(&config.Config{AgyHome: home})
+
+	for _, sub := range []string{"log", "crashes"} {
+		entries, err := os.ReadDir(filepath.Join(base, sub))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != agyLogKeep {
+			t.Errorf("%s: %d files remain, want %d", sub, len(entries), agyLogKeep)
+		}
+		for _, e := range entries {
+			var i int
+			if _, err := fmt.Sscanf(e.Name(), "f%d.log", &i); err != nil {
+				t.Fatalf("%s: unexpected file %q", sub, e.Name())
+			}
+			if i >= agyLogKeep {
+				t.Errorf("%s: kept %q, which is older than the newest %d", sub, e.Name(), agyLogKeep)
+			}
+		}
+	}
+
+	if data, err := os.ReadFile(tokenPath); err != nil || string(data) != "secret" {
+		t.Errorf("the credential must never be touched: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "brain")); err != nil {
+		t.Errorf("unrelated agy state must survive: %v", err)
+	}
+}
+
+// A missing agy-home, and a directory already under the cap, are both
+// normal (a fresh volume, an early tick) and must not error or delete.
+func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
+	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")})
+
+	home := t.TempDir()
+	dir := filepath.Join(home, ".gemini", "antigravity-cli", "log")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "only.log"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pruneAgyLogs(&config.Config{AgyHome: home})
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("a directory under the cap must be left alone, got %d files", len(entries))
 	}
 }
