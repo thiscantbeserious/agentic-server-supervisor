@@ -1,6 +1,7 @@
-// triage.go: the first model call. One attempt over all facts, one retry
-// with a correction appended if the answer fails validation, and the
-// classification of agy failures into fallback reasons.
+// triage.go: the first model call. Up to four attempts over all facts
+// inside one shared time budget, each retry carrying a correction when
+// there is something concrete to correct, and the classification of agy
+// failures into fallback reasons.
 //
 // The binding spec is contracts/analyze.md.
 package analyze
@@ -13,49 +14,109 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
 )
 
-// runTriage performs the first model call with one retry. The retry happens
-// only when the model answered but the answer failed parsing or validation,
-// or when a successful call inexplicably returned nothing; every other
-// failure class would fail identically again. The retry prompt appends the
-// concrete validation error from the first attempt: print mode is
-// stateless, so without it "your previous answer was invalid" carries no
-// information and the retry is a re-roll, not a correction.
+// maxTriageAttempts bounds the triage phase: one attempt and three
+// retries. A failed attempt is usually the model's own choice, a shell
+// command it was told it does not have, a self-correction turn that
+// concatenated into invalid JSON, and a re-roll rarely repeats it, so each
+// retry trades one cheap call for a fallback ALERT that a human then reads.
+const maxTriageAttempts = 4
+
+// TriageBudgetTimeouts is how many AGY_HARD_TIMEOUTs the whole triage
+// phase shares, retries included, and the term the health window counts
+// for it: a tick is bounded by configuration alone, so a retry must not
+// be able to add a full AGY_HARD_TIMEOUT of its own. An attempt that
+// spends its own hard timeout leaves room for at most one more; an
+// attempt started near the end of the budget is cut by the phase
+// deadline and classified agy_timeout like any other.
+const TriageBudgetTimeouts = 2
+
+func triageBudget(cfg *config.Config) time.Duration {
+	return TriageBudgetTimeouts * cfg.AgyHardTimeout
+}
+
+// deniedToolMarker is the envelope error agy emits when the model asked to
+// run a command and the tool-deny policy refused. In print mode the
+// refusal ends the turn with no report, so this is the one failure whose
+// correction must say what happened rather than what was wrong with the
+// answer.
+const deniedToolMarker = "permission check failed for command"
+
+// runTriage performs the triage attempts. Every failed attempt is retried
+// while the budget lasts, except the two whose outcome a retry cannot
+// change: an unauthenticated agy (the fix is a login) and an envelope
+// with zero input tokens (the prompt never reached the model). print mode
+// is stateless, so a retry that only repeats the prompt is a re-roll;
+// when the failure was the model's own doing the retry prompt appends the
+// concrete correction, the validator's message or the refused command.
 func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
-	rep, reason, err := agyAttempt(ctx, o, d, promptPath, schemaPath, 1, logger)
-	if rep != nil {
-		return rep, "", nil
-	}
-	retryEligible := reason == "invalid_json" || reason == "schema_invalid" ||
-		(reason == "agy_empty" && !errors.Is(err, errAgyEmptySystemic))
-	if err != nil && !retryEligible {
-		// dead binary / non-zero / timeout / systemic agy_empty: no retry.
-		return nil, reason, err
-	}
+	phaseCtx, cancel := context.WithTimeout(ctx, triageBudget(o.Cfg))
+	defer cancel()
 
-	logger.Info("triage invalid, retrying", "error", err)
-	correction, cerr := buildCorrection(err.Error())
-	if cerr != nil {
-		return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
-	}
-	retryPrompt := promptText + correction
-	if werr := os.WriteFile(promptPath, []byte(retryPrompt), 0o600); werr != nil {
-		return nil, "internal_error", fmt.Errorf("analyze: write correction prompt: %w", werr)
-	}
-
-	rep2, reason2, err2 := agyAttempt(ctx, o, d, promptPath, schemaPath, 2, logger)
-	if rep2 != nil {
-		return rep2, "", nil
-	}
-	if err2 != nil {
-		return nil, reason2, err2
+	var (
+		reason string
+		err    error
+	)
+	for attempt := 1; attempt <= maxTriageAttempts; attempt++ {
+		if attempt > 1 {
+			if phaseCtx.Err() != nil {
+				// The budget is spent: the last attempt's reason stands
+				// rather than a retry that could only time out.
+				break
+			}
+			logger.Info("triage retrying", "attempt", attempt, "reason", reason, "error", err)
+			correction, cerr := retryCorrection(reason, err)
+			if cerr != nil {
+				return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
+			}
+			// Rewritten from the base prompt every time, so corrections
+			// never accumulate: the model only needs the last failure.
+			if werr := os.WriteFile(promptPath, []byte(promptText+correction), 0o600); werr != nil {
+				return nil, "internal_error", fmt.Errorf("analyze: write correction prompt: %w", werr)
+			}
+		}
+		var rep *report.Report
+		rep, reason, err = agyAttempt(phaseCtx, o, d, promptPath, schemaPath, attempt, logger)
+		if rep != nil {
+			return rep, "", nil
+		}
+		if errors.Is(err, context.Canceled) || !retryable(reason, err) {
+			return nil, reason, err
+		}
 	}
 	return nil, reason, err
+}
+
+// retryable rules out the two failures a retry cannot change.
+func retryable(reason string, err error) bool {
+	return reason != "agy_unauth" && !errors.Is(err, errAgyPromptNotDelivered)
+}
+
+// retryCorrection is the block appended to the retry prompt after the
+// failure described by reason and err: the denied-tool correction when
+// the error carries a refused command, the validator correction after an
+// answer that failed parsing or validation, nothing otherwise. The
+// refused command is agy-derived text and reaches the prompt only in the
+// bounded one-line form agyErrorText produces, the same bound the log
+// line has; it never reaches a report.
+func retryCorrection(reason string, err error) (string, error) {
+	msg := err.Error()
+	if i := strings.Index(msg, deniedToolMarker); i >= 0 {
+		// The refusal is the tail of the wrapped error; the wrapping's
+		// own closing quote or parenthesis is not part of it.
+		return buildCorrection("", agyErrorText(strings.TrimRight(msg[i:], `)"`)))
+	}
+	if reason == "invalid_json" || reason == "schema_invalid" {
+		return buildCorrection(msg, "")
+	}
+	return "", nil
 }
 
 // agyAttempt runs one agy call and classifies the outcome. On success the
@@ -80,9 +141,9 @@ func agyAttempt(ctx context.Context, o Options, d Deps, promptPath, schemaPath s
 	}
 	logger.Info("triage", "attempt", attempt, "rc", 0, "bytes", len(out))
 
-	// Decode the envelope first: status != "SUCCESS", an empty/whitespace
-	// response, or zero input_tokens is a dropped prompt (agy_empty), not
-	// a model that legitimately said nothing. Only after this check does
+	// Decode the envelope first: a failed status, an empty/whitespace
+	// response, or zero input_tokens is no answer (agy_empty), not a model
+	// that legitimately said nothing. Only after this check does
 	// normalisation/decoding touch the model's own answer.
 	response, structuredOutput, everr := decodeAgyEnvelope(out)
 	if everr != nil {

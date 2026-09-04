@@ -19,10 +19,9 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 )
 
-// agy failure classes. The split exists because retrying is only ever
-// useful when the model answered badly: a missing binary, a hard timeout,
-// a non-zero exit, or an unauthenticated agy will fail identically on the
-// second attempt, and retrying those only doubles the outage window.
+// agy failure classes. The split exists for the fallback's reason code
+// and for the two failures a retry cannot change: an unauthenticated agy
+// and a prompt that never reached the model.
 var (
 	errAgyMissing = errors.New("agy: binary not found")
 	errAgyTimeout = errors.New("agy: killed by hard timeout")
@@ -31,15 +30,16 @@ var (
 	// errAgyUnauth: agy's stderr shows an OAuth prompt. Headless mode
 	// cannot complete an OAuth flow, so this persists until a human
 	// re-authenticates; the fallback names that fix instead of sending a
-	// 3am reader to check a healthy binary.
+	// 3am reader to check a healthy binary, and no retry can change it.
 	errAgyUnauth = errors.New("agy: not authenticated")
 
-	// errAgyEmptySystemic: the envelope reports a failed call or zero
-	// input tokens, the prompt never reached a model that answered, so a
-	// retry would re-run the identical broken invocation. An empty response
-	// from a call that did spend tokens is the one empty-output case that
-	// is plausibly transient and stays retry-eligible.
-	errAgyEmptySystemic = errors.New("agy: envelope reports failure or zero input tokens")
+	// errAgyPromptNotDelivered: the envelope reports zero input tokens,
+	// so the prompt never reached a model at all (too large, malformed
+	// invocation, dropped stdout), a fault of the invocation that a retry
+	// would repeat identically. A failed status with tokens spent is a
+	// turn that went wrong after the model saw the prompt and stays
+	// retry-eligible.
+	errAgyPromptNotDelivered = errors.New("agy: envelope reports zero input tokens")
 )
 
 // agyEnvelope is agy's --output-format json wrapper. agy has an open
@@ -70,9 +70,9 @@ type agyEnvelope struct {
 // silently drops stdout in non-TTY contexts, exactly how this package
 // spawns it, returning exit 0 with nothing, so a bare read cannot tell
 // "no response" from "response lost". The envelope makes it distinguishable:
-// a failed status or zero input tokens means the prompt never reached the
-// model (not retryable); a successful, token-spending call with an empty
-// response is plausibly a transient drop (retryable).
+// zero input tokens means the prompt never reached the model
+// (errAgyPromptNotDelivered, not retryable); any other failed or empty
+// envelope is a turn that went wrong and is retried.
 //
 // It returns both response (agy's free-text answer, subject to fence
 // normalisation) and structuredOutput (agy's own schema-validated result,
@@ -80,20 +80,32 @@ type agyEnvelope struct {
 func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, err error) {
 	var env agyEnvelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return "", nil, fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
+		return "", nil, fmt.Errorf("envelope: %v", err)
 	}
 	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
+		class := error(nil)
+		if env.Usage.InputTokens == 0 {
+			class = errAgyPromptNotDelivered
+		}
 		// The error field is surfaced only from a document that is an
 		// envelope, one that carries a status.
 		if reason := agyErrorText(env.Error); reason != "" && env.Status != "" {
-			return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d error=%q", errAgyEmptySystemic, env.Status, env.Usage.InputTokens, reason)
+			return "", nil, wrapClass(class, fmt.Sprintf("status=%q input_tokens=%d error=%q", env.Status, env.Usage.InputTokens, reason))
 		}
-		return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
+		return "", nil, wrapClass(class, fmt.Sprintf("status=%q input_tokens=%d", env.Status, env.Usage.InputTokens))
 	}
 	if strings.TrimSpace(env.Response) == "" {
 		return "", nil, fmt.Errorf("empty response (status=%q input_tokens=%d)", env.Status, env.Usage.InputTokens)
 	}
 	return env.Response, env.StructuredOutput, nil
+}
+
+// wrapClass prefixes detail with the failure class when there is one.
+func wrapClass(class error, detail string) error {
+	if class == nil {
+		return errors.New(detail)
+	}
+	return fmt.Errorf("%w: %s", class, detail)
 }
 
 // normalizeAgyOutput trims whitespace and strips a single leading ```json

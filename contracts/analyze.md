@@ -14,7 +14,7 @@
 | D4 | `SENTINEL_HOME` does not exist. Prompt and schema are embedded; the schema is materialised to `$TMPDIR` per run because `agy` needs a path. | Kills the `/app` vs `/opt/sentinel` gap by construction. |
 | D5 | `analyze` does **not** compute a dedup key of its own. It calls `dedup.Key(component, evidence)`, the single algorithm of C6, and injects the result. `state` consumes it and never recomputes. | Fixes the three-algorithm split; `analyze`'s NEW-probe and `state`'s `active-alerts/` now agree by construction. |
 | D6 | `analyze` reads facts through `internal/facts` typed structs, probing `Section.Err` before touching data. | A failed `kernel` section must not silently empty the fallback body. |
-| D7 | No retry when `agy` exits non-zero, is missing, or is killed by timeout, the retry covers malformed output only (PLAN §2.2 says "1 retry" unconditionally). | A retry cannot fix a dead binary; it doubles the outage window. |
+| D7 | Every failed triage attempt is retried, up to three retries per tick (four attempts), inside one shared time budget of 2 × `AGY_HARD_TIMEOUT` for the whole phase, except the two failures a retry cannot change: an unauthenticated `agy` (`agy_unauth`) and an envelope with `usage.input_tokens == 0`. A retry after the model's own answer failed carries a correction (the validator's message, or the command a refused tool call asked for); after any other failure the prompt is repeated unchanged (PLAN §2.2 says "1 retry" unconditionally). | Measured on the deployed host, a failed attempt is usually a model choice (a shell command it was told it does not have, a self-correction turn concatenated into invalid JSON) that a re-roll rarely repeats, so a retry trades one cheap call for a fallback ALERT a human reads. A login and a prompt that never reached the model fail identically on every retry and only lengthen the outage. The shared budget keeps the tick, and with it the liveness window, bounded exactly as with two attempts. |
 | D8 | The deep-dive security-boundary block names **all three** fenced blocks (HISTORY, FINDING, DEEP CONTEXT), not just FACTS. | Every fence carries attacker-controllable data. |
 | D9 | `analyze` sets `meta.hostname` and `meta.tick_seq` on every report it produces, from `Options.Cfg.Hostname` and `Options.Seq`. | `notify` needs a hostname it did not have to re-resolve; `state`/`runtime` need the tick correlation. Single writer. |
 | D10 | No markdown anywhere in report text. `body` is plain prose. | `notify` strips `` ` `` `_` `*` `[` `]` from every report-derived string (C8); markdown authored here would be destroyed. |
@@ -180,22 +180,23 @@ Per C2:
 
 | Failure mode | Exact behaviour |
 |---|---|
-| `agy` not found (`exec.LookPath` fails) | skip both attempts, fallback `reason=agy_missing` |
-| `agy` exits non-zero / quota message | no retry (D7), fallback `reason=agy_failed` |
-| `agy` killed by `AGY_HARD_TIMEOUT` | fallback `reason=agy_timeout` |
-| output empty or not JSON after fence normalisation | attempt 2 with the CORRECTION suffix; still bad ⇒ fallback `reason=invalid_json` |
-| output parses but fails `report.Validate` | attempt 2 with the CORRECTION suffix; still invalid ⇒ fallback `reason=schema_invalid` |
+| `agy` not found (`exec.LookPath` fails) | retried like any other failure (each attempt fails on the path lookup, no process is spawned); exhausted ⇒ fallback `reason=agy_missing` |
+| `agy` exits non-zero / quota message | retried (D7) with the prompt unchanged, or with the denied-tool CORRECTION when the envelope error names a refused command; exhausted ⇒ fallback `reason=agy_failed` |
+| `agy` killed by `AGY_HARD_TIMEOUT` | retried while the phase budget lasts; exhausted ⇒ fallback `reason=agy_timeout` |
+| output empty or not JSON after fence normalisation | retry with the CORRECTION suffix; still bad after the last attempt ⇒ fallback `reason=invalid_json` |
+| output parses but fails `report.Validate` | retry with the CORRECTION suffix; still invalid after the last attempt ⇒ fallback `reason=schema_invalid` |
+| `agy` not authenticated, or the envelope reports zero input tokens | no retry (D7): fallback `reason=agy_unauth`, or `reason=agy_empty` |
 | deep dive fails in any way (deep collect error/timeout/empty, second agy call bad or invalid, key mismatch) | **non-fatal.** The validated triage report is returned unchanged, `slog` `deep-dive failed, keeping triage report`, no error. Enrichment is never a gate. |
 | `.meta.collector_errors[]` non-empty | the prompt instructs one `watch` finding with `component:"meta"` per distinct error. Not enforced by the validator; asserted by test 15. |
 | facts document oversized | already truncated by `collect`; injected verbatim, no second truncation |
 | `${STATE_DIR}` unwritable or absent | deep-queue bookkeeping skipped with an `slog` note; analysis proceeds. Never fatal. |
 
-**Fallback report, exact document.** The machine-readable reason code `<CODE>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`} is what `slog` records on stderr (C7). The document itself carries `<REASON>`, the human phrase this fixed table maps the code to:
+**Fallback report, exact document.** The machine-readable reason code `<CODE>` ∈ {`agy_missing`,`agy_failed`,`agy_timeout`,`invalid_json`,`schema_invalid`} is what `slog` records on stderr (C7); after retries it is the **last** attempt's reason, the one an operator can act on now. The document itself carries `<REASON>`, the human phrase this fixed table maps the code to:
 
 | `<CODE>` (stderr) | `<REASON>` (report text) |
 |---|---|
 | `agy_missing` | analyzer binary not found |
-| `agy_failed` | analyzer exited non-zero; the log line carries the envelope's `error` when stdout holds one |
+| `agy_failed` | analyzer exited non-zero; the log line carries the envelope's `error` when stdout holds one, and a retry's correction names the refused command when that error is a denied tool call |
 | `agy_timeout` | analyzer timed out |
 | `invalid_json` | analyzer output was not valid JSON |
 | `schema_invalid` | analyzer output failed schema validation |
@@ -273,12 +274,17 @@ The fallback is passed through `report.Validate` before being returned; if that 
 ```mermaid
 flowchart TD
     A[nonce + history window] --> C[assemble triage prompt]
-    C --> D[agy attempt 1]
+    C --> D["agy attempt n, n = 1..4<br/>phase budget 2 × AGY_HARD_TIMEOUT"]
     D -->|parse/validate ok| G[inject keys + meta]
-    D -->|dead binary/timeout/non-zero| F[fallback]
-    D -->|bad JSON or invalid| E[agy attempt 2 + CORRECTION]
-    E -->|ok| G
-    E -->|bad| F
+    D -->|agy_unauth or input_tokens == 0| F[fallback, last reason]
+    D -->|any other failure| R{attempts left<br/>and budget left?}
+    R -->|no| F
+    R -->|yes, bad JSON or invalid| E1[CORRECTION: validator message]
+    R -->|yes, envelope error names a refused command| E2[CORRECTION: denied tool call]
+    R -->|yes, other| E3[prompt unchanged]
+    E1 --> D
+    E2 --> D
+    E3 --> D
     F --> X2["return (report, err) → tick exits 3"]
     G --> H{deep-dive candidate?}
     H -->|no| W["return (report, nil)"]
@@ -323,7 +329,7 @@ flowchart TD
 
    **Trade-off, accepted and recorded:** an argv prompt is visible in `/proc/<pid>/cmdline`, which is world-readable, and container processes appear in the host process table, so attacker-controlled journal text is briefly exposed to any local user, which C7's "facts content never leaves the process" would otherwise forbid. agy offers no stdin, file, or environment channel for the prompt (checked against 1.1.13 and the headless docs), so there is no alternative that keeps it private; `/proc/<pid>/environ` would be `0400` owner-only if agy ever gains an env-var input. `bam` is a single-admin host and `PROMPT_MAX_BYTES` keeps the argument far below `ARG_MAX` (2 MiB on Linux). Accepted; revisit if agy adds another input channel.
 
-   **The prompt is an argv argument.** Verified against agy 1.1.13 on 2026-08-16 and confirmed by the official headless documentation: print mode ignores stdin entirely, piping a prompt in produces a hallucinated answer to an empty question, while the same text as an argument answers correctly. A prompt file is still written to `${TMPDIR}` for debugging and for the attempt-2 append, but it is passed by value, not by handle.
+   **The prompt is an argv argument.** Verified against agy 1.1.13 on 2026-08-16 and confirmed by the official headless documentation: print mode ignores stdin entirely, piping a prompt in produces a hallucinated answer to an empty question, while the same text as an argument answers correctly. A prompt file is still written to `${TMPDIR}` for debugging and for the retry append, but it is passed by value, not by handle.
 
    **`--output-format json` is mandatory, and its envelope must be validated.** agy has an open upstream defect ([antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76)) where `--print` silently drops stdout in non-TTY contexts, pipes and subprocesses, which is exactly how `sentinel` invokes it, returning exit 0 with nothing on stdout, so a caller cannot distinguish "no response" from "response lost". The JSON envelope makes that distinguishable:
 
@@ -334,9 +340,9 @@ flowchart TD
 
    Decode the envelope first. Treat as a **failed attempt** (reason `agy_empty`): `status != "SUCCESS"`, an empty or whitespace-only `response`, or `usage.input_tokens == 0`.
 
-   **Retry only the transient shape.** `usage.input_tokens == 0` means the prompt never reached the model at all, a systematic fault (too large, malformed invocation, dropped stdout), so retrying doubles the outage window for a call that will fail identically; that is exactly what D7 forbids, and it makes an argv-class bug take twice as long to surface. `SUCCESS` with non-zero tokens but an empty `response` is plausibly the transient #76 drop and **is** retry-eligible. `status != "SUCCESS"` follows the D7 rule for the underlying cause: no retry.
+   **Zero input tokens are not retried.** `usage.input_tokens == 0` means the prompt never reached the model at all, a systematic fault (too large, malformed invocation, dropped stdout), so retrying lengthens the outage for a call that will fail identically, which is what D7 excludes, and it makes an argv-class bug take longer to surface. Every other failed envelope spent tokens on a turn that went wrong after the model saw the prompt: `SUCCESS` with an empty `response` (plausibly the transient #76 drop) and a `CANCELED`/`ERROR` status alike are retried under step 5.
 
-   **The envelope's `error` field is surfaced, bounded.** agy exits non-zero with an **empty stderr** and the reason in the stdout envelope's `error` field (measured on 1.1.26: `{"status":"ERROR","response":"","error":"timeout waiting for response",...}` with exit 1, and the same shape for an invalid model; the field is present on the pinned 1.1.18 too, the deployed host's unauthenticated envelope recorded next to `isAgyAuthFailure` carries it), and a `CANCELED`/`ERROR` envelope on a clean exit carries it too. Both paths include that text in the returned error, hence in the `fallback report built` log line, as one line of at most 200 runes with control characters stripped, and only after the authentication check has run. It is the one piece of subprocess output that reaches a log line; stdout that is not an envelope (a panic trace) is never echoed. Reporting only `exit status 1 (stderr 0 bytes)` had hidden the cause of every crash on the deployed host for two days.
+   **The envelope's `error` field is surfaced, bounded.** agy exits non-zero with an **empty stderr** and the reason in the stdout envelope's `error` field (measured on 1.1.26: `{"status":"ERROR","response":"","error":"timeout waiting for response",...}` with exit 1, and the same shape for an invalid model; the field is present on the pinned 1.1.18 too, the deployed host's unauthenticated envelope recorded next to `isAgyAuthFailure` carries it), and a `CANCELED`/`ERROR` envelope on a clean exit carries it too. Both paths include that text in the returned error, hence in the `fallback report built` log line, as one line of at most 200 runes with control characters stripped, and only after the authentication check has run. It is the one piece of subprocess output that reaches a log line, and, when it names a refused command, the one piece that reaches a retry prompt (step 5); stdout that is not an envelope (a panic trace) is never echoed. Reporting only `exit status 1 (stderr 0 bytes)` had hidden the cause of every crash on the deployed host for two days.
 
    **Authentication failures get their own reason.** When agy's stderr contains an OAuth prompt (`Authentication required`, `accounts.google.com/o/oauth2`), the reason is `agy_unauth` → "analyzer not authenticated", not `agy_failed`. Headless mode cannot complete an OAuth flow, so this state persists until a human re-authenticates and is worth naming precisely: "analyzer exited non-zero" sends the 3am reader to check a healthy binary, while "analyzer not authenticated" names the actual fix. A dropped prompt reports `SUCCESS` with `response: ""` and zero tokens, which is otherwise indistinguishable from a model that chose to say nothing.
 
@@ -349,18 +355,32 @@ flowchart TD
    - No upstream channel publishes envelope/interface changes specifically; `agy changelog` and the CLI's `CHANGELOG.md` were checked and do not mention `structured_output`, `response`, or this concatenation. The general product changelog is the closest thing to a signal and is not a substitute for re-verifying this section on every version the image is built against.
 
    **Decode order: `structured_output` first, `response` second.** When the envelope carries a non-empty `structured_output`, decode and validate that; only when it is absent, empty, or itself fails `report.Validate` (no exemption for having come from the documented field) does normalisation fall through to `response` unchanged, below. This is not a guess at which field to trust: `structured_output` is the field agy's own documentation names as the schema-enforced result, and it was clean in every sample taken; `response` remains necessary because it is the only field an older agy without `structured_output` provides at all, and because it *is* what a single-turn call on a current agy routinely uses. Then normalise `response`: trim space, strip a leading ```` ```json ```` or ```` ``` ```` fence line and a trailing fence line. Then `json.Unmarshal` into `report.Report`, then `report.Validate`. Log which field produced the report (`via=structured_output` or `via=response`), a field name, never content, so C7 holds.
-5. **Attempt 2**, only on parse/validate failure (D7). Same prompt file with this block appended verbatim, then repeat step 4 exactly once:
-   ```
-   ===== CORRECTION =====
-   Your previous answer failed validation: ${VALIDATION_ERROR}
-   Output ONE JSON object only - no prose, no markdown fence, no explanation
-   before or after it. It must match the schema exactly: required keys status,
-   headline, body, findings, resolved; no additional keys; status must equal the
-   highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
-   not emit "key", "meta", "first_seen" or "occurrences".
-   ```
-   `${VALIDATION_ERROR}` is the concrete error the first attempt produced, `err.Error()` from the failed `json.Unmarshal` or `report.Validate` (e.g. `report: headline: 94 runes exceeds maximum 80`), truncated to 300 runes. `--print` mode is stateless, so the model has no memory of its previous answer: without the actual error, "your previous answer was not valid" carries no information and the retry is a re-roll rather than a correction. The error text is generated by our own validator and contains no facts content, so C7 is not at risk.
-6. **Failure ⇒ fallback** per §5; return it with a non-nil error.
+5. **Retries.** After a failed attempt that is neither `agy_unauth` nor a zero-token envelope (D7), step 4 is repeated, up to three times, while the phase budget lasts: the whole triage phase, retries included, runs under one `context.WithTimeout(parent, 2 × AGY_HARD_TIMEOUT)`, each attempt additionally under its own `AGY_HARD_TIMEOUT`. An attempt cut by the phase deadline is `agy_timeout` like any other; once the budget is spent no further attempt starts, and the last attempt's reason stands. A parent cancellation ends the phase at once, with no report (step 4). Every retry's log line is `triage retrying attempt=<n> reason=<code> error=<cause>`, and every attempt's own lines carry `attempt=<n>`, so a tick's four calls can be told apart.
+
+   The prompt file is rewritten from the base prompt for every retry, so corrections never accumulate, and carries one of three suffixes, chosen by the failure that preceded it:
+
+   - **The answer failed parsing or validation** (`invalid_json`, `schema_invalid`): this block, verbatim:
+     ```
+     ===== CORRECTION =====
+     Your previous answer failed validation: ${VALIDATION_ERROR}
+     Output ONE JSON object only - no prose, no markdown fence, no explanation
+     before or after it. It must match the schema exactly: required keys status,
+     headline, body, findings, resolved; no additional keys; status must equal the
+     highest finding severity (alert -> ALERT, watch -> WATCH, otherwise OK). Do
+     not emit "key", "meta", "first_seen" or "occurrences".
+     ```
+     `${VALIDATION_ERROR}` is the concrete error the attempt produced, `err.Error()` from the failed `json.Unmarshal` or `report.Validate` (e.g. `report: headline: 94 runes exceeds maximum 80`), truncated to 300 runes. `--print` mode is stateless, so the model has no memory of its previous answer: without the actual error, "your previous answer was not valid" carries no information and the retry is a re-roll rather than a correction. The error text is generated by our own validator and contains no facts content, so C7 is not at risk.
+   - **The envelope error names a refused tool call** (it contains `permission check failed for command`, measured on the deployed host as `permission check failed for command "pwd": user denied permission to run command: pwd`, exit 1, empty stderr): the same block with the first line replaced by
+     ```
+     Your previous attempt produced no report: it asked to run a command, and the
+     request was refused (${REFUSAL}).
+     You have no tools. A tool call aborts the analysis and produces no report, so
+     no command you request will ever run or return anything. Do not request a
+     command; answer from FACTS alone.
+     ```
+     `${REFUSAL}` is the envelope error from the marker to its end, agy-derived text and therefore bounded before it enters the prompt exactly as it is before it enters the log line: one line, control characters stripped, at most 200 runes (C7). It reaches the model only, never a report or a notification. The deny policy is what refuses the command, as designed (`runtime` writes it into agy's settings); in print mode agy treats the refusal as fatal and exits 1 with no answer, so the retry has to say what happened, `role.md`'s "You have no tools" alone measured insufficient.
+   - **Anything else** (a non-zero exit with another cause, a timeout, a missing binary, a failed or empty envelope with tokens spent): no suffix, the prompt is repeated unchanged; there is nothing concrete to correct and a re-roll is what the retry is.
+6. **Failure ⇒ fallback** per §5 once the attempts or the budget are exhausted; return it with a non-nil error.
 7. **Inject keys, meta and resolved.** Drop any model-supplied `key`, `first_seen`, `occurrences` and `meta`; set `f.Key = dedup.Key(f.Component, f.Evidence)` for every finding (D5) and `rep.Meta = &report.Meta{Hostname: cfg.Hostname, TickSeq: o.Seq}` (D9). `info` findings with component `meta` are excluded from the resolve diff: the quiet-tick finding's evidence is model free-text and rephrases freely, so its keys churn tick to tick, and letting them into `resolved[]` pollutes its 20-entry cap and asks `state` to announce that normality was resolved. The exclusion is scoped to `meta`, not to all of `info`, because a finding the model de-escalated to `info` before it vanished still needs its key in the diff; skipping it would swallow its all-clear silently and leave its record to the stale reap.
 
    **`resolved` is computed in Go and overwrites whatever the model emitted.** It is the set difference `eligibleKeys \ currentKeys`: every key present in the newest **eligible** history document but absent from this tick's findings, emitted as **the key itself**, the 16-hex `dedup.Key` value, matching `^[0-9a-f]{16}$`. Keys are already unique and already shared with `state`, so no truncation and no emptiness check apply. Sorted for determinism, capped at the schema's 20 items.
@@ -720,7 +740,7 @@ Table-driven, hermetic, offline. `RunAgy` is replaced by a table-supplied func r
 | 3 | **ZFS CKSUM ⇒ WATCH + analysis + recommendation, not ALERT** | `facts-zfs-cksum.json`, empty `active-alerts/`, stub in two-call mode | no error; `Status=="WATCH"`; the `zfs` finding has `Severity=="watch"`, non-empty `Analysis` **and** `Recommendation`; `Recommendation` contains `zpool clear`; `CollectDeep` called exactly once with `"zfs"` |
 | 4 | agy stubbed away ⇒ fallback ALERT | `Cfg.AgyBin="/nonexistent"`, `DefaultDeps`, facts with a priority-2 kernel entry | error non-nil; `Status=="ALERT"`; `Headline=="Analyzer unavailable"`; `Body` contains the raw crit message; `Validate` passes; exactly one finding, `Component=="meta"`, `Key` matches `^[0-9a-f]{16}$` |
 | 4b | failed kernel section in the fallback (D6) | facts whose `kernel` section is `{"error":"…"}`, agy missing | fallback `Evidence` names the section error instead of being empty; `Validate` passes |
-| 5 | broken JSON ⇒ retry + fallback | stub returns `not json` on both calls | error non-nil; stub call count == 2; fallback document; stderr contains `reason=invalid_json` |
+| 5 | broken JSON ⇒ retries + fallback | stub returns `not json` on every call | error non-nil; stub call count == 4; fallback document; stderr contains `reason=invalid_json` |
 | 5b | retry succeeds | stub returns `not json`, then a valid report | no error; call count == 2; report equals the call-2 document plus injected `key` and `meta` |
 | 6 | deep-dive cap | facts yielding **three** NEW `zfs`/`kernel`/`smart` findings | `CollectDeep` called exactly once; `deep-queue/` contains exactly 2 files named with the other two keys |
 | 7 | not-new ⇒ no deep-dive | case 3's facts, `active-alerts/<zfs key>.json` pre-created | `CollectDeep` called **zero** times; no error; report valid |
@@ -738,6 +758,10 @@ Table-driven, hermetic, offline. `RunAgy` is replaced by a table-supplied func r
 | 16 | the NEWEST emerg/crit lines survive the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing. Run it twice: once with short synthetic messages and once with **realistic ~80-rune kernel lines**, so the rune budget actually binds in one of the two | `Evidence` holds at most `RAW_ALERT_MAX_LINES` lines, is ≤ 900 runes, `Validate` passes, and, the assertion that matters, the **newest** protected line is always present while the dropped ones are the oldest. When the 900-rune budget binds before the line count does, lines are dropped from the **oldest** end and the newest is still there. Asserting only the count would pass while carrying exactly the wrong 20 lines |
 | 17 | no markdown authored (D10) | the reports from cases 1–4 | no `` ` ``, `_`, `*`, `[`, `]` in `headline`, `body`, `explanation`, `analysis`, `recommendation` or `resolved[]`, `notify`'s sanitizer is a no-op on analyzer output |
 | 18 | envelope error surfaced | a stub agy printing an `ERROR` envelope with `error` and exiting 1; non-envelope stdout (a panic trace, or JSON with an `error` key but no `status`); an OAuth-shaped `error`; a `CANCELED` envelope on exit 0; a 500-rune multi-line error; a short error with `\n`, `\t`, `\r`, NUL, ESC, DEL, C1 controls, NEL, U+2028 and a bidi override; and `Run` end to end with a crashing stub | `agy_failed` whose message carries the text; plain `exit status 1`, nothing echoed; still `agy_unauth`, text not echoed; `agy_empty` with the text; at most 200 runes; one line with all of them gone; `reason=agy_failed` and the text in the log line, and not in the report |
+| 19 | retry budget (D7) | a script of a non-zero exit, a timeout and `not json`, then a valid report; a script of `not json`, a non-zero exit, a timeout and an 81-rune headline, then a valid report | four calls, no error, the fourth document, `triage attempt=<n>` and `triage retrying attempt=<n> reason=<code>` for every attempt, no CORRECTION after the agy failures and the validator CORRECTION after `not json`; four calls, error, fallback with `reason=schema_invalid` (the last attempt's) and its phrase in the body |
+| 19b | exclusions (D7) | `agy_unauth`; `SUCCESS` and `ERROR` envelopes with `input_tokens: 0`; each followed by a valid report; a `CANCELED` envelope with tokens spent, then a valid report | one call and the fallback for each of the three; two calls and the report for the fourth |
+| 19c | denied-tool correction (C7) | a refused command of 300+ runes with an embedded newline, then `not json`, then a refused `pwd` twice | attempt 2's prompt carries exactly one CORRECTION naming the refusal, cut at 200 runes on one line, the tool-call consequence and the JSON-only instruction, and not "failed validation"; attempt 3's carries the validator correction and no refusal; attempt 4's names attempt 3's refusal whole; the report carries neither the command nor the envelope text; the fallback log line carries the last refusal |
+| 19d | shared phase budget (C4) | `AGY_HARD_TIMEOUT` of 30 ms, a stub that blocks until its context ends | exactly 2 calls, the phase ends near 2 × `AGY_HARD_TIMEOUT`, fallback `reason=agy_timeout`; a stub that cancels the parent on call 2 ⇒ `context.Canceled`, nil report, 2 calls |
 
 ---
 

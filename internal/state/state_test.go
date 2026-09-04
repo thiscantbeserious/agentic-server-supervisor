@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/analyze"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
@@ -2021,13 +2022,20 @@ func TestHealthWindow_TracksTickBudget(t *testing.T) {
 	if got, want := HealthWindow(cfg), 2120*time.Second; got != want {
 		t.Fatalf("HealthWindow = %v, want %v", got, want)
 	}
+	// The agy term is the triage phase budget plus one deep dive, tied
+	// to analyze's own constant rather than restated here.
+	if got, want := HealthWindow(cfg)-satMul(analyze.TriageBudgetTimeouts+1, cfg.AgyHardTimeout), 1490*time.Second; got != want {
+		t.Fatalf("HealthWindow = %v, want %v", got, want)
+	}
 
 	s := newStore(t, cfg)
 	mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b"}))
 	hb := filepath.Join(cfg.StateDir, "heartbeat")
 	// A heartbeat that is the longest legal tick plus the interval old
-	// (80 + 15 + 420 + 30 + 210 + 15 + 750 + 300 = 1820 s) is healthy;
-	// one past the window is not.
+	// (80 collect + 15 raw notify + 420 triage phase, whatever the number
+	// of attempts inside it + 30 deep collect + 210 deep dive + 15 notify
+	// + 750 drain + 300 interval = 1820 s) is healthy; one past the window
+	// is not.
 	inside := cfg.Now.Add(-1820 * time.Second)
 	if err := os.Chtimes(hb, inside, inside); err != nil {
 		t.Fatal(err)

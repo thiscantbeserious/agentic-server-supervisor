@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/analyze"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/collect"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/dedup"
@@ -566,9 +567,10 @@ func (s *Store) Health() error {
 // TICK_INTERVAL, and a window shorter than the longest legal tick makes
 // the healthcheck raise a false alarm in exactly the slow-analyzer regime
 // the supervisor exists to survive. The longest legal tick is bounded by
-// configuration alone: sequential collect, a raw-alert notify, three agy
-// calls at AGY_HARD_TIMEOUT (two triage attempts, one deep dive), the deep
-// collect, the decision notify, and an outbox drain of up to OUTBOX_MAX
+// configuration alone: sequential collect, a raw-alert notify, the triage
+// phase (up to four agy attempts sharing analyze.TriageBudgetTimeouts x
+// AGY_HARD_TIMEOUT), one deep dive at AGY_HARD_TIMEOUT, the deep collect,
+// the decision notify, and an outbox drain of up to OUTBOX_MAX
 // deliveries. One extra TICK_INTERVAL is margin for the sub-second steps.
 // Every term is checked: a configuration whose budget does not fit a
 // Duration yields the maximum Duration, never a wrapped negative that
@@ -576,7 +578,7 @@ func (s *Store) Health() error {
 func HealthWindow(cfg *config.Config) time.Duration {
 	w := satAdd(satMul(2, cfg.TickInterval), satMul(collect.TickSections, cfg.SectionTimeout))
 	w = satAdd(w, cfg.DeepTimeout)
-	w = satAdd(w, satMul(3, cfg.AgyHardTimeout))
+	w = satAdd(w, satMul(analyze.TriageBudgetTimeouts+1, cfg.AgyHardTimeout))
 	deliveries := int64(cfg.OutboxMax) // OUTBOX_MAX has no upper bound in config
 	if deliveries > math.MaxInt64-2 {
 		deliveries = math.MaxInt64

@@ -111,7 +111,7 @@ sentinel health
 
 `--loop` together with `--once`, any unknown flag, any positional argument ⇒ exit `64`.
 
-`sentinel health` takes no flags: exit `0` iff `$STATE_DIR/heartbeat` exists and its mtime is younger than `HEALTH_WINDOW` (`state.HealthWindow`: 2 × TICK_INTERVAL + 8 × SECTION_TIMEOUT + DEEP_TIMEOUT + 3 × AGY_HARD_TIMEOUT + (2 + OUTBOX_MAX) × NOTIFY_TIMEOUT), else `1`. It is the compose healthcheck and reads nothing else.
+`sentinel health` takes no flags: exit `0` iff `$STATE_DIR/heartbeat` exists and its mtime is younger than `HEALTH_WINDOW` (`state.HealthWindow`: 2 × TICK_INTERVAL + 8 × SECTION_TIMEOUT + DEEP_TIMEOUT + 3 × AGY_HARD_TIMEOUT + (2 + OUTBOX_MAX) × NOTIFY_TIMEOUT; the agy term is the triage phase's shared budget of `analyze.TriageBudgetTimeouts` = 2 hard timeouts, however many attempts run inside it, plus one deep dive), else `1`. It is the compose healthcheck and reads nothing else.
 
 **Orchestration is in-process.** `tick` calls `collect.Run`, `analyze.Run`, `state.Process`, `notify.Send` as Go functions (C8). Only `journalctl`, `sensors -j` and `agy` are exec'd, each under `context.WithTimeout`. There is no exit-code round-tripping between components.
 
