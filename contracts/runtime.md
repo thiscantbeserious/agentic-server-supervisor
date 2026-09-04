@@ -305,7 +305,7 @@ services:
     user: "10001:10001"
     group_add: ["${JOURNAL_GID:?JOURNAL_GID missing, run install.sh}"]
     pids_limit: 256
-    mem_limit: 512m
+    mem_limit: 1g
     stop_grace_period: 15s
     environment:
       TICK_INTERVAL: "${TICK_INTERVAL:-300}"
@@ -325,8 +325,8 @@ services:
       AGY_BIN: "agy"
       AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
       AGY_SECRET_DIR: "/run/secrets/agy"
-      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-120s}"
-      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-150s}"
+      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-240s}"
+      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-270s}"
       HISTORY_N: "${HISTORY_N:-5}"
       HISTORY_KEEP: "${HISTORY_KEEP:-50}"
       DEEP_ENABLED: "${DEEP_ENABLED:-1}"
@@ -612,7 +612,7 @@ internal/runtime/
   tick.go       // Tick(), TickResult, step orchestration
   rawalert.go   // Candidates(), BuildRawReport(), marker suppression + TTL sweep
   fallback.go   // CollectorUnavailable(), the ONLY fallback runtime authors
-  loop.go       // Loop(): preflight, agy-home seeding, tick-seq, signals
+  loop.go       // Loop(): preflight, agy-home seeding, agy log pruning, tick-seq, signals
   health.go     // Health(): heartbeat mtime check
 ```
 

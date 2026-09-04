@@ -156,10 +156,10 @@ func Load() (*Config, error) {
 	// first container restart (contracts/runtime.md, live-gate finding).
 	cfg.AgyHome = loadString("AGY_HOME", "/state/agy-home")
 	cfg.AgySecretDir = loadString("AGY_SECRET_DIR", "/run/secrets/agy")
-	if cfg.AgyPrintTimeout, err = loadDuration("AGY_PRINT_TIMEOUT", "120s"); err != nil {
+	if cfg.AgyPrintTimeout, err = loadDuration("AGY_PRINT_TIMEOUT", "240s"); err != nil {
 		return nil, err
 	}
-	if cfg.AgyHardTimeout, err = loadDuration("AGY_HARD_TIMEOUT", "150s"); err != nil {
+	if cfg.AgyHardTimeout, err = loadDuration("AGY_HARD_TIMEOUT", "270s"); err != nil {
 		return nil, err
 	}
 	if min := cfg.AgyPrintTimeout + 30*time.Second; cfg.AgyHardTimeout < min {

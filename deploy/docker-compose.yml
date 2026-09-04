@@ -25,7 +25,14 @@ services:
     user: "10001:10001"
     group_add: ["${JOURNAL_GID:?JOURNAL_GID missing, run install.sh}"]
     pids_limit: 256
-    mem_limit: 512m
+    # agy is a ~205MB binary holding a prompt of tens of thousands of
+    # tokens plus a streaming response; at 512m the cgroup sat exactly on
+    # its ceiling (memory.peak == memory.max) and reclaimed continuously
+    # instead of running, which is what made analyze miss its timeout.
+    # memory.peak is censored at memory.max, so this value is a first
+    # step, not a measured demand: after a day, if memory.peak is again
+    # pinned at the limit, it is still too low.
+    mem_limit: 1g
     stop_grace_period: 15s
     environment:
       TICK_INTERVAL: "${TICK_INTERVAL:-300}"
@@ -45,8 +52,8 @@ services:
       AGY_BIN: "agy"
       AGY_HOME: "/state/agy-home"   # persistent volume, never tmpfs (token refresh)
       AGY_SECRET_DIR: "/run/secrets/agy"
-      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-120s}"
-      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-150s}"
+      AGY_PRINT_TIMEOUT: "${AGY_PRINT_TIMEOUT:-240s}"
+      AGY_HARD_TIMEOUT: "${AGY_HARD_TIMEOUT:-270s}"
       HISTORY_N: "${HISTORY_N:-5}"
       HISTORY_KEEP: "${HISTORY_KEEP:-50}"
       DEEP_ENABLED: "${DEEP_ENABLED:-1}"
