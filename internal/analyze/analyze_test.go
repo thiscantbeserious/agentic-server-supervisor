@@ -3328,3 +3328,53 @@ func TestAgyErrorText_IsBoundedAndOneLine(t *testing.T) {
 		t.Error("blank error must surface as empty, not as whitespace")
 	}
 }
+
+// Short input, so every stripped character is observable: the bound test
+// above cuts at 200 runes before the control characters at its tail would
+// ever be compared.
+func TestAgyErrorText_StripsControlChars(t *testing.T) {
+	got := agyErrorText("line1\nline2\ttab\rcr\x00nul\x1b[31mansi\x7fdel")
+	if want := "line1 line2 tab crnul[31mansidel"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Unicode line separators and a bidi override: the log format writes
+	// values raw, so anything a reader or a shipper treats as a line or
+	// direction break must not survive.
+	got = agyErrorText("a\u0085b\u2028c\u2029d\u202ee\u200bf")
+	if want := "a b c def"; got != want {
+		t.Errorf("unicode separators: got %q, want %q", got, want)
+	}
+}
+
+// The surfaced text is a log-line matter only. Driven through Run with
+// the real sink chain: the fallback report and the history file must not
+// carry it, the log line must, with the reason code for a crash.
+func TestRun_AgyFailed_ErrorTextReachesLogOnly(t *testing.T) {
+	cfg := newTestConfig(t)
+	promptPath, schemaPath := agyStub(t, cfg, `{"status":"ERROR","response":"","error":"SENTINELMARKER boom","usage":{"input_tokens":0}}`, 1)
+	_ = promptPath
+	_ = schemaPath
+	buf := captureLog(t)
+
+	rep, err := Run(context.Background(), Options{Cfg: cfg, Facts: factsClean(1), Seq: 1}, DefaultDeps(cfg))
+	if err == nil {
+		t.Fatal("Run() with a crashing agy must return an error alongside the fallback")
+	}
+	if rep == nil {
+		t.Fatal("Run() must still return the fallback report")
+	}
+	log := buf.String()
+	if !strings.Contains(log, "reason=agy_failed") || !strings.Contains(log, "SENTINELMARKER") {
+		t.Fatalf("log must carry reason=agy_failed and the envelope error:\n%s", log)
+	}
+	out, _ := json.Marshal(rep)
+	if strings.Contains(string(out), "SENTINELMARKER") {
+		t.Fatalf("the fallback report must not carry agy's error text: %s", out)
+	}
+	files, _ := filepath.Glob(filepath.Join(cfg.StateDir, "**", "*"))
+	for _, f := range files {
+		if b, err := os.ReadFile(f); err == nil && strings.Contains(string(b), "SENTINELMARKER") {
+			t.Fatalf("%s carries agy's error text", f)
+		}
+	}
+}
