@@ -77,29 +77,40 @@ func TestInstallSh_AptInstallNeverRemoves(t *testing.T) {
 // the duration of its own run. apt-get's default is to fail at once
 // when the lock is taken ("Could not get lock /var/lib/dpkg/lock-
 // frontend. It is held by process N (unattended-upgr)"), which turned a
-// timing coincidence into a whole failed install run, both in the VM
-// gate and on a real host. `-o DPkg::Lock::Timeout=N` makes apt wait
-// instead. Every real invocation is checked, including the simulated
-// one (`apt-get install -s` still takes the lock when run as root,
-// which this script always is), for the same reason
-// TestInstallSh_AptInstallNeverRemoves checks every call rather than
-// one known site.
+// timing coincidence into a whole failed install run, in vm-e2e-omv and
+// on a real host. `-o DPkg::Lock::Timeout=N` makes the real install
+// wait instead. Every line that invokes apt-get is held to it, not one
+// known call site, so a call added later in any shape (`sudo apt-get`,
+// `if apt-get`, `apt-get -y install`) is caught, for the same reason
+// TestInstallSh_AptInstallNeverRemoves checks every call.
 func TestInstallSh_AptWaitsForLock(t *testing.T) {
 	src := readInstallSh(t)
-	// A real invocation only, at the start of a statement, an `if !`
-	// test, or a `var="$(` capture. Comments, the dry-run preview line
-	// and the "apt-get install failed" message do not touch the lock.
-	re := regexp.MustCompile(`(?m)^\s*(?:if !\s*|\w+="\$\(\s*)?apt-get (?:install|update)\b.*$`)
-	calls := re.FindAllString(src, -1)
+	// Comments and echoed strings (the dry-run preview, the "apt-get
+	// install failed" message) do not touch the lock and are skipped by
+	// their leading word; `command -v apt-get` is skipped because
+	// nothing option-like follows the name.
+	invocation := regexp.MustCompile(`\bapt-get\s+[-a-z]`)
+	var calls []string
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "echo ") {
+			continue
+		}
+		if invocation.MatchString(line) {
+			calls = append(calls, line)
+		}
+	}
 	if len(calls) < 5 {
-		t.Fatalf("found %d apt-get invocations in install.sh, want at least 5 (curl update+install, step1 update, simulation, step1 install); the regex above no longer matches the script's shape: %q", len(calls), calls)
+		t.Fatalf("found %d apt-get invocations in install.sh, want at least 5 (curl update+install, step1 update, simulation, step1 install); the scan above no longer matches the script's shape: %q", len(calls), calls)
 	}
 	for _, call := range calls {
 		if !strings.Contains(call, `-o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT"`) {
-			t.Errorf("apt-get call does not wait for the dpkg lock, a concurrent unattended-upgrades run fails it outright: %q", call)
+			t.Errorf("apt-get call does not carry the dpkg lock timeout: %q", call)
 		}
 	}
-	if !regexp.MustCompile(`(?m)^APT_LOCK_TIMEOUT=\d+$`).MatchString(src) {
-		t.Error("APT_LOCK_TIMEOUT is not defined once as a plain integer constant at top level")
+	// 300 is the number the install contract states; a different value
+	// here without a contract change is the contract going stale.
+	if !regexp.MustCompile(`(?m)^APT_LOCK_TIMEOUT=300$`).MatchString(src) {
+		t.Error("APT_LOCK_TIMEOUT=300 is not defined at top level, the value the install contract names")
 	}
 }

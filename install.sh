@@ -123,17 +123,21 @@ fi
 
 TRANSIENT_FAIL=0
 
-# Seconds every apt-get call waits for the dpkg frontend lock instead of
-# failing at once. unattended-upgrades runs daily on Debian and
-# OpenMediaVault hosts and holds that lock for its whole run; without a
-# wait, an install landing inside that window fails with "Could not get
-# lock /var/lib/dpkg/lock-frontend" (exit 75, retry-safe, but a whole
-# run lost to a timing coincidence). The option needs apt 1.9.11 or
-# newer, which every supported host has (Debian bookworm ships 2.6).
-# The simulated `apt-get install -s` gets it too: as root, which this
-# script always is, simulation still takes the lock. Timeout kept clearly
-# above one unattended-upgrades run so a real hang, not a normal run, is
-# what exhausts it.
+# Seconds apt-get waits for the dpkg frontend lock instead of failing at
+# once. unattended-upgrades runs daily on Debian and OpenMediaVault
+# hosts and holds that lock for its whole run; without a wait, an
+# install landing inside that window fails with "Could not get lock
+# /var/lib/dpkg/lock-frontend" (exit 75, retry-safe, but a whole run
+# lost to a timing coincidence). The option needs apt 1.9.11 or newer,
+# which every supported host has (Debian bookworm ships 2.6). Only the
+# real `apt-get install` contends for that lock: `apt-get install -s`
+# runs with locking disabled (Debug::NoLocking, per apt-get(8)) and
+# `apt-get update` takes /var/lib/apt/lists/lock, which this option
+# does not cover (both measured on bookworm and trixie). The option is
+# still passed on every call so the rule "each apt-get call carries it"
+# holds without exceptions to remember; on those calls it is inert.
+# Kept clearly above one unattended-upgrades run so a stuck lock, not a
+# normal run, is what exhausts it.
 APT_LOCK_TIMEOUT=300
 
 # Whether the package each later step depends on is actually present.
@@ -772,7 +776,7 @@ ensure_curl() {
     return 0
   fi
   if [ "$CHECK" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    echo "$PROG: curl is not installed, cannot fetch the stack files (would run: apt-get install -y curl)" >&2
+    echo "$PROG: curl is not installed, cannot fetch the stack files (would run: apt-get install -o DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT -y --no-install-recommends --no-remove curl)" >&2
     return 1
   fi
   apt-get update -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -qq || true
