@@ -789,13 +789,23 @@ func TestSMTPFallback_HungServerIsBounded(t *testing.T) {
 	cfg.NotifyTimeout = time.Second
 	r := loadFixture(t, "report-ok.json")
 
+	// Send runs in a goroutine so a regression fails here, in seconds,
+	// rather than hanging the whole package to its test timeout.
 	start := time.Now()
-	err = Send(context.Background(), cfg, r, true)
+	done := make(chan error, 1)
+	go func() { done <- Send(context.Background(), cfg, r, true) }()
+	select {
+	case err = <-done:
+	case <-time.After(cfg.NotifyTimeout + 3*time.Second):
+		t.Fatalf("Send did not return within NOTIFY_TIMEOUT+3s against a hung SMTP server: the conversation is unbounded")
+	}
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("Send against a hung SMTP server returned nil, want an error")
 	}
-	if elapsed > 3*cfg.NotifyTimeout {
-		t.Fatalf("Send took %v against a hung SMTP server, want it bounded by NOTIFY_TIMEOUT=%v", elapsed, cfg.NotifyTimeout)
+	// Dial and conversation share one deadline, so the whole call is
+	// bounded by NOTIFY_TIMEOUT itself, not by two of them in sequence.
+	if elapsed > cfg.NotifyTimeout+time.Second {
+		t.Fatalf("Send took %v against a hung SMTP server, want at most NOTIFY_TIMEOUT=%v plus scheduling margin", elapsed, cfg.NotifyTimeout)
 	}
 }

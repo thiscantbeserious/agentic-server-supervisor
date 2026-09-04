@@ -375,7 +375,7 @@ func TestHealth(t *testing.T) {
 		t.Errorf("fresh heartbeat: code=%d err=%v, want 0, nil", code, err)
 	}
 
-	// Backdate the heartbeat past 3x TICK_INTERVAL relative to cfg.Now.
+	// Backdate the heartbeat past state.HealthWindow relative to cfg.Now.
 	stale := cfg.Now.Add(-state.HealthWindow(cfg) - time.Minute)
 	if err := os.Chtimes(hb, stale, stale); err != nil {
 		t.Fatal(err)
@@ -895,5 +895,27 @@ func TestLoop_PrunesAgyLogsEachTick(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 20 {
 		t.Errorf("after one Loop tick: %d log files, want 20 (prune not wired into Loop)", len(entries))
+	}
+}
+
+// The --once command calls Tick directly, never Loop, and C4 promises the
+// prune before each tick; a prune wired into Loop alone would skip it.
+func TestTick_PrunesAgyLogs(t *testing.T) {
+	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+	home, base, _ := agyHomeFixture(t, 30)
+	cfg.AgyHome = home
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	Tick(context.Background(), cfg, 0, d)
+
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 20 {
+		t.Errorf("after one direct Tick: %d log files, want 20 (prune not wired into Tick)", len(entries))
 	}
 }

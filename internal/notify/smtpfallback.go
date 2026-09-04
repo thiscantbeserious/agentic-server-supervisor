@@ -38,21 +38,23 @@ func (a plainAuthNoTLS) Next(_ []byte, more bool) ([]byte, error) {
 
 func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) error {
 	addr := net.JoinHostPort(cfg.MailriseHost, strconv.Itoa(cfg.MailrisePort))
-	dialer := net.Dialer{Timeout: cfg.NotifyTimeout}
+	// One absolute deadline for the dial and the conversation together.
+	// A dial timeout alone leaves the exchange unbounded (ctx is consumed
+	// by DialContext), so a server that accepts TCP and never greets
+	// would hold this call, the outbox drain and the whole tick; and a
+	// second deadline started after the dial would allow 2 x
+	// NOTIFY_TIMEOUT per item, which is not the term the liveness window
+	// (C4) counts. Sharing one instant makes dial plus every read and
+	// write fit inside NOTIFY_TIMEOUT, the same bound the apprise path
+	// gets from http.Client.Timeout.
+	deadline := time.Now().Add(cfg.NotifyTimeout)
+	dialer := net.Dialer{Deadline: deadline}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
-	// The dialer's timeout covers the connect only, and ctx is consumed by
-	// DialContext; nothing below would otherwise bound the conversation. A
-	// server that accepts TCP and never sends its greeting would then hold
-	// this call, the outbox drain and the whole tick forever. One deadline
-	// on the connection bounds every read and write of the exchange at
-	// NOTIFY_TIMEOUT, which is the term the liveness window (C4) counts
-	// per outbox item; the whole conversation, not only the dial, now
-	// fits inside it.
-	_ = conn.SetDeadline(time.Now().Add(cfg.NotifyTimeout))
+	_ = conn.SetDeadline(deadline)
 
 	client, err := smtp.NewClient(conn, cfg.MailriseHost)
 	if err != nil {

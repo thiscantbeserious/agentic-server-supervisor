@@ -109,6 +109,13 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
+      # The heartbeat file only exists after the first tick's state step.
+      # The longest legal first tick is preflight (up to 2 x
+      # SECTION_TIMEOUT) + collect (8 x SECTION_TIMEOUT) + raw-alert notify
+      # + two triage attempts and one deep dive at AGY_HARD_TIMEOUT + deep
+      # collect, about 780 s at the defaults; only after this period do
+      # the retries start counting, so a slow analyzer on a cold start is
+      # not reported unhealthy.
       start_period: 900s
     logging:
       driver: json-file

@@ -1,4 +1,4 @@
-// loop.go: Loop(), startup preflight, agy-home seeding and log pruning, the tick-seq
+// loop.go: Loop(), startup preflight, agy-home seeding and its log pruning, the tick-seq
 // counter, and the signal-driven interval loop (R2).
 package runtime
 
@@ -604,7 +604,6 @@ func Loop(ctx context.Context, cfg *config.Config, d Deps) (int, error) {
 		default:
 		}
 
-		pruneAgyLogs(cfg, logger)
 		seq := nextTickSeq(cfg, logger)
 		// A tick already in flight gets 5s after shutdown is requested,
 		// then its context is cancelled (R2 step 6).
