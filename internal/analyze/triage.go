@@ -56,7 +56,7 @@ const deniedToolMarker = "permission check failed for command"
 // is stateless, so a retry that only repeats the prompt is a re-roll;
 // when the failure was the model's own doing the retry prompt appends the
 // concrete correction, the validator's message or the refused command.
-func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
+func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText, nonce string, logger *slog.Logger) (*report.Report, string, error) {
 	phaseCtx, cancel := context.WithTimeout(ctx, triageBudget(o.Cfg))
 	defer cancel()
 
@@ -77,7 +77,7 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 				break
 			}
 			logger.Info("triage retrying", "attempt", attempt, "reason", reason, "error", err)
-			correction, cerr := retryCorrection(reason, err)
+			correction, cerr := retryCorrection(nonce, reason, err)
 			if cerr != nil {
 				return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
 			}
@@ -108,10 +108,11 @@ func retryable(reason string, err error) bool {
 // failure described by reason and err: the denied-tool correction when
 // agy's envelope error names a refused command, the validator correction
 // after an answer that failed parsing or validation, nothing otherwise.
-// The refused command is agy-derived text and reaches the prompt only in
-// the bounded one-line form agyErrorText produces, the same bound the log
-// line has; it never reaches a report.
-func retryCorrection(reason string, err error) (string, error) {
+// The refused command is agy-derived text and the validator message echoes
+// model-supplied values; both are quoted into the prompt as data inside
+// the run's nonce fences, in the bounded one-line form agyErrorText
+// produces for the refusal, and never reach a report.
+func retryCorrection(nonce, reason string, err error) (string, error) {
 	// The marker is trusted only inside agy's own envelope error, read
 	// structurally. A validator message echoes model-supplied values, and
 	// facts content reaches the model, so a marker found by searching a
@@ -119,11 +120,11 @@ func retryCorrection(reason string, err error) (string, error) {
 	// branch.
 	if text, ok := envelopeErrorOf(err); ok {
 		if i := strings.Index(text, deniedToolMarker); i >= 0 {
-			return buildCorrection("", text[i:])
+			return buildCorrection(nonce, "", text[i:])
 		}
 	}
 	if reason == "invalid_json" || reason == "schema_invalid" {
-		return buildCorrection(err.Error(), "")
+		return buildCorrection(nonce, err.Error(), "")
 	}
 	return "", nil
 }
