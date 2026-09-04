@@ -92,7 +92,11 @@ func newNonce() (string, error) {
 // with agyErrorText first, one line of at most 200 runes.
 func buildCorrection(nonce, validationErr, deniedTool string) (string, error) {
 	var b strings.Builder
-	data := promptData{Nonce: nonce, ValidationError: truncRunes(validationErr, 300), DeniedTool: deniedTool}
+	// The validator message is quoted as one line inside the fence: the
+	// same control-character strip the refusal gets, then the length
+	// bound, so a model-authored newline in an echoed value can never put
+	// a forged fence marker at the start of a line.
+	data := promptData{Nonce: nonce, ValidationError: truncRunes(agyErrorText(validationErr), 300), DeniedTool: deniedTool}
 	if err := promptTmpl.ExecuteTemplate(&b, "correction", data); err != nil {
 		return "", err
 	}
