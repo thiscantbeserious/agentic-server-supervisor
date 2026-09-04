@@ -251,7 +251,9 @@ func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 		}
 		files := make([]aged, 0, len(entries))
 		for _, e := range entries {
-			if e.IsDir() {
+			// Regular files only: a directory, a symlink or a socket agy
+			// leaves here is neither counted against the cap nor removed.
+			if !e.Type().IsRegular() {
 				continue
 			}
 			info, err := root.Lstat(filepath.Join(dir, e.Name()))

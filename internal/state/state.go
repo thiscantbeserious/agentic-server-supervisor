@@ -552,8 +552,26 @@ func (s *Store) Health() error {
 		now = s.cfg.Now
 	}
 
-	if now.Sub(info.ModTime()) > 3*s.cfg.TickInterval {
+	if now.Sub(info.ModTime()) > HealthWindow(s.cfg) {
 		return errors.New("heartbeat stale")
 	}
 	return nil
+}
+
+// HealthWindow is how old the heartbeat may be before Health reports the
+// supervisor dead (S.3f, C11). The heartbeat is rewritten inside every
+// tick, so the gap between two writes is the tick's own duration plus
+// TICK_INTERVAL, and a window shorter than the longest legal tick makes
+// the healthcheck raise a false alarm in exactly the slow-agy regime the
+// supervisor exists to survive. The longest legal tick is bounded by
+// configuration: three agy calls at AGY_HARD_TIMEOUT (two triage
+// attempts, one deep dive), and an outbox drain of up to OUTBOX_MAX
+// deliveries at NOTIFY_TIMEOUT each, both after or around the heartbeat
+// write. 3 x TICK_INTERVAL covers the interval itself plus collect,
+// deep collect and the two direct notifies with room to spare. At the
+// defaults: 900 + 630 + 750 = 2280 s.
+func HealthWindow(cfg *config.Config) time.Duration {
+	return 3*cfg.TickInterval +
+		3*cfg.AgyHardTimeout +
+		time.Duration(cfg.OutboxMax)*cfg.NotifyTimeout
 }

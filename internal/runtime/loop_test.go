@@ -18,6 +18,7 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 // --- Critical item #2: tick MUST nil-check analyze.Run's report before
@@ -375,7 +376,7 @@ func TestHealth(t *testing.T) {
 	}
 
 	// Backdate the heartbeat past 3x TICK_INTERVAL relative to cfg.Now.
-	stale := cfg.Now.Add(-4 * cfg.TickInterval)
+	stale := cfg.Now.Add(-state.HealthWindow(cfg) - time.Minute)
 	if err := os.Chtimes(hb, stale, stale); err != nil {
 		t.Fatal(err)
 	}
@@ -698,8 +699,22 @@ func TestPruneAgyLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A symlink inside log/ pointing at the credential: not a regular
+	// file, so it is neither counted nor removed, and its target is never
+	// touched. Its mtime is left as created (os.Chtimes would follow the
+	// link and age the credential instead); a prune that counted it would
+	// keep it as the newest entry and evict one real file, which the
+	// regular-file count below catches.
+	link := filepath.Join(base, "log", "stale-link")
+	if err := os.Symlink(token, link); err != nil {
+		t.Fatal(err)
+	}
+
 	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(testConfig(t, tick0)))
 
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("a symlink inside log/ must be left alone: %v", err)
+	}
 	for _, sub := range []string{"log", "crashes"} {
 		entries, err := os.ReadDir(filepath.Join(base, sub))
 		if err != nil {
@@ -707,7 +722,7 @@ func TestPruneAgyLogs(t *testing.T) {
 		}
 		files := 0
 		for _, e := range entries {
-			if e.IsDir() {
+			if !e.Type().IsRegular() {
 				continue
 			}
 			files++

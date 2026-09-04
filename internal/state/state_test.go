@@ -266,9 +266,9 @@ func TestS3_Health(t *testing.T) {
 		t.Errorf("fresh heartbeat: Health() = %v, want nil", err)
 	}
 
-	// Stale: mtime backdated past 3*TickInterval relative to cfg.Now.
+	// Stale: mtime backdated past HealthWindow relative to cfg.Now.
 	hbPath := filepath.Join(cfg.StateDir, "heartbeat")
-	stale := cfg.Now.Add(-3*cfg.TickInterval - time.Second)
+	stale := cfg.Now.Add(-HealthWindow(cfg) - time.Second)
 	if err := os.Chtimes(hbPath, stale, stale); err != nil {
 		t.Fatal(err)
 	}
@@ -1313,12 +1313,12 @@ func TestLiveness(t *testing.T) {
 	// Backdate the file relative to cfg.Now (not real wall-clock time,
 	// cfg.Now is year 2000, so comparing against time.Now() would always
 	// read as stale for the wrong reason).
-	stale := cfg.Now.Add(-3*cfg.TickInterval - time.Minute)
+	stale := cfg.Now.Add(-HealthWindow(cfg) - time.Minute)
 	if err := os.Chtimes(hbPath, stale, stale); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Health(); err == nil {
-		t.Error("Health() after backdating past 3xTickInterval: got nil, want error")
+		t.Error("Health() after backdating past HealthWindow: got nil, want error")
 	}
 }
 
@@ -2004,5 +2004,39 @@ func TestProcess_LegacyRecordWithoutMaxNotifiedSeverityKeepsAllClear(t *testing.
 	d := mustProcess(t, s, b)
 	if !d.Notify || d.Reason != "all_clear" || len(d.Report.Resolved) != 1 || d.Report.Resolved[0] != "Legacy headline" {
 		t.Errorf("legacy record resolve: notify=%v reason=%s resolved=%v, want the legacy all-clear", d.Notify, d.Reason, d.Report.Resolved)
+	}
+}
+
+// The health window is derived from the same configuration that bounds a
+// tick, so a longer legal tick can never outrun it: three agy calls at
+// AGY_HARD_TIMEOUT plus a full outbox drain, on top of 3 x TICK_INTERVAL.
+// At the shipped defaults that is 900 + 630 + 750 = 2280 s.
+func TestHealthWindow_TracksTickBudget(t *testing.T) {
+	cfg := testConfig(t, time.Unix(1_700_000_000, 0))
+	cfg.AgyHardTimeout = 210 * time.Second
+	cfg.OutboxMax = 50
+	cfg.NotifyTimeout = 15 * time.Second
+	if got, want := HealthWindow(cfg), 2280*time.Second; got != want {
+		t.Fatalf("HealthWindow = %v, want %v", got, want)
+	}
+
+	s := newStore(t, cfg)
+	mustProcess(t, s, marshalReport(t, &report.Report{Status: "OK", Headline: "h", Body: "b"}))
+	hb := filepath.Join(cfg.StateDir, "heartbeat")
+	// A heartbeat that is the worst legal tick old (1820 s: 80 + 15 + 420
+	// + 30 + 210 + 15 + 750 + 300) is healthy; one past the window is not.
+	inside := cfg.Now.Add(-1820 * time.Second)
+	if err := os.Chtimes(hb, inside, inside); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err != nil {
+		t.Errorf("worst legal tick must still be healthy: %v", err)
+	}
+	past := cfg.Now.Add(-HealthWindow(cfg) - time.Second)
+	if err := os.Chtimes(hb, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Health(); err == nil {
+		t.Error("past the window: Health() = nil, want error")
 	}
 }
