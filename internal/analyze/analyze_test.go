@@ -3225,3 +3225,106 @@ func TestRun_ResolvedSkipsInfoFindings(t *testing.T) {
 		t.Errorf("Resolved = %v, want the de-escalated non-meta info key %q: the exclusion is scoped to meta, not all of info", rep.Resolved, deescKey)
 	}
 }
+
+// --- agy's envelope error is evidence, not noise ---
+
+// agyStub writes an executable that prints the given stdout and exits with
+// the given code, and returns paths for a prompt and a schema next to it.
+func agyStub(t *testing.T, cfg *config.Config, stdout string, exit int) (promptPath, schemaPath string) {
+	t.Helper()
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\nprintf '%s' '" + strings.ReplaceAll(stdout, "'", `'\''`) + "'\nexit " + strconv.Itoa(exit) + "\n"
+	stubPath := filepath.Join(binDir, "agy")
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgyBin = stubPath
+	promptPath = filepath.Join(binDir, "prompt.txt")
+	schemaPath = filepath.Join(binDir, "schema.json")
+	if err := os.WriteFile(promptPath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return promptPath, schemaPath
+}
+
+// When agy fails it exits 1, writes nothing to stderr, and prints an
+// envelope on stdout whose `error` field carries the reason. Reporting
+// only "stderr 0 bytes" throws that reason away; on the deployed host
+// that hid the cause of every crash for two days.
+func TestRunAgy_NonZeroExit_SurfacesEnvelopeError(t *testing.T) {
+	cfg := newTestConfig(t)
+	env := `{"conversation_id":"x","status":"ERROR","response":"","error":"timeout waiting for response","duration_seconds":0,"num_turns":1,"usage":{"input_tokens":0,"output_tokens":0}}`
+	promptPath, schemaPath := agyStub(t, cfg, env, 1)
+
+	_, err := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if !errors.Is(err, errAgyFailed) {
+		t.Fatalf("err = %v, want errAgyFailed", err)
+	}
+	if !strings.Contains(err.Error(), "timeout waiting for response") {
+		t.Fatalf("err = %q, want it to carry the envelope's error text", err)
+	}
+}
+
+// Stdout that is not an envelope keeps the plain exit message; nothing
+// from an unknown stdout shape is echoed into the log.
+func TestRunAgy_NonZeroExit_NonEnvelopeStdout_KeepsPlainMessage(t *testing.T) {
+	cfg := newTestConfig(t)
+	promptPath, schemaPath := agyStub(t, cfg, "panic: something went wrong\ngoroutine 1 [running]:", 1)
+
+	_, err := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if !errors.Is(err, errAgyFailed) || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("err = %v, want errAgyFailed with the exit status", err)
+	}
+	if strings.Contains(err.Error(), "panic") || strings.Contains(err.Error(), "goroutine") {
+		t.Fatalf("err = %q: raw non-envelope stdout must not be echoed", err)
+	}
+}
+
+// The authentication classification still wins over the envelope text,
+// and the OAuth text is not echoed.
+func TestRunAgy_NonZeroExit_AuthEnvelope_StillUnauth(t *testing.T) {
+	cfg := newTestConfig(t)
+	env := `{"status":"ERROR","response":"","error":"authentication failed or timed out","usage":{"input_tokens":0}}`
+	promptPath, schemaPath := agyStub(t, cfg, env, 1)
+
+	_, err := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if !errors.Is(err, errAgyUnauth) {
+		t.Fatalf("err = %v, want errAgyUnauth", err)
+	}
+	if strings.Contains(err.Error(), "authentication failed or timed out") {
+		t.Fatalf("err = %q: the OAuth text must not be echoed", err)
+	}
+}
+
+// A non-SUCCESS envelope on a clean exit carries its error too: the
+// CANCELED and ERROR shapes seen on the deployed host said why, and the
+// decoder dropped it.
+func TestDecodeAgyEnvelope_SurfacesError(t *testing.T) {
+	_, _, err := decodeAgyEnvelope([]byte(`{"status":"CANCELED","response":"","error":"stream dropped by server","usage":{"input_tokens":28390}}`))
+	if !errors.Is(err, errAgyEmptySystemic) {
+		t.Fatalf("err = %v, want errAgyEmptySystemic", err)
+	}
+	if !strings.Contains(err.Error(), "stream dropped by server") {
+		t.Fatalf("err = %q, want the envelope's error text", err)
+	}
+}
+
+// The surfaced text is one bounded line: agy's error can quote model
+// output or prompt content, so it is cut to 200 runes and stripped of
+// newlines and control characters before it reaches a log line.
+func TestAgyErrorText_IsBoundedAndOneLine(t *testing.T) {
+	long := strings.Repeat("é", 500) + "\nsecond line\x00\x1b[31m"
+	got := agyErrorText(long)
+	if n := len([]rune(got)); n > 200 {
+		t.Errorf("surfaced error is %d runes, want at most 200", n)
+	}
+	if strings.ContainsAny(got, "\n\r\t\x00\x1b") {
+		t.Errorf("surfaced error carries a newline or control character: %q", got)
+	}
+	if agyErrorText("   \n  ") != "" {
+		t.Error("blank error must surface as empty, not as whitespace")
+	}
+}

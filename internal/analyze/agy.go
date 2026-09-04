@@ -59,6 +59,7 @@ type agyEnvelope struct {
 	Status           string          `json:"status"`
 	Response         string          `json:"response"`
 	StructuredOutput json.RawMessage `json:"structured_output"`
+	Error            string          `json:"error"`
 	Usage            struct {
 		InputTokens int64 `json:"input_tokens"`
 	} `json:"usage"`
@@ -82,6 +83,9 @@ func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, er
 		return "", nil, fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
 	}
 	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
+		if reason := agyErrorText(env.Error); reason != "" {
+			return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d error=%q", errAgyEmptySystemic, env.Status, env.Usage.InputTokens, reason)
+		}
 		return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
 	}
 	if strings.TrimSpace(env.Response) == "" {
@@ -195,14 +199,56 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 		return nil, fmt.Errorf("%w: stderr %d bytes", errAgyUnauth, agyErr.Len())
 	}
 	if runErr != nil {
+		// agy exits non-zero with an empty stderr and the reason in the
+		// stdout envelope's error field; without it the log says only
+		// "exit status 1" and the cause is lost.
+		if reason := envelopeErrorText(out.Bytes()); reason != "" {
+			return nil, fmt.Errorf("%w: %v (stderr %d bytes, agy: %s)", errAgyFailed, runErr, agyErr.Len(), reason)
+		}
 		return nil, fmt.Errorf("%w: %v (stderr %d bytes)", errAgyFailed, runErr, agyErr.Len())
 	}
 	return out.Bytes(), nil
 }
 
+// envelopeErrorText returns the bounded error text of an agy envelope in
+// out, or "" when out is not an envelope or carries no error. Nothing
+// else from stdout is ever surfaced: a panic trace or any other shape
+// stays out of the log.
+func envelopeErrorText(out []byte) string {
+	var env agyEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return ""
+	}
+	return agyErrorText(env.Error)
+}
+
+// agyErrorText makes agy's error field safe for a log line: one line, no
+// control characters, at most 200 runes. The field is agy's own
+// diagnostic but can quote model output or prompt content, so it is the
+// one piece of subprocess output that reaches a log line, and only in
+// this bounded form, after the authentication check has run.
+func agyErrorText(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n', r == '\r', r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200])
+	}
+	return s
+}
+
 // isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
 // text itself is never logged, log lines must not carry subprocess output,
-// only this in-process check reads it.
+// only this in-process check reads it. The single exception is the
+// envelope's own error field, surfaced bounded by agyErrorText and only
+// after this check has ruled out the OAuth shape.
 func isAgyAuthFailure(s string) bool {
 	// Case-insensitive: the binary writes "authentication required", the
 	// matcher was written for "Authentication required", and the mismatch

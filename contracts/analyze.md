@@ -195,7 +195,7 @@ Per C2:
 | `<CODE>` (stderr) | `<REASON>` (report text) |
 |---|---|
 | `agy_missing` | analyzer binary not found |
-| `agy_failed` | analyzer exited non-zero |
+| `agy_failed` | analyzer exited non-zero; the log line carries the envelope's `error` when stdout holds one |
 | `agy_timeout` | analyzer timed out |
 | `invalid_json` | analyzer output was not valid JSON |
 | `schema_invalid` | analyzer output failed schema validation |
@@ -335,6 +335,8 @@ flowchart TD
    Decode the envelope first. Treat as a **failed attempt** (reason `agy_empty`): `status != "SUCCESS"`, an empty or whitespace-only `response`, or `usage.input_tokens == 0`.
 
    **Retry only the transient shape.** `usage.input_tokens == 0` means the prompt never reached the model at all, a systematic fault (too large, malformed invocation, dropped stdout), so retrying doubles the outage window for a call that will fail identically; that is exactly what D7 forbids, and it makes an argv-class bug take twice as long to surface. `SUCCESS` with non-zero tokens but an empty `response` is plausibly the transient #76 drop and **is** retry-eligible. `status != "SUCCESS"` follows the D7 rule for the underlying cause: no retry.
+
+   **The envelope's `error` field is surfaced, bounded.** agy exits non-zero with an **empty stderr** and the reason in the stdout envelope's `error` field (measured on 1.1.26: `{"status":"ERROR","response":"","error":"timeout waiting for response",...}` with exit 1, and the same shape for an invalid model), and a `CANCELED`/`ERROR` envelope on a clean exit carries it too. Both paths include that text in the returned error, hence in the `fallback report built` log line, as one line of at most 200 runes with control characters stripped, and only after the authentication check has run. It is the one piece of subprocess output that reaches a log line; stdout that is not an envelope (a panic trace) is never echoed. Reporting only `exit status 1 (stderr 0 bytes)` had hidden the cause of every crash on the deployed host for two days.
 
    **Authentication failures get their own reason.** When agy's stderr contains an OAuth prompt (`Authentication required`, `accounts.google.com/o/oauth2`), the reason is `agy_unauth` → "analyzer not authenticated", not `agy_failed`. Headless mode cannot complete an OAuth flow, so this state persists until a human re-authenticates and is worth naming precisely: "analyzer exited non-zero" sends the 3am reader to check a healthy binary, while "analyzer not authenticated" names the actual fix. A dropped prompt reports `SUCCESS` with `response: ""` and zero tokens, which is otherwise indistinguishable from a model that chose to say nothing.
 
@@ -735,6 +737,7 @@ Table-driven, hermetic, offline. `RunAgy` is replaced by a table-supplied func r
 | 15 | collector_errors surfaced | facts with two distinct `.meta.collector_errors` **objects** | the triage prompt contains both `reason` strings inside the FACTS fence, and the `meta` rule from role.md is present in the prompt |
 | 16 | the NEWEST emerg/crit lines survive the fallback | facts with 25 entries at `priority <= RAW_ALERT_MAX_PRIORITY`, agy missing. Run it twice: once with short synthetic messages and once with **realistic ~80-rune kernel lines**, so the rune budget actually binds in one of the two | `Evidence` holds at most `RAW_ALERT_MAX_LINES` lines, is ≤ 900 runes, `Validate` passes, and, the assertion that matters, the **newest** protected line is always present while the dropped ones are the oldest. When the 900-rune budget binds before the line count does, lines are dropped from the **oldest** end and the newest is still there. Asserting only the count would pass while carrying exactly the wrong 20 lines |
 | 17 | no markdown authored (D10) | the reports from cases 1–4 | no `` ` ``, `_`, `*`, `[`, `]` in `headline`, `body`, `explanation`, `analysis`, `recommendation` or `resolved[]`, `notify`'s sanitizer is a no-op on analyzer output |
+| 18 | envelope error surfaced | a stub agy printing an `ERROR` envelope with `error` and exiting 1 ⇒ `agy_failed` whose message carries the text; non-envelope stdout ⇒ plain `exit status 1`, nothing echoed; an OAuth-shaped `error` ⇒ still `agy_unauth`, text not echoed; a `CANCELED` envelope on exit 0 ⇒ `agy_empty` with the text; a 500-rune multi-line error ⇒ one line, at most 200 runes |
 
 ---
 
