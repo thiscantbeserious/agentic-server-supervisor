@@ -3254,7 +3254,7 @@ func agyStub(t *testing.T, cfg *config.Config, stdout string, exit int) (promptP
 
 // When agy fails it exits 1, writes nothing to stderr, and prints an
 // envelope on stdout whose `error` field carries the reason. Reporting
-// only "stderr 0 bytes" throws that reason away; on the deployed host
+// only "stderr 0 bytes" throws that reason away. On the deployed host
 // that hid the cause of every crash for two days.
 func TestRunAgy_NonZeroExit_SurfacesEnvelopeError(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -3270,7 +3270,7 @@ func TestRunAgy_NonZeroExit_SurfacesEnvelopeError(t *testing.T) {
 	}
 }
 
-// Stdout that is not an envelope keeps the plain exit message; nothing
+// Stdout that is not an envelope keeps the plain exit message. Nothing
 // from an unknown stdout shape is echoed into the log.
 func TestRunAgy_NonZeroExit_NonEnvelopeStdout_KeepsPlainMessage(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -3391,7 +3391,7 @@ func TestRun_AgyFailed_ErrorTextReachesLogOnly(t *testing.T) {
 	if !strings.Contains(log, "reason=agy_failed") || !strings.Contains(log, "SENTINELMARKER") {
 		t.Fatalf("log must carry reason=agy_failed and the envelope error:\n%s", log)
 	}
-	// The report is the only artifact this path produces; analyze writes
+	// The report is the only artifact this path produces, analyze writes
 	// nothing under STATE_DIR here, persistence is state's job.
 	out, _ := json.Marshal(rep)
 	if strings.Contains(string(out), "SENTINELMARKER") {
@@ -3410,7 +3410,7 @@ type agyOutcome struct {
 	err error
 }
 
-// script scripts RunAgy with a sequence of outcomes; the last one repeats
+// script scripts RunAgy with a sequence of outcomes. The last one repeats
 // once the script runs out.
 func (r *agyRecorder) script(outcomes ...agyOutcome) func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
 	return func(ctx context.Context, o Options, promptPath, schemaPath string) ([]byte, error) {
@@ -3570,7 +3570,7 @@ func TestRun_TriageRetries_Exclusions(t *testing.T) {
 	}
 }
 
-// A failed envelope that did spend tokens reached the model; it is retried
+// A failed envelope that did spend tokens reached the model. It is retried
 // like any other failed attempt.
 func TestRun_TriageRetries_FailedStatusWithTokensRetries(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -3590,8 +3590,8 @@ func TestRun_TriageRetries_FailedStatusWithTokensRetries(t *testing.T) {
 
 // The denied-tool shape retries with a correction that names the refused
 // command and the consequence of a tool call, bounded to the one line
-// agyErrorText allows, and still carries the JSON-only instruction; the
-// validator correction follows an invalid answer on a later attempt; and
+// agyErrorText allows, and still carries the JSON-only instruction. The
+// validator correction follows an invalid answer on a later attempt, and
 // neither the command nor the envelope text reaches the report.
 func TestRun_TriageRetries_DeniedToolCorrection(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -3735,7 +3735,7 @@ func TestRun_TriageRetries_SharedTimeBudget(t *testing.T) {
 		t.Fatal("Run() expected a non-nil error")
 	}
 	// The contract's window arithmetic (CONTRACTS.md C4) counts this
-	// phase as 2 x AGY_HARD_TIMEOUT; state's HealthWindow reads the
+	// phase as 2 x AGY_HARD_TIMEOUT. State's HealthWindow reads the
 	// constant, so changing it moves the window, and this pins the number
 	// the documents state.
 	if TriageBudgetTimeouts != 2 {

@@ -1491,7 +1491,7 @@ func TestTickSections_MatchesSectionsRun(t *testing.T) {
 		t.Fatal("could not locate the tick section block in collect.go")
 	}
 	// Tick sections are the runSection calls bounded by SECTION_TIMEOUT
-	// after the tick marker; the deep section uses DEEP_TIMEOUT and sits
+	// after the tick marker. The deep section uses DEEP_TIMEOUT and sits
 	// in the other branch.
 	if n := strings.Count(body[start:], "cfg.SectionTimeout, func("); n != TickSections {
 		t.Fatalf("tick block runs %d sections, TickSections = %d", n, TickSections)
