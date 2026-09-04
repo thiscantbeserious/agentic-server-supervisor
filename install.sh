@@ -123,6 +123,19 @@ fi
 
 TRANSIENT_FAIL=0
 
+# Seconds every apt-get call waits for the dpkg frontend lock instead of
+# failing at once. unattended-upgrades runs daily on Debian and
+# OpenMediaVault hosts and holds that lock for its whole run; without a
+# wait, an install landing inside that window fails with "Could not get
+# lock /var/lib/dpkg/lock-frontend" (exit 75, retry-safe, but a whole
+# run lost to a timing coincidence). The option needs apt 1.9.11 or
+# newer, which every supported host has (Debian bookworm ships 2.6).
+# The simulated `apt-get install -s` gets it too: as root, which this
+# script always is, simulation still takes the lock. Timeout kept clearly
+# above one unattended-upgrades run so a real hang, not a normal run, is
+# what exhausts it.
+APT_LOCK_TIMEOUT=300
+
 # Whether the package each later step depends on is actually present.
 # Set by step1 after it knows the real outcome (already-installed,
 # freshly installed, or failed), never assumed from step1's own exit
@@ -401,7 +414,7 @@ mail_wiring_wanted() {
 # preview of the decision actually being made.
 apt_would_remove() {
   local sim
-  sim="$(apt-get install -s -y --no-install-recommends "$@" 2>/dev/null)"
+  sim="$(apt-get install -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -s -y --no-install-recommends "$@" 2>/dev/null)"
   printf '%s\n' "$sim" | awk '/^Remv /{printf "%s ", $2}'
 }
 
@@ -762,8 +775,8 @@ ensure_curl() {
     echo "$PROG: curl is not installed, cannot fetch the stack files (would run: apt-get install -y curl)" >&2
     return 1
   fi
-  apt-get update -qq || true
-  apt-get install -y --no-install-recommends --no-remove curl || true
+  apt-get update -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -qq || true
+  apt-get install -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -y --no-install-recommends --no-remove curl || true
   command -v curl >/dev/null 2>&1
 }
 
@@ -1710,7 +1723,7 @@ step1() {
   # guaranteed current.
   local removed=""
   if [ "$CHECK" -ne 1 ] && [ "$DRY_RUN" -ne 1 ]; then
-    apt-get update -qq || true
+    apt-get update -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -qq || true
   fi
   removed="$(apt_would_remove "${need[@]}")"
 
@@ -1726,7 +1739,7 @@ step1() {
     return
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] would run: apt-get install -y --no-install-recommends --no-remove ${need[*]}"
+    echo "[dry-run] would run: apt-get install -o DPkg::Lock::Timeout=$APT_LOCK_TIMEOUT -y --no-install-recommends --no-remove ${need[*]}"
     changed=$((changed+1))
     RASDAEMON_OK=1
     [ "$want_msmtp" -eq 1 ] && MSMTP_OK=1
@@ -1750,7 +1763,7 @@ step1() {
     fi
   fi
 
-  if ! apt-get install -y --no-install-recommends --no-remove "${need[@]}"; then
+  if ! apt-get install -o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT" -y --no-install-recommends --no-remove "${need[@]}"; then
     echo "$PROG: apt-get install failed" >&2
     TRANSIENT_FAIL=1
   else

@@ -71,3 +71,35 @@ func TestInstallSh_AptInstallNeverRemoves(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallSh_AptWaitsForLock: unattended-upgrades runs daily on a
+// Debian or OpenMediaVault host and holds the dpkg frontend lock for
+// the duration of its own run. apt-get's default is to fail at once
+// when the lock is taken ("Could not get lock /var/lib/dpkg/lock-
+// frontend. It is held by process N (unattended-upgr)"), which turned a
+// timing coincidence into a whole failed install run, both in the VM
+// gate and on a real host. `-o DPkg::Lock::Timeout=N` makes apt wait
+// instead. Every real invocation is checked, including the simulated
+// one (`apt-get install -s` still takes the lock when run as root,
+// which this script always is), for the same reason
+// TestInstallSh_AptInstallNeverRemoves checks every call rather than
+// one known site.
+func TestInstallSh_AptWaitsForLock(t *testing.T) {
+	src := readInstallSh(t)
+	// A real invocation only, at the start of a statement, an `if !`
+	// test, or a `var="$(` capture. Comments, the dry-run preview line
+	// and the "apt-get install failed" message do not touch the lock.
+	re := regexp.MustCompile(`(?m)^\s*(?:if !\s*|\w+="\$\(\s*)?apt-get (?:install|update)\b.*$`)
+	calls := re.FindAllString(src, -1)
+	if len(calls) < 5 {
+		t.Fatalf("found %d apt-get invocations in install.sh, want at least 5 (curl update+install, step1 update, simulation, step1 install); the regex above no longer matches the script's shape: %q", len(calls), calls)
+	}
+	for _, call := range calls {
+		if !strings.Contains(call, `-o DPkg::Lock::Timeout="$APT_LOCK_TIMEOUT"`) {
+			t.Errorf("apt-get call does not wait for the dpkg lock, a concurrent unattended-upgrades run fails it outright: %q", call)
+		}
+	}
+	if !regexp.MustCompile(`(?m)^APT_LOCK_TIMEOUT=\d+$`).MatchString(src) {
+		t.Error("APT_LOCK_TIMEOUT is not defined once as a plain integer constant at top level")
+	}
+}
