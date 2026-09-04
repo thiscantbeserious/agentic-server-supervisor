@@ -56,7 +56,7 @@ const deniedToolMarker = "permission check failed for command"
 // is stateless, so a retry that only repeats the prompt is a re-roll.
 // When the failure was the model's own doing the retry prompt appends the
 // concrete correction, the validator's message or the refused command.
-func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText, nonce string, logger *slog.Logger) (*report.Report, string, error) {
+func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, promptText string, logger *slog.Logger) (*report.Report, string, error) {
 	phaseCtx, cancel := context.WithTimeout(ctx, triageBudget(o.Cfg))
 	defer cancel()
 
@@ -77,7 +77,15 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 				break
 			}
 			logger.Info("triage retrying", "attempt", attempt, "reason", reason, "error", err)
-			correction, cerr := retryCorrection(nonce, reason, err)
+			// A nonce of its own for the correction's fence: the attempt
+			// that produced the quoted text has seen the run's nonce in
+			// FACTS, so a reflected value could carry that closing marker.
+			// It cannot carry one it has never seen.
+			diagNonce, nerr := newNonce()
+			if nerr != nil {
+				return nil, "internal_error", fmt.Errorf("analyze: correction nonce: %w", nerr)
+			}
+			correction, cerr := retryCorrection(diagNonce, reason, err)
 			if cerr != nil {
 				return nil, "internal_error", fmt.Errorf("analyze: build correction: %w", cerr)
 			}
