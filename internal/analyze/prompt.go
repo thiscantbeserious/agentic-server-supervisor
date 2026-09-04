@@ -96,7 +96,7 @@ func buildCorrection(nonce, validationErr, deniedTool string) (string, error) {
 	// same control-character strip the refusal gets, then the length
 	// bound, so a model-authored newline in an echoed value can never put
 	// a forged fence marker at the start of a line.
-	data := promptData{Nonce: nonce, ValidationError: truncRunes(agyErrorText(validationErr), 300), DeniedTool: deniedTool}
+	data := promptData{Nonce: nonce, ValidationError: truncRunes(oneLineText(validationErr), 300), DeniedTool: deniedTool}
 	if err := promptTmpl.ExecuteTemplate(&b, "correction", data); err != nil {
 		return "", err
 	}

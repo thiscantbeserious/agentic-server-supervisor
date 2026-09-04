@@ -264,6 +264,17 @@ func envelopeErrorText(out []byte) string {
 // one piece of subprocess output that reaches a log line, and only in
 // this bounded form, after the authentication check has run.
 func agyErrorText(s string) string {
+	s = oneLineText(s)
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200])
+	}
+	return s
+}
+
+// oneLineText is agyErrorText's strip without its bound: newlines and
+// line separators become spaces, control, C1, zero-width and bidi
+// characters are removed, surrounding space trimmed.
+func oneLineText(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch {
 		case r == '\n', r == '\r', r == '\t':
@@ -279,11 +290,7 @@ func agyErrorText(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.TrimSpace(s)
-	if r := []rune(s); len(r) > 200 {
-		s = string(r[:200])
-	}
-	return s
+	return strings.TrimSpace(s)
 }
 
 // isAgyAuthFailure detects the OAuth prompt in agy's stderr. The stderr
