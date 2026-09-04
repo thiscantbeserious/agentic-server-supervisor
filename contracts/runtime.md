@@ -111,7 +111,7 @@ sentinel health
 
 `--loop` together with `--once`, any unknown flag, any positional argument ⇒ exit `64`.
 
-`sentinel health` takes no flags: exit `0` iff `$STATE_DIR/heartbeat` exists and its mtime is younger than ``HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT)`, else `1`. It is the compose healthcheck and reads nothing else.
+`sentinel health` takes no flags: exit `0` iff `$STATE_DIR/heartbeat` exists and its mtime is younger than `HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT), else `1`. It is the compose healthcheck and reads nothing else.
 
 **Orchestration is in-process.** `tick` calls `collect.Run`, `analyze.Run`, `state.Process`, `notify.Send` as Go functions (C8). Only `journalctl`, `sensors -j` and `agy` are exec'd, each under `context.WithTimeout`. There is no exit-code round-tripping between components.
 
@@ -382,7 +382,7 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
-      start_period: 600s
+      start_period: 900s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -711,7 +711,7 @@ func Health(cfg *config.Config) (int, error)
 | E16 | `raw_key_matches_dedup` | `Candidates` keys equal `dedup.Key("kernel", msg)` for the same messages | C6 |
 | E17 | `config_validation` | bad env sets (`TICK_INTERVAL=abc`, `TICK_INTERVAL=10`, `TICK_WINDOW=5m` with interval 300, `LOG_LEVEL=LOUD`, `RAW_ALERT_MAX_LINES=99`) ⇒ each returns `ErrConfig` naming the variable and never its value | C3, C7 |
 | E18 | `shutdown` | `Loop` with a cancelled context returns `(0, nil)` within 5 s and starts no new tick | R2 step 8 |
-| E19 | `health` | fresh `heartbeat` ⇒ `0`; mtime older than ``HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT)` ⇒ `1`; missing ⇒ `1` | compose healthcheck |
+| E19 | `health` | fresh `heartbeat` ⇒ `0`; mtime older than `HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT) ⇒ `1`; missing ⇒ `1` | compose healthcheck |
 | E20 | `prune_agy_logs` | 30 files in each of `agy-home/.gemini/antigravity-cli/{log,crashes}` with mtime order the reverse of name order ⇒ exactly the newest **20** by mtime remain, a subdirectory inside `log/` survives, the credential file is byte-identical; each of `log/`, `antigravity-cli/` and `.gemini/` in turn replaced by a symlink to a tree outside `agy-home` ⇒ that tree is untouched (snapshot its parent, not the target), a guard on the leaf alone fails the two parent cases; absent home and an under-cap directory ⇒ no-op; `Loop` running one tick over a 30-file `log/` leaves 20 | C4, A1 |
 
 **`test/container_test.go`** (build tag `container`, `go test -tags container ./test`). Each case prints `PASS`/`FAIL`/`SKIP`; a SKIP is explicit, never a silent pass.
@@ -728,7 +728,7 @@ func Health(cfg *config.Config) (int, error)
 | C8 | `journalctl -D /host/journal -t smartd` decodes without error (no NVMe ⇒ `SKIP`); a synthetic `Killed process` fixture entry is picked up by the `kernel` section | §2.6 unverified list |
 | C9 | `sentinel tick` with `TICK_INTERVAL=abc` ⇒ `78`; with `STATE_DIR` unwritable ⇒ `69`; with neither journal dir readable ⇒ `78`; `--loop --once` ⇒ `64`; a positional argument ⇒ `64` | C2 exit codes |
 | C10 | `docker compose config` shows for `sentinel`: `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, `user: "10001:10001"`, no `ports`, no `privileged`, no `cap_add`, every bind `read_only: true`, no `/config` mount, no `TELEGRAM_*`, and **every** C3 variable present | security model §4 |
-| C11 | `SIGTERM` to a running container ⇒ exit `0` within 15 s; `/state/heartbeat` mtime younger than ``HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT)`; `sentinel health` exits `0` | R2 shutdown, healthcheck |
+| C11 | `SIGTERM` to a running container ⇒ exit `0` within 15 s; `/state/heartbeat` mtime younger than `HEALTH_WINDOW` (`state.HealthWindow`: 3 × TICK_INTERVAL + 3 × AGY_HARD_TIMEOUT + OUTBOX_MAX × NOTIFY_TIMEOUT); `sentinel health` exits `0` | R2 shutdown, healthcheck |
 | C12 | `install.sh --dry-run` on a throwaway rootfs changes nothing; two consecutive real runs yield identical sha256 for every touched file and the second prints `changed=0` and restarts no service | R5 idempotency |
 | C13 | `actionlint` passes; the metadata step yields both `latest` and a full-SHA tag; the published image is pulled and `--version` runs | §2.9, "pull from GHCR works" |
 

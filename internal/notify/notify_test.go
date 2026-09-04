@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -758,3 +759,43 @@ func TestSeedConfig_204IsFailure(t *testing.T) {
 }
 
 // --- 18: TestE2E (gated), see e2e_test.go for the full test body.
+
+// A server that accepts the TCP connection and never sends its SMTP
+// greeting must not hold Send: the dial timeout is satisfied the moment
+// the connection opens, so only a deadline on the connection itself
+// bounds the conversation. Without it the outbox drain, and with it the
+// whole tick, would block for as long as mailrise stays wedged.
+func TestSMTPFallback_HungServerIsBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close() // accepted, never greeted
+		}
+	}()
+
+	appriseStubSrv := newAppriseStub(t, 200)
+	cfg := notifyTestConfig(t, appriseStubSrv, newSMTPStub(t))
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	cfg.MailriseHost = host
+	cfg.MailrisePort, _ = strconv.Atoi(port)
+	cfg.NotifyTimeout = time.Second
+	r := loadFixture(t, "report-ok.json")
+
+	start := time.Now()
+	err = Send(context.Background(), cfg, r, true)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Send against a hung SMTP server returned nil, want an error")
+	}
+	if elapsed > 3*cfg.NotifyTimeout {
+		t.Fatalf("Send took %v against a hung SMTP server, want it bounded by NOTIFY_TIMEOUT=%v", elapsed, cfg.NotifyTimeout)
+	}
+}

@@ -44,6 +44,15 @@ func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) e
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	// The dialer's timeout covers the connect only, and ctx is consumed by
+	// DialContext; nothing below would otherwise bound the conversation. A
+	// server that accepts TCP and never sends its greeting would then hold
+	// this call, the outbox drain and the whole tick forever. One deadline
+	// on the connection bounds every read and write of the exchange at
+	// NOTIFY_TIMEOUT, which is the term the liveness window (C4) counts
+	// per outbox item; the whole conversation, not only the dial, now
+	// fits inside it.
+	_ = conn.SetDeadline(time.Now().Add(cfg.NotifyTimeout))
 
 	client, err := smtp.NewClient(conn, cfg.MailriseHost)
 	if err != nil {

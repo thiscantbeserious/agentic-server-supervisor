@@ -710,8 +710,25 @@ func TestPruneAgyLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(testConfig(t, tick0)))
+	tokenBefore, err := os.Lstat(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
 
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(logCfg))
+
+	// The count line is what makes a wrong path visible instead of a
+	// silent no-op; it carries the directory name and a number, no
+	// filenames and no content.
+	if got := logBuf.String(); !strings.Contains(got, "runtime pruned agy files dir=log removed=10") ||
+		!strings.Contains(got, "dir=crashes removed=10") {
+		t.Errorf("debug count line missing or wrong:\n%s", got)
+	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("a symlink inside log/ must be left alone: %v", err)
 	}
@@ -745,6 +762,11 @@ func TestPruneAgyLogs(t *testing.T) {
 	}
 	if data, err := os.ReadFile(token); err != nil || string(data) != "secret" {
 		t.Errorf("the credential must never be touched: err=%v", err)
+	}
+	// Bytes alone would not catch a fixture or a prune that follows the
+	// symlink and rewrites the credential's timestamps.
+	if fi, err := os.Lstat(token); err != nil || !fi.ModTime().Equal(tokenBefore.ModTime()) {
+		t.Errorf("the credential's mtime changed across the prune: err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(base, "brain")); err != nil {
 		t.Errorf("unrelated agy state must survive: %v", err)
