@@ -88,10 +88,12 @@ func TestInstallSh_AptWaitsForLock(t *testing.T) {
 	// Comments and echoed strings (the dry-run preview, the "apt-get
 	// install failed" message) do not touch the lock and are skipped by
 	// their leading word; `command -v apt-get` is skipped because
-	// nothing option-like follows the name.
+	// nothing option-like follows the name. Backslash continuations are
+	// joined first so a call split over lines is one invocation, not an
+	// `apt-get \` fragment the option regex never sees.
 	invocation := regexp.MustCompile(`\bapt-get\s+[-a-z]`)
 	var calls []string
-	for _, line := range strings.Split(src, "\n") {
+	for _, line := range strings.Split(strings.ReplaceAll(src, "\\\n", " "), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "echo ") {
 			continue
