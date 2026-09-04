@@ -90,7 +90,7 @@ func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, er
 		// The error field is surfaced only from a document that is an
 		// envelope, one that carries a status.
 		if reason := agyErrorText(env.Error); reason != "" && env.Status != "" {
-			return "", nil, wrapClass(class, fmt.Sprintf("status=%q input_tokens=%d error=%q", env.Status, env.Usage.InputTokens, reason))
+			return "", nil, &envelopeError{Text: reason, err: wrapClass(class, fmt.Sprintf("status=%q input_tokens=%d error=%q", env.Status, env.Usage.InputTokens, reason))}
 		}
 		return "", nil, wrapClass(class, fmt.Sprintf("status=%q input_tokens=%d", env.Status, env.Usage.InputTokens))
 	}
@@ -101,6 +101,26 @@ func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, er
 }
 
 // wrapClass prefixes detail with the failure class when there is one.
+// envelopeError carries the bounded text of agy's envelope error field
+// alongside the classified error, so a caller can read the refusal
+// structurally instead of parsing it back out of a wrapped message.
+type envelopeError struct {
+	Text string
+	err  error
+}
+
+func (e *envelopeError) Error() string { return e.err.Error() }
+func (e *envelopeError) Unwrap() error { return e.err }
+
+// envelopeErrorOf returns the envelope error text carried by err, if any.
+func envelopeErrorOf(err error) (string, bool) {
+	var e *envelopeError
+	if errors.As(err, &e) {
+		return e.Text, true
+	}
+	return "", false
+}
+
 func wrapClass(class error, detail string) error {
 	if class == nil {
 		return errors.New(detail)
@@ -217,7 +237,7 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 		// stdout envelope's error field; without it the log says only
 		// "exit status 1" and the cause is lost.
 		if reason := envelopeErrorText(out.Bytes()); reason != "" {
-			return nil, fmt.Errorf("%w: %v (stderr %d bytes, agy: %s)", errAgyFailed, runErr, agyErr.Len(), reason)
+			return nil, &envelopeError{Text: reason, err: fmt.Errorf("%w: %v (stderr %d bytes, agy: %s)", errAgyFailed, runErr, agyErr.Len(), reason)}
 		}
 		return nil, fmt.Errorf("%w: %v (stderr %d bytes)", errAgyFailed, runErr, agyErr.Len())
 	}

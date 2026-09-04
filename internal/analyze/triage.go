@@ -66,6 +66,11 @@ func runTriage(ctx context.Context, o Options, d Deps, promptPath, schemaPath, p
 	)
 	for attempt := 1; attempt <= maxTriageAttempts; attempt++ {
 		if attempt > 1 {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				// A shutdown between two attempts authors nothing, the
+				// same as one inside an attempt.
+				return nil, "", context.Canceled
+			}
 			if phaseCtx.Err() != nil {
 				// The budget is spent: the last attempt's reason stands
 				// rather than a retry that could only time out.
@@ -101,20 +106,24 @@ func retryable(reason string, err error) bool {
 
 // retryCorrection is the block appended to the retry prompt after the
 // failure described by reason and err: the denied-tool correction when
-// the error carries a refused command, the validator correction after an
-// answer that failed parsing or validation, nothing otherwise. The
-// refused command is agy-derived text and reaches the prompt only in the
-// bounded one-line form agyErrorText produces, the same bound the log
+// agy's envelope error names a refused command, the validator correction
+// after an answer that failed parsing or validation, nothing otherwise.
+// The refused command is agy-derived text and reaches the prompt only in
+// the bounded one-line form agyErrorText produces, the same bound the log
 // line has; it never reaches a report.
 func retryCorrection(reason string, err error) (string, error) {
-	msg := err.Error()
-	if i := strings.Index(msg, deniedToolMarker); i >= 0 {
-		// The refusal is the tail of the wrapped error; the wrapping's
-		// own closing quote or parenthesis is not part of it.
-		return buildCorrection("", agyErrorText(strings.TrimRight(msg[i:], `)"`)))
+	// The marker is trusted only inside agy's own envelope error, read
+	// structurally. A validator message echoes model-supplied values, and
+	// facts content reaches the model, so a marker found by searching a
+	// wrapped message could have been planted; it never selects this
+	// branch.
+	if text, ok := envelopeErrorOf(err); ok {
+		if i := strings.Index(text, deniedToolMarker); i >= 0 {
+			return buildCorrection("", text[i:])
+		}
 	}
 	if reason == "invalid_json" || reason == "schema_invalid" {
-		return buildCorrection(msg, "")
+		return buildCorrection(err.Error(), "")
 	}
 	return "", nil
 }
