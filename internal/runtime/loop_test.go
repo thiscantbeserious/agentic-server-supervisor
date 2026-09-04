@@ -686,6 +686,13 @@ func agyHomeFixture(t *testing.T, n int) (home, base, token string) {
 
 func TestPruneAgyLogs(t *testing.T) {
 	home, base, token := agyHomeFixture(t, 30)
+	// Snapshot the credential's timestamps here, before any fixture step
+	// that could follow a symlink into it; a snapshot taken later would
+	// compare a damaged file with itself.
+	tokenBefore, err := os.Lstat(token)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A subdirectory inside log/ is not a log file and must survive: the
 	// IsDir skip is the only thing standing between it and os.Remove.
 	nested := filepath.Join(base, "log", "nested")
@@ -710,10 +717,6 @@ func TestPruneAgyLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tokenBefore, err := os.Lstat(token)
-	if err != nil {
-		t.Fatal(err)
-	}
 	logCfg := testConfig(t, tick0)
 	logCfg.LogLevel = "DEBUG"
 	var logBuf bytes.Buffer
