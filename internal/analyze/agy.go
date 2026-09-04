@@ -83,7 +83,9 @@ func decodeAgyEnvelope(out []byte) (response string, structuredOutput []byte, er
 		return "", nil, fmt.Errorf("%w: envelope: %v", errAgyEmptySystemic, err)
 	}
 	if env.Status != "SUCCESS" || env.Usage.InputTokens == 0 {
-		if reason := agyErrorText(env.Error); reason != "" {
+		// The error field is surfaced only from a document that is an
+		// envelope, one that carries a status.
+		if reason := agyErrorText(env.Error); reason != "" && env.Status != "" {
 			return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d error=%q", errAgyEmptySystemic, env.Status, env.Usage.InputTokens, reason)
 		}
 		return "", nil, fmt.Errorf("%w: status=%q input_tokens=%d", errAgyEmptySystemic, env.Status, env.Usage.InputTokens)
@@ -216,7 +218,9 @@ func runAgy(ctx context.Context, cfg *config.Config, promptPath, schemaPath stri
 // stays out of the log.
 func envelopeErrorText(out []byte) string {
 	var env agyEnvelope
-	if err := json.Unmarshal(out, &env); err != nil {
+	if err := json.Unmarshal(out, &env); err != nil || env.Status == "" {
+		// Not an envelope: agy always sets status. Any other JSON that
+		// happens to carry an "error" key is unknown stdout and stays out.
 		return ""
 	}
 	return agyErrorText(env.Error)
@@ -236,6 +240,8 @@ func agyErrorText(s string) string {
 			return -1
 		case r == 0x85, r == 0x2028, r == 0x2029: // NEL, LINE/PARAGRAPH SEPARATOR
 			return ' '
+		case r >= 0x80 && r <= 0x9f: // the other C1 controls
+			return -1
 		case r >= 0x200b && r <= 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069: // zero-width and bidi controls
 			return -1
 		}

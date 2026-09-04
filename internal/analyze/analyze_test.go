@@ -3340,9 +3340,27 @@ func TestAgyErrorText_StripsControlChars(t *testing.T) {
 	// Unicode line separators and a bidi override: the log format writes
 	// values raw, so anything a reader or a shipper treats as a line or
 	// direction break must not survive.
-	got = agyErrorText("a\u0085b\u2028c\u2029d\u202ee\u200bf")
-	if want := "a b c def"; got != want {
-		t.Errorf("unicode separators: got %q, want %q", got, want)
+	got = agyErrorText("a\u0085b\u2028c\u2029d\u202ee\u200bf\u0080g\u009fh")
+	if want := "a b c defgh"; got != want {
+		t.Errorf("unicode separators and C1 controls: got %q, want %q", got, want)
+	}
+}
+
+// JSON that merely has an "error" key is not an envelope: agy always sets
+// status. Such stdout is unknown output and must not be echoed.
+func TestRunAgy_NonZeroExit_ErrorKeyWithoutStatus_NotSurfaced(t *testing.T) {
+	cfg := newTestConfig(t)
+	promptPath, schemaPath := agyStub(t, cfg, `{"error":"panic details that must stay out"}`, 1)
+
+	_, err := runAgy(context.Background(), cfg, promptPath, schemaPath)
+	if !errors.Is(err, errAgyFailed) {
+		t.Fatalf("err = %v, want errAgyFailed", err)
+	}
+	if strings.Contains(err.Error(), "panic details") {
+		t.Fatalf("err = %q: a status-less document is not an envelope and must not be echoed", err)
+	}
+	if _, _, derr := decodeAgyEnvelope([]byte(`{"error":"panic details that must stay out"}`)); derr == nil || strings.Contains(derr.Error(), "panic details") {
+		t.Fatalf("decode: %v, want a failure that does not echo the text", derr)
 	}
 }
 
