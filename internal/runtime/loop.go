@@ -231,6 +231,9 @@ const agyLogKeep = 20
 func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
 	root, err := os.OpenRoot(cfg.AgyHome)
 	if err != nil {
+		// The most literal wrong path of all; seedAgyHome warns on the
+		// same condition earlier, this keeps the prune's own promise.
+		logger.Debug("runtime agy home not pruned", "error", err)
 		return
 	}
 	defer root.Close()

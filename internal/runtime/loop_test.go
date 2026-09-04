@@ -860,9 +860,16 @@ func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
 	defer func() { logWriter = nil }()
 	logger := newLogger(logCfg)
 
-	// A layout that is not agy's (or an absent home) must not be a silent
-	// no-op: at debug level the operator can tell "path wrong, growing"
-	// from "path right, nothing to do".
+	// An absent home is a no-op that still says so.
+	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")}, logger)
+	if got := logBuf.String(); !strings.Contains(got, "runtime agy home not pruned") {
+		t.Errorf("absent AGY_HOME produced no debug signal:\n%s", got)
+	}
+	logBuf.Reset()
+
+	// A layout that is not agy's must not be a silent no-op either: at
+	// debug level the operator can tell "path wrong, growing" from "path
+	// right, nothing to do".
 	wrong := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(wrong, ".gemini", "antigravity-v2", "log"), 0o700); err != nil {
 		t.Fatal(err)
