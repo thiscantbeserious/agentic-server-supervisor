@@ -99,8 +99,10 @@ func TestResolvedAcrossOutage_GenuineAllClear_MustCloseTheAlert(t *testing.T) {
 	}
 	store := newStore(t, stateCfg)
 
+	// alert severity: the resolve walk-back must end in a visible
+	// all-clear, which S.3(e) reserves for findings notified at alert.
 	kernelFinding := report.Finding{
-		Severity: "watch", Component: "kernel", Evidence: outageKernelMsg,
+		Severity: "alert", Component: "kernel", Evidence: outageKernelMsg,
 		Explanation: "A synthetic kernel error line appeared this tick.",
 	}
 	if kernelFinding.Evidence == "" {
@@ -110,7 +112,7 @@ func TestResolvedAcrossOutage_GenuineAllClear_MustCloseTheAlert(t *testing.T) {
 	// --- tick 1: real report, the alert opens ---
 	analyzeCfg1 := analyzeConfigSharingStateDir(t, stateDir)
 	rec := []report.Report{{
-		Status: "WATCH", Headline: "Kernel error observed", Body: "b",
+		Status: "ALERT", Headline: "Kernel error observed", Body: "b",
 		Findings: []report.Finding{kernelFinding}, Resolved: []string{},
 	}}
 	d := analyze.Deps{RunAgy: func(ctx context.Context, o analyze.Options, promptPath, schemaPath string) ([]byte, error) {

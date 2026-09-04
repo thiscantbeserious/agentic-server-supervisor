@@ -214,6 +214,9 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 		if isNotify {
 			alert.LastNotified = now
 			alert.NotifyCount++
+			if severityRank[alert.Severity] > severityRank[alert.MaxNotifiedSeverity] {
+				alert.MaxNotifiedSeverity = alert.Severity
+			}
 			if reason == "" {
 				reason = findingReason
 			}
@@ -255,10 +258,15 @@ func (s *Store) Process(raw []byte) (*Decision, error) {
 			if alert.Key != res {
 				continue
 			}
-			// S.3(e): "A key that was never notified is deleted without an
-			// all-clear.", always delete on a match, but only surface it
-			// as an all-clear when the operator was actually told about it.
-			if alert.NotifyCount > 0 {
+			// S.3(e): always delete on a match, but surface an all-clear
+			// only when the operator was told about the finding at alert
+			// severity: a resolved watch already cost its one WATCH
+			// message, and announcing its end doubles the noise for
+			// something that was never urgent. An empty
+			// MaxNotifiedSeverity is a record from before the field
+			// existed (S.7): keep the legacy behavior for it rather than
+			// closing silently a finding the operator saw.
+			if alert.NotifyCount > 0 && (alert.MaxNotifiedSeverity == "alert" || alert.MaxNotifiedSeverity == "") {
 				found := false
 				for _, existing := range allClear {
 					if existing == alert.Headline {

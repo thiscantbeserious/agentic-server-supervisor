@@ -13,13 +13,21 @@ type ActiveAlert struct {
 	EvidenceCore string `json:"evidence_core"`
 	Headline     string `json:"headline"`
 	Severity     string `json:"severity"`
-	FirstSeen    int64  `json:"first_seen"`
-	LastSeen     int64  `json:"last_seen"`
-	LastNotified int64  `json:"last_notified"`
-	NotifyCount  int    `json:"notify_count"`
-	Occurrences  int    `json:"occurrences"`
-	TickSeqFirst int64  `json:"tick_seq_first"`
-	TickSeqLast  int64  `json:"tick_seq_last"`
+	// MaxNotifiedSeverity is the highest severity this finding was ever
+	// notified at. De-escalation lowers Severity silently, so Severity
+	// alone cannot answer "was the operator told this was an alert",
+	// which is what gates the all-clear (S.3e). Empty on records written
+	// before the field existed; step (e) treats that as legacy and emits
+	// the all-clear regardless of severity, so no finding the operator
+	// saw closes silently across the upgrade.
+	MaxNotifiedSeverity string `json:"max_notified_severity,omitempty"`
+	FirstSeen           int64  `json:"first_seen"`
+	LastSeen            int64  `json:"last_seen"`
+	LastNotified        int64  `json:"last_notified"`
+	NotifyCount         int    `json:"notify_count"`
+	Occurrences         int    `json:"occurrences"`
+	TickSeqFirst        int64  `json:"tick_seq_first"`
+	TickSeqLast         int64  `json:"tick_seq_last"`
 }
 
 // Both loaders enforce alert.Key against the authoritative identifier the
