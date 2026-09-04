@@ -41,7 +41,7 @@ analyze.Run(ctx, analyze.Options{Cfg, Facts, Seq}, analyze.Deps) (*report.Report
 
 From `*config.Config` (C3), never from `os.Getenv` inside this package: `STATE_DIR`, `AGY_BIN`, `AGY_PRINT_TIMEOUT`, `AGY_HARD_TIMEOUT` (raised to print+30s when lower, with an `slog` note), `HISTORY_N`, `PROMPT_MAX_BYTES`, `DEEP_ENABLED`, `DEEP_TIMEOUT`, `TMPDIR`, `SENTINEL_HOSTNAME`, `LOG_LEVEL`, `TZ`, **`RAW_ALERT_MAX_PRIORITY`** and **`RAW_ALERT_MAX_LINES`** (both used by the §5 fallback, which renders the raw crit lines when the analyzer is unavailable; C3's owner column reads "runtime, collect" and analyze is a third reader).
 
-`AGY_PRINT_TIMEOUT` is passed to agy as the Go `time.Duration` value. Verified against agy 1.1.13 on 2026-08-16: both `120s` and the `Duration.String()` rendering `2m0s` are accepted, so no raw-string field is needed here (unlike `meta.window`, where the rendered form reaches a human).
+`AGY_PRINT_TIMEOUT` is passed to agy as the Go `time.Duration` value. Verified against agy 1.1.13 on 2026-08-16: both `120s` and the `Duration.String()` rendering `2m0s` are accepted (the shipped default now renders `3m0s`, the same shape), so no raw-string field is needed here (unlike `meta.window`, where the rendered form reaches a human).
 
 #### 2.2 Files read
 

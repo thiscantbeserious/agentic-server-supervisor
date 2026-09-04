@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/facts"
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/report"
+	"github.com/thiscantbeserious/agentic-server-supervisor/internal/state"
 )
 
 // --- Critical item #2: tick MUST nil-check analyze.Run's report before
@@ -373,8 +375,8 @@ func TestHealth(t *testing.T) {
 		t.Errorf("fresh heartbeat: code=%d err=%v, want 0, nil", code, err)
 	}
 
-	// Backdate the heartbeat past 3x TICK_INTERVAL relative to cfg.Now.
-	stale := cfg.Now.Add(-4 * cfg.TickInterval)
+	// Backdate the heartbeat past state.HealthWindow relative to cfg.Now.
+	stale := cfg.Now.Add(-state.HealthWindow(cfg) - time.Minute)
 	if err := os.Chtimes(hb, stale, stale); err != nil {
 		t.Fatal(err)
 	}
@@ -638,5 +640,397 @@ func TestSeedAgyHome_UnreadableFileDoesNotAbortSeed(t *testing.T) {
 	}
 	if !named {
 		t.Errorf("the skipped file was not reported; warnings were %v", w.msgs)
+	}
+}
+
+// agy writes one cli log per invocation and a crash file per abnormal
+// exit and never removes either, so on a 5-minute tick they grow without
+// bound in a persistent volume. The prune keeps a bounded window, ordered
+// by mtime because crash names carry a pid and a uuid rather than a
+// sortable timestamp, and it must never touch anything else under
+// $AGY_HOME, least of all the credential.
+
+// agyHomeFixture builds $AGY_HOME/.gemini/antigravity-cli with a token
+// file, a brain/ directory, and n files in each of log/ and crashes/
+// whose mtime order is deliberately the REVERSE of their name order (f0 is
+// the newest), so a name-sorted or ascending-sorted prune keeps the wrong
+// ones. Returns the home, base and token path.
+func agyHomeFixture(t *testing.T, n int) (home, base, token string) {
+	t.Helper()
+	home = t.TempDir()
+	base = filepath.Join(home, ".gemini", "antigravity-cli")
+	for _, sub := range []string{"log", "crashes", "brain"} {
+		if err := os.MkdirAll(filepath.Join(base, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token = filepath.Join(base, "antigravity-oauth-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Now()
+	for _, sub := range []string{"log", "crashes"} {
+		for i := 0; i < n; i++ {
+			name := filepath.Join(base, sub, "f"+strconv.Itoa(i)+".log")
+			if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mod := newest.Add(-time.Duration(i) * time.Minute)
+			if err := os.Chtimes(name, mod, mod); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return home, base, token
+}
+
+func TestPruneAgyLogs(t *testing.T) {
+	home, base, token := agyHomeFixture(t, 30)
+	// Snapshot the credential's timestamps here, before any fixture step
+	// that could follow a symlink into it; a snapshot taken later would
+	// compare a damaged file with itself.
+	tokenBefore, err := os.Lstat(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A subdirectory inside log/ is not a log file and must survive: the
+	// IsDir skip is the only thing standing between it and os.Remove.
+	nested := filepath.Join(base, "log", "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Older than every file, so it sits outside the keep window: the only
+	// thing that saves it is the directory skip, not its position.
+	old := time.Now().Add(-99 * time.Hour)
+	if err := os.Chtimes(nested, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlink inside log/ pointing at the credential: not a regular
+	// file, so it is neither counted nor removed, and its target is never
+	// touched. Its mtime is left as created (os.Chtimes would follow the
+	// link and age the credential instead); a prune that counted it would
+	// keep it as the newest entry and evict one real file, which the
+	// regular-file count below catches.
+	link := filepath.Join(base, "log", "stale-link")
+	if err := os.Symlink(token, link); err != nil {
+		t.Fatal(err)
+	}
+
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(logCfg))
+
+	// The count line is what makes a wrong path visible instead of a
+	// silent no-op; it carries the directory name and a number, no
+	// filenames and no content.
+	if got := logBuf.String(); !strings.Contains(got, "runtime pruned agy files dir=log removed=10") ||
+		!strings.Contains(got, "dir=crashes removed=10") {
+		t.Errorf("debug count line missing or wrong:\n%s", got)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("a symlink inside log/ must be left alone: %v", err)
+	}
+	for _, sub := range []string{"log", "crashes"} {
+		entries, err := os.ReadDir(filepath.Join(base, sub))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := 0
+		for _, e := range entries {
+			if !e.Type().IsRegular() {
+				continue
+			}
+			files++
+			var i int
+			if _, err := fmt.Sscanf(e.Name(), "f%d.log", &i); err != nil {
+				t.Fatalf("%s: unexpected file %q", sub, e.Name())
+			}
+			// The contract says the newest 20, the literal, not whatever
+			// the constant happens to be.
+			if i >= 20 {
+				t.Errorf("%s: kept %q, which is older than the newest 20", sub, e.Name())
+			}
+		}
+		if files != 20 {
+			t.Errorf("%s: %d files remain, want 20", sub, files)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, "log", "nested")); err != nil {
+		t.Errorf("a directory inside log/ must survive the prune: %v", err)
+	}
+	if data, err := os.ReadFile(token); err != nil || string(data) != "secret" {
+		t.Errorf("the credential must never be touched: err=%v", err)
+	}
+	// Bytes alone would not catch a fixture or a prune that follows the
+	// symlink and rewrites the credential's timestamps.
+	if fi, err := os.Lstat(token); err != nil || !fi.ModTime().Equal(tokenBefore.ModTime()) {
+		t.Errorf("the credential's mtime changed across the prune: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "brain")); err != nil {
+		t.Errorf("unrelated agy state must survive: %v", err)
+	}
+}
+
+// A1 write containment: if log/ has been replaced by a symlink, following
+// it would prune whatever it points at, sentinel's own history or the
+// credential directory. The snapshot is of the PARENT of the target, a
+// test rooted at the target cannot observe an escape by construction.
+func TestPruneAgyLogs_SymlinkedDirIsNeverFollowed(t *testing.T) {
+	// Every component between $AGY_HOME and log/ is a place agy can plant
+	// a link, so each is tried in turn; a guard on the leaf alone passes
+	// the first case and fails the other two.
+	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
+		t.Run(link, func(t *testing.T) { symlinkEscapeProbe(t, link) })
+	}
+	// A relative link that stays inside agy-home is followed by os.Root,
+	// so it is refused by the component check instead: `log -> .` would
+	// list antigravity-cli itself and delete the credential as its oldest
+	// entry.
+	for _, link := range []string{"log", "antigravity-cli", ".gemini"} {
+		t.Run("in-root/"+link, func(t *testing.T) { symlinkInRootProbe(t, link) })
+	}
+}
+
+func symlinkInRootProbe(t *testing.T, link string) {
+	home, base, token := agyHomeFixture(t, 0)
+	// victimDir is where the pruned path resolves once the link is in
+	// place: for `log -> .` that is antigravity-cli itself, holding the
+	// credential; for a linked parent it is the real tree's log/. It gets
+	// an old, credential-like regular file and enough newer files to put
+	// that file past the cap, so a prune that follows the link deletes it.
+	var linkPath, target, victimDir string
+	switch link {
+	case "log":
+		if err := os.RemoveAll(filepath.Join(base, "log")); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target, victimDir = filepath.Join(base, "log"), ".", base
+	case "antigravity-cli":
+		real := filepath.Join(home, ".gemini", "real")
+		if err := os.Rename(base, real); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target, victimDir = base, "real", filepath.Join(real, "log")
+		token = filepath.Join(real, "antigravity-oauth-token")
+	case ".gemini":
+		real := filepath.Join(home, "real")
+		if err := os.Rename(filepath.Join(home, ".gemini"), real); err != nil {
+			t.Fatal(err)
+		}
+		linkPath, target, victimDir = filepath.Join(home, ".gemini"), "real", filepath.Join(real, "antigravity-cli", "log")
+		token = filepath.Join(real, "antigravity-cli", "antigravity-oauth-token")
+	}
+	victim := filepath.Join(victimDir, "must-survive")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-99 * time.Hour)
+	for _, f := range []string{victim, token} {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 25; i++ {
+		if err := os.WriteFile(filepath.Join(victimDir, "f"+strconv.Itoa(i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(victimDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, newLogger(logCfg))
+
+	if _, err := os.Lstat(victim); err != nil {
+		t.Fatalf("in-root %s link: the prune followed the link and deleted the oldest file where it landed: %v", link, err)
+	}
+	if _, err := os.Lstat(token); err != nil {
+		t.Fatalf("in-root %s link: the prune deleted the credential: %v", link, err)
+	}
+	after, err := os.ReadDir(victimDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("in-root %s link: %d entries before, %d after", link, len(before), len(after))
+	}
+	if !strings.Contains(logBuf.String(), "a path component is a symlink") {
+		t.Errorf("in-root %s link: refused silently, want the debug reason:\n%s", link, logBuf.String())
+	}
+}
+
+func symlinkEscapeProbe(t *testing.T, link string) {
+	home, base, _ := agyHomeFixture(t, 0)
+	outside := t.TempDir() // stands in for $STATE_DIR/history
+	// The target carries the same layout below the link, so a prune that
+	// follows it finds a populated log/ to delete from.
+	target := outside
+	switch link {
+	case "antigravity-cli":
+		target = filepath.Join(outside, "log")
+	case ".gemini":
+		target = filepath.Join(outside, "antigravity-cli", "log")
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		if err := os.WriteFile(filepath.Join(target, "h"+strconv.Itoa(i)+".json"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logDir string
+	switch link {
+	case "log":
+		logDir = filepath.Join(base, "log")
+	case "antigravity-cli":
+		logDir = base
+	case ".gemini":
+		logDir = filepath.Join(home, ".gemini")
+	}
+	if err := os.RemoveAll(logDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, logDir); err != nil {
+		t.Fatal(err)
+	}
+	outside = target
+	// Everything the test itself allocates under the temp root happens
+	// before the snapshot, so a changed count can only be the prune.
+	logger := newLogger(testConfig(t, tick0))
+	before, err := os.ReadDir(filepath.Dir(outside))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
+
+	if entries, _ := os.ReadDir(outside); len(entries) != 30 {
+		t.Fatalf("prune followed the symlinked %s out of $AGY_HOME: %d of 30 files remain outside", link, len(entries))
+	}
+	after, err := os.ReadDir(filepath.Dir(outside))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("parent of the symlink target changed: %d entries before, %d after", len(before), len(after))
+	}
+	if fi, err := os.Lstat(logDir); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink itself must be left alone: %v", err)
+	}
+}
+
+// A missing agy-home, and a directory already under the cap, are both
+// normal (a fresh volume, an early tick) and must not error or delete.
+func TestPruneAgyLogsToleratesMissingAndSmallDirs(t *testing.T) {
+	logCfg := testConfig(t, tick0)
+	logCfg.LogLevel = "DEBUG"
+	var logBuf bytes.Buffer
+	logWriter = &logBuf
+	defer func() { logWriter = nil }()
+	logger := newLogger(logCfg)
+
+	// An absent home is a no-op that still says so.
+	pruneAgyLogs(&config.Config{AgyHome: filepath.Join(t.TempDir(), "absent")}, logger)
+	if got := logBuf.String(); !strings.Contains(got, "runtime agy home not pruned") {
+		t.Errorf("absent AGY_HOME produced no debug signal:\n%s", got)
+	}
+	logBuf.Reset()
+
+	// A layout that is not agy's must not be a silent no-op either: at
+	// debug level the operator can tell "path wrong, growing" from "path
+	// right, nothing to do".
+	wrong := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wrong, ".gemini", "antigravity-v2", "log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pruneAgyLogs(&config.Config{AgyHome: wrong}, logger)
+	// The reason is the real one, a missing path, not a symlink accusation
+	// that would send an operator looking for an attack on a fresh volume.
+	if got := logBuf.String(); !strings.Contains(got, "runtime agy dir not pruned dir=log") || !strings.Contains(got, "no such file or directory") || strings.Contains(got, "symlink") {
+		t.Errorf("wrong layout: want the missing-path error as the reason:\n%s", got)
+	}
+
+	// The normal steady state, a correct path under the cap, logs
+	// nothing at all: no per-tick noise on a healthy volume.
+	logBuf.Reset()
+	home, base, _ := agyHomeFixture(t, 1)
+	pruneAgyLogs(&config.Config{AgyHome: home}, logger)
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 1 {
+		t.Errorf("a directory under the cap must be left alone, got %d files", len(entries))
+	}
+	if got := logBuf.String(); got != "" {
+		t.Errorf("under-cap prune must be silent, got:\n%s", got)
+	}
+}
+
+// The prune is wired into Loop, not only defined: one real tick over a
+// 30-file log/ must leave 20. Without this, the call in Loop can be
+// deleted and every other test stays green.
+func TestLoop_PrunesAgyLogsEachTick(t *testing.T) {
+	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+	home, base, _ := agyHomeFixture(t, 30)
+	cfg.AgyHome = home
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) {
+		cancel() // one tick, then Loop must return at its next check
+		return factsClean(), nil
+	}
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	done := make(chan struct{})
+	go func() {
+		Loop(ctx, cfg, d)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Loop did not return within 10s of the in-tick cancel")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 20 {
+		t.Errorf("after one Loop tick: %d log files, want 20 (prune not wired into Loop)", len(entries))
+	}
+}
+
+// The --once command calls Tick directly, never Loop, and C4 promises the
+// prune before each tick; a prune wired into Loop alone would skip it.
+func TestTick_PrunesAgyLogs(t *testing.T) {
+	withStubJournalctlOnPath(t, `echo '{"MESSAGE":"boot"}'`)
+	cfg := testConfig(t, tick0)
+	rec := newAppriseRecorder(t, 200)
+	cfg.AppriseURL = rec.srv.URL
+	store := newStore(t, cfg)
+	home, base, _ := agyHomeFixture(t, 30)
+	cfg.AgyHome = home
+
+	d := baseDeps(store)
+	d.CollectRun = func(ctx context.Context, o collect.Options) (*facts.Facts, error) { return factsClean(), nil }
+	d.AnalyzeRun = stubAnalyzeReturning(okReport())
+
+	Tick(context.Background(), cfg, 0, d)
+
+	if entries, _ := os.ReadDir(filepath.Join(base, "log")); len(entries) != 20 {
+		t.Errorf("after one direct Tick: %d log files, want 20 (prune not wired into Tick)", len(entries))
 	}
 }

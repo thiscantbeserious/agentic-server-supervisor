@@ -28,7 +28,7 @@ sentinel state history [n]         # default 5 → JSON array on stdout
 sentinel state outbox-add          # stdin → entry id + "\n" on stdout
 sentinel state outbox-take         # → JSON array on stdout
 sentinel state outbox-ack <id>     # → nothing on stdout
-sentinel health                    # exit 0 iff heartbeat mtime < 3 × TICK_INTERVAL
+sentinel health                    # exit 0 iff heartbeat mtime < HEALTH_WINDOW (state.HealthWindow)
 ```
 
 `history [n]` and `outbox-ack <id>` are the only subcommands taking a positional argument; `process` and `outbox-add` read stdin only (no file argument). `sentinel health` is dispatched by `main` to `state.Store.Health()`, `state` grows no `--health` flag.
@@ -358,7 +358,7 @@ Every case builds a `*config.Config` with a fresh `t.TempDir()` and an explicit 
 | 10 | outbox | 2× `OutboxAdd` ⇒ `OutboxTake` returns 2 oldest-first with `attempts=1`; two more takes ⇒ `fallback_smtp=true` at attempt 3; `OutboxAck` removes exactly one; `OutboxAck("bogus")` ⇒ `ErrUnknownID`; 60 adds ⇒ 50 kept, oldest dropped; payload round-trips byte-identically |
 | 11 | heartbeat | 07:59 + empty report ⇒ `notify=false`; 08:01 ⇒ `heartbeat=true`, `reason="heartbeat"`; same day again ⇒ `false`; next day 11:00 ⇒ `true` |
 | 12 | heartbeat suppression | an ALERT notified at 09:00 ⇒ no heartbeat that day; `heartbeat` content == today |
-| 13 | liveness | the `heartbeat` file's mtime advances on **every** `Process`, including a fully suppressed one; `Health()` is nil there and non-nil after backdating the mtime past `3 × TICK_INTERVAL` |
+| 13 | liveness | the `heartbeat` file's mtime advances on **every** `Process`, including a fully suppressed one; `Health()` is nil there and non-nil after backdating the mtime past `HealthWindow(cfg)`; `HealthWindow` at the defaults is 2120 s and a heartbeat 1820 s old (the longest legal tick plus the interval) is still healthy |
 | 14 | stale expiry | active alert with `last_seen` 25 h old + empty report ⇒ key file gone, `notify=false`, `resolved == []` |
 | 15 | error paths | non-JSON ⇒ `ErrBadInput`; object without `findings` ⇒ `ErrBadInput`; nonexistent `StateDir` ⇒ `ErrStateDir`; truncated `active-alerts/*.json` ⇒ no error, finding re-notified as `new_finding`; corrupt `history/*.json` ⇒ skipped, still rotated |
 | 16 | write containment (A1) | snapshot the filesystem around a full `Process`; every modified path is under `StateDir`, and the run succeeds with the process working directory set to a `0o555` dir |

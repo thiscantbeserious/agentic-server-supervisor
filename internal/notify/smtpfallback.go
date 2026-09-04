@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thiscantbeserious/agentic-server-supervisor/internal/config"
@@ -36,14 +37,39 @@ func (a plainAuthNoTLS) Next(_ []byte, more bool) ([]byte, error) {
 	return nil, nil
 }
 
+// smtpDialControl is net.Dialer.Control for the SMTP dial: nil in
+// production, so the dialer behaves as if the field were unset. A test
+// assigns a function that sleeps before the connect to make the dial
+// itself consume part of NOTIFY_TIMEOUT, which is the only portable way
+// to observe that the dial and the conversation share one deadline
+// rather than getting one each.
+var smtpDialControl func(network, address string, c syscall.RawConn) error
+
 func sendMail(ctx context.Context, cfg *config.Config, title, htmlBody string) error {
 	addr := net.JoinHostPort(cfg.MailriseHost, strconv.Itoa(cfg.MailrisePort))
-	dialer := net.Dialer{Timeout: cfg.NotifyTimeout}
+	// One absolute deadline for the dial and the conversation together.
+	// A dial timeout alone leaves the exchange unbounded (ctx is consumed
+	// by DialContext), so a server that accepts TCP and never greets
+	// would hold this call, the outbox drain and the whole tick; and a
+	// second deadline started after the dial would allow 2 x
+	// NOTIFY_TIMEOUT per item, which is not the term the liveness window
+	// (C4) counts. Sharing one instant makes dial plus every read and
+	// write fit inside NOTIFY_TIMEOUT, the same bound the apprise path
+	// gets from http.Client.Timeout.
+	deadline := time.Now().Add(cfg.NotifyTimeout)
+	dialer := net.Dialer{Deadline: deadline, Control: smtpDialControl}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(deadline)
+	// ctx was consumed by the dial; a cancelled tick (shutdown gives an
+	// active tick five seconds, then cancels) must also end a conversation
+	// that is blocked in a read or write, not wait out NOTIFY_TIMEOUT.
+	// Moving the deadline to now fails the pending I/O immediately.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 
 	client, err := smtp.NewClient(conn, cfg.MailriseHost)
 	if err != nil {

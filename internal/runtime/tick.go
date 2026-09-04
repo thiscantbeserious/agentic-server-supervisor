@@ -85,6 +85,10 @@ func nowFor(cfg *config.Config) time.Time {
 // notify, and the outbox drain (R3.2).
 func Tick(ctx context.Context, cfg *config.Config, seq int64, d Deps) TickResult {
 	logger := newTickLogger(cfg)
+	// Housekeeping before the tick's own work, here rather than in Loop
+	// so a direct --once invocation prunes exactly as the loop does (C4:
+	// "before each tick").
+	pruneAgyLogs(cfg, logger)
 	if seq == 0 {
 		// R3.1: "$STATE_DIR/tick-seq ... owned exclusively by tick ...
 		// read, incremented and written atomically before step 1." The

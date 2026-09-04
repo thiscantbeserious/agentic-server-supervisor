@@ -7,7 +7,8 @@ import (
 )
 
 // Health reports exit 0 iff $STATE_DIR/heartbeat exists and its mtime is
-// younger than 3 x TICK_INTERVAL, else 1. It reads nothing else.
+// younger than state.HealthWindow (the interval plus every configured term
+// of the longest legal tick), else 1. It reads nothing else.
 func Health(cfg *config.Config) (int, error) {
 	store, err := state.New(cfg)
 	if err != nil {

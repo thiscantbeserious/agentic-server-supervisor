@@ -1,4 +1,4 @@
-// loop.go: Loop(), startup preflight, agy-home seeding, the tick-seq
+// loop.go: Loop(), startup preflight, agy-home seeding and its log pruning, the tick-seq
 // counter, and the signal-driven interval loop (R2).
 package runtime
 
@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -197,6 +199,121 @@ func seedAgyHome(cfg *config.Config, logger warner) {
 	os.Setenv("HOME", cfg.AgyHome)
 }
 
+// agyLogKeep is how many files survive in each of agy's log and crashes
+// directories. agy writes one cli log per invocation and a crash file per
+// abnormal exit, and never removes either, so on a 5-minute tick they grow
+// without bound in a persistent volume. Twenty of each is several hours of
+// ticks, enough to diagnose a failure that was noticed in the next report.
+const agyLogKeep = 20
+
+// pruneAgyLogs unlinks all but the newest agyLogKeep entries in agy's log
+// and crashes directories, oldest first by mtime. Their names carry a pid
+// and a uuid rather than only a timestamp, so mtime is the ordering that
+// holds for both.
+//
+// Every path is resolved through os.Root, which refuses any symlink that
+// leaves $AGY_HOME at any component, not only the last one. agy runs as
+// this uid with HOME inside the writable state volume and this repo treats
+// it as untrusted; a `.gemini`, `antigravity-cli` or `log` that has become
+// a symlink would otherwise turn a prune of $AGY_HOME into a prune of
+// wherever the link points, sentinel's own history or the credential
+// directory included (A1 write containment).
+//
+// No file is ever opened for reading, only listed, Lstat'ed and removed.
+// Filenames enter the process, file bytes never do, which is what C7
+// governs: no credential or prompt content reaches sentinel.
+//
+// Every failure is ignored on purpose. This is housekeeping; a directory
+// that cannot be read or an entry that cannot be removed must never affect
+// a tick. The removed count is logged at debug level so a wrong path or a
+// changed agy layout does not become a silent no-op; a count is not
+// content.
+func pruneAgyLogs(cfg *config.Config, logger *slog.Logger) {
+	root, err := os.OpenRoot(cfg.AgyHome)
+	if err != nil {
+		// The most literal wrong path of all; seedAgyHome warns on the
+		// same condition earlier, this keeps the prune's own promise.
+		logger.Debug("runtime agy home not pruned", "error", err)
+		return
+	}
+	defer root.Close()
+	for _, sub := range []string{"log", "crashes"} {
+		dir := filepath.Join(".gemini", "antigravity-cli", sub)
+		// os.Root refuses a link that leaves the root but follows one that
+		// stays inside it, and a `log -> .` would make this prune list
+		// antigravity-cli itself and delete the credential as the oldest
+		// entry. Every component is therefore required to be a real
+		// directory, checked with Lstat so a link is seen as a link.
+		if err := realDirs(root, ".gemini", filepath.Join(".gemini", "antigravity-cli"), dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", err)
+			continue
+		} // a missing component falls through: root.Open names it in its own error
+		df, err := root.Open(dir)
+		if err != nil {
+			// Absent, a symlink somewhere in the path, or a layout agy
+			// changed under us. Said at debug level so a wrong path does
+			// not become unbounded growth with no signal; a path and an
+			// error are not file content. The under-cap case below stays
+			// silent, it is the normal steady state.
+			logger.Debug("runtime agy dir not pruned", "dir", sub, "error", err)
+			continue
+		}
+		entries, err := df.ReadDir(-1)
+		df.Close()
+		if err != nil || len(entries) <= agyLogKeep {
+			continue
+		}
+		type aged struct {
+			name string
+			mod  time.Time
+		}
+		files := make([]aged, 0, len(entries))
+		for _, e := range entries {
+			// Regular files only: a directory, a symlink or a socket agy
+			// leaves here is neither counted against the cap nor removed.
+			if !e.Type().IsRegular() {
+				continue
+			}
+			info, err := root.Lstat(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			files = append(files, aged{e.Name(), info.ModTime()})
+		}
+		if len(files) <= agyLogKeep {
+			continue
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+		removed := 0
+		for _, f := range files[agyLogKeep:] {
+			if root.Remove(filepath.Join(dir, f.name)) == nil {
+				removed++
+			}
+		}
+		logger.Debug("runtime pruned agy files", "dir", sub, "removed", removed)
+	}
+}
+
+// errNotRealDir is realDirs' verdict on a component that exists but is a
+// symlink or not a directory; a missing component surfaces as the Lstat
+// error itself, which wraps fs.ErrNotExist.
+var errNotRealDir = errors.New("a path component is a symlink or not a directory")
+
+// realDirs returns nil when every given path, relative to root, is a
+// directory reached without following a symlink at that component.
+func realDirs(root *os.Root, paths ...string) error {
+	for _, p := range paths {
+		fi, err := root.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			return fmt.Errorf("%s: %w", p, errNotRealDir)
+		}
+	}
+	return nil
+}
+
 // deniedAgyTools are the tool calls the analyzer must never make.
 //
 // agy is an agent: mid-analysis it decides to run shell commands. In
@@ -307,7 +424,7 @@ func copyTree(src, dst string) ([]string, error) {
 //
 // Streamed rather than read whole: this tree is 16.6 MB across 43 files on
 // the target host and 16.3 MB of that is a single bundled browser helper,
-// inside a container capped at mem_limit 512m. Nothing here needs the file
+// inside a container capped at mem_limit 1g. Nothing here needs the file
 // in memory, so nothing here holds it.
 func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {

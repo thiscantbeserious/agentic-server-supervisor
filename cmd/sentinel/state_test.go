@@ -186,8 +186,8 @@ func TestHealthCLI(t *testing.T) {
 		t.Fatalf("health right after a Process call: exit %d, want 0, stderr=%s", code, stderr)
 	}
 
-	// Backdate the heartbeat file far enough that even a generous default
-	// TICK_INTERVAL (300s -> 900s threshold) reads as stale.
+	// Backdate the heartbeat file past the default health window
+	// (state.HealthWindow, 2120s at the defaults) so it reads as stale.
 	hbPath := filepath.Join(stateDir, "heartbeat")
 	past := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(hbPath, past, past); err != nil {
